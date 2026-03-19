@@ -143,5 +143,5 @@ await supervisor.stop_all()                           # 전체 graceful shutdown
 ## 7. 관련 문서
 
 - [MONITORING.md](MONITORING.md) — HealthChecker (TaskSupervisor 헬스 데이터 소비자)
-- [TREND_FOLLOWING.md](../../trader-common/system-design/TREND_FOLLOWING.md) — 추세추종 전략
-- [BOX_MEAN_REVERSION.md](../../trader-common/system-design/BOX_MEAN_REVERSION.md) — 박스권 전략
+- [TREND_FOLLOWING.md](TREND_FOLLOWING.md) — 추세추종 전략
+- [BOX_MEAN_REVERSION.md](BOX_MEAN_REVERSION.md) — 박스권 전략

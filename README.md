@@ -6,7 +6,7 @@
 
 - **Hexagonal Architecture**: core(도메인) → adapters(외부) → api(프레젠테이션)
 - **배포**: 동일 이미지, `EXCHANGE` 환경변수로 거래소 선택
-- **설계 문서**: [`SYSTEM_REDESIGN.md`](../trader-common/solution-design/SYSTEM_REDESIGN.md)
+- **설계 문서**: [`SYSTEM_REDESIGN.md`](../trader-common/solution-design/archive/SYSTEM_REDESIGN.md)
 
 ## 구조
 

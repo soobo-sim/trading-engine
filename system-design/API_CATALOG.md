@@ -1,6 +1,6 @@
 # Trading Engine — API Catalog
 
-> 최종 업데이트: 2026-03-17 (Phase 2 완료 + BUG-007 분석 라우트 추가)
+> 최종 업데이트: 2026-03-19 (모니터링 리포트 API 추가)
 > 단일 코드베이스, `EXCHANGE` 환경변수로 CK(port 8000)/BF(port 8001) 분기
 
 ---
@@ -34,6 +34,7 @@
 | 23 | GET | `/api/analysis/trade-stats` | Analysis | 기간별 거래 통계 (승률, 기대값) |
 | 24 | GET | `/api/analysis/regime` | Analysis | 시장 체제 판단 (횡보/추세) |
 | 25 | GET | `/api/analysis/trend-signal` | Analysis | 추세추종 진입/청산 시그널 |
+| 26 | GET | `/api/monitoring/report` | Monitoring | 사만다 15분 보고용 리포트 |
 
 ---
 
@@ -305,6 +306,44 @@ proposed → rejected.
 추세추종 진입/청산 시그널 종합 판단.
 
 **쿼리 파라미터**: `pair` (필수), `timeframe` (1h|4h), `ema_period`, `atr_period`, `rsi_entry_low`, `rsi_entry_high`, `entry_price`
+
+---
+
+### 7. Monitoring
+
+#### `GET /api/monitoring/report`
+
+사만다 15분 보고용 — 서버가 시그널 계산 → 조건 판단 → telegram_text + memory_block 조립.
+사만다는 이 응답의 `report.telegram_text`를 그대로 출력하면 된다.
+
+**설계**: `solution-design/archive/MONITORING_REPORT_API.md`
+
+**쿼리 파라미터**: `pair` (필수)
+
+**응답**: `200`
+```json
+{
+    "success": true,
+    "generated_at": "2026-03-19T21:01:00+09:00",
+    "report": {
+        "telegram_text": "[CK] 21:01 | xrp_jpy 📉추세추종\n...",
+        "memory_block": "## [21:01 JST] 🟢CK: xrp_jpy | ...\n..."
+    },
+    "raw": {
+        "pair": "xrp_jpy",
+        "trading_style": "trend_following",
+        "current_price": 232.49,
+        "signal": "exit_warning",
+        "ema_slope_pct": -0.1358,
+        "rsi14": 31.5,
+        "position": null,
+        "entry_conditions_met": false,
+        "entry_blockers": ["EMA slope -0.14% → 양수 전환 필요", "..."]
+    }
+}
+```
+
+**에러 응답**: `404` (해당 pair 활성 전략 없음), `400` (미지원 trading_style), `503` (캔들 부족)
 
 ---
 
