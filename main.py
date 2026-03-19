@@ -11,12 +11,59 @@ lifespan에서 전체 의존성 조립 + 활성 전략 자동 기동.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import logging.config
 import os
+import sys
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
+
+# ── 구조화된 로깅 ────────────────────────────────────────────
+
+class JSONFormatter(logging.Formatter):
+    """JSON 구조화 로그 포맷터."""
+
+    def __init__(self, exchange: str = "unknown"):
+        super().__init__()
+        self.exchange = exchange
+
+    def format(self, record: logging.LogRecord) -> str:
+        log_entry = {
+            "ts": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+            "exchange": self.exchange,
+        }
+        if record.exc_info and record.exc_info[0] is not None:
+            log_entry["exception"] = self.formatException(record.exc_info)
+        # 구조화 필드: logger.info("msg", extra={"pair": "xrp_jpy"}) 등
+        for key in ("pair", "strategy_id", "event", "order_id", "action"):
+            val = getattr(record, key, None)
+            if val is not None:
+                log_entry[key] = val
+        return json.dumps(log_entry, ensure_ascii=False)
+
+
+def setup_logging(exchange: str) -> None:
+    """전역 로깅 초기화. EXCHANGE 이름을 모든 로그에 포함."""
+    level = os.environ.get("LOG_LEVEL", "INFO").upper()
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(JSONFormatter(exchange=exchange))
+
+    root = logging.getLogger()
+    root.setLevel(level)
+    # 기존 핸들러 제거 (uvicorn 기본 핸들러 중복 방지)
+    root.handlers.clear()
+    root.addHandler(handler)
+
+    # uvicorn 과도한 access 로그 억제
+    logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 
 from adapters.database.models import (
     StrategyTechnique,
@@ -103,6 +150,9 @@ async def lifespan(app: FastAPI):
     exchange = os.environ.get("EXCHANGE", "coincheck").lower()
     if exchange not in _EXCHANGE_CONFIG:
         raise ValueError(f"Unknown EXCHANGE: {exchange}. 'coincheck' 또는 'bitflyer'만 가능.")
+
+    # 로깅 초기화 (exchange 이름 포함)
+    setup_logging(exchange)
 
     cfg = _EXCHANGE_CONFIG[exchange]
     prefix = cfg["prefix"]
