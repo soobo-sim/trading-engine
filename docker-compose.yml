@@ -1,0 +1,88 @@
+services:
+  # Coincheck 트레이더 (trading-engine, EXCHANGE=coincheck)
+  coincheck-trader:
+    build:
+      context: ..
+      dockerfile: trading-engine/Dockerfile
+      target: production
+    container_name: coincheck-trader
+    ports:
+      - "8000:8000"
+    environment:
+      - EXCHANGE=coincheck
+      - PORT=8000
+      - LOG_LEVEL=info
+      - TZ=Asia/Tokyo
+      - DATABASE_URL=postgresql+asyncpg://trader:trader_password_123@trader-postgres:5432/trader_db
+    env_file:
+      - .env
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--log-level", "info"]
+    volumes:
+      - ./logs/coincheck:/app/logs
+      - ./core:/app/core
+      - ./adapters:/app/adapters
+      - ./api:/app/api
+      - ./main.py:/app/main.py
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - trader-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # BitFlyer 트레이더 (trading-engine, EXCHANGE=bitflyer)
+  bitflyer-trader:
+    build:
+      context: ..
+      dockerfile: trading-engine/Dockerfile
+      target: production
+    container_name: bitflyer-trader
+    ports:
+      - "8001:8001"
+    environment:
+      - EXCHANGE=bitflyer
+      - PORT=8001
+      - LOG_LEVEL=info
+      - TZ=Asia/Tokyo
+      - DATABASE_URL=postgresql+asyncpg://trader:trader_password_123@trader-postgres:5432/trader_db
+    env_file:
+      - .env
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8001", "--log-level", "info"]
+    volumes:
+      - ./logs/bitflyer:/app/logs
+      - ./core:/app/core
+      - ./adapters:/app/adapters
+      - ./api:/app/api
+      - ./main.py:/app/main.py
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - trader-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# PostgreSQL + trader-network는 coinmarket-data/docker-compose.yml에서 관리.
+# 기동 순서: coinmarket-data → trading-engine
+# cd coinmarket-data  && docker-compose up -d
+# cd trading-engine   && docker-compose up -d
+
+networks:
+  trader-network:
+    external: true
+    name: trader-network

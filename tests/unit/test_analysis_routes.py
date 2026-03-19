@@ -1,0 +1,356 @@
+"""
+Analysis 라우트 테스트 — trade-stats + box-history에서 box + trend 포지션 통합 조회.
+
+BUG-007: trade-stats와 box-history가 trend_positions 무시하던 버그의 수정 검증.
+"""
+from __future__ import annotations
+
+from datetime import datetime, timezone, timedelta
+from decimal import Decimal
+
+import pytest
+import pytest_asyncio
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+from adapters.database.models import (
+    StrategyTechnique,
+    create_balance_entry_model,
+    create_box_model,
+    create_box_position_model,
+    create_candle_model,
+    create_insight_model,
+    create_strategy_model,
+    create_summary_model,
+    create_trade_model,
+    create_trend_position_model,
+)
+from adapters.database.session import Base
+from api.dependencies import AppState, ModelRegistry
+from api.routes import analysis, system
+from core.monitoring.health import HealthChecker
+from core.strategy.box_mean_reversion import BoxMeanReversionManager
+from core.strategy.trend_following import TrendFollowingManager
+from core.task.supervisor import TaskSupervisor
+from tests.fake_exchange import FakeExchangeAdapter
+
+# ── ORM 모델 (anl_ prefix) ───────────────────────
+
+AnlStrategy = create_strategy_model("anl")
+AnlTrade = create_trade_model("anl", order_id_length=40)
+AnlBalanceEntry = create_balance_entry_model("anl")
+AnlInsight = create_insight_model("anl")
+AnlSummary = create_summary_model("anl")
+AnlCandle = create_candle_model("anl", pair_column="pair")
+AnlBox = create_box_model("anl", pair_column="pair")
+AnlBoxPosition = create_box_position_model("anl", pair_column="pair", order_id_length=40)
+AnlTrendPosition = create_trend_position_model("anl", order_id_length=40)
+
+
+def _create_models() -> ModelRegistry:
+    return ModelRegistry(
+        strategy=AnlStrategy,
+        trade=AnlTrade,
+        balance_entry=AnlBalanceEntry,
+        insight=AnlInsight,
+        summary=AnlSummary,
+        candle=AnlCandle,
+        box=AnlBox,
+        box_position=AnlBoxPosition,
+        trend_position=AnlTrendPosition,
+        technique=StrategyTechnique,
+    )
+
+
+@pytest_asyncio.fixture
+async def setup():
+    """DB + AppState + AsyncClient 통째로 제공."""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    target_tables = [
+        t for t in Base.metadata.tables.values()
+        if t.name.startswith("anl_") or t.name == "strategy_techniques"
+    ]
+    async with engine.begin() as conn:
+        for table in target_tables:
+            await conn.run_sync(table.create)
+
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+    adapter = FakeExchangeAdapter(
+        initial_balances={"jpy": 1_000_000.0, "xrp": 0.0},
+        ticker_price=100.0,
+    )
+    await adapter.connect()
+
+    supervisor = TaskSupervisor()
+    models = _create_models()
+
+    trend_mgr = TrendFollowingManager(
+        adapter=adapter, supervisor=supervisor, session_factory=factory,
+        candle_model=AnlCandle, trend_position_model=AnlTrendPosition, pair_column="pair",
+    )
+    box_mgr = BoxMeanReversionManager(
+        adapter=adapter, supervisor=supervisor, session_factory=factory,
+        candle_model=AnlCandle, box_model=AnlBox, box_position_model=AnlBoxPosition, pair_column="pair",
+    )
+    health = HealthChecker(
+        adapter=adapter, supervisor=supervisor, session_factory=factory,
+        strategy_model=AnlStrategy, trend_position_model=AnlTrendPosition,
+        box_position_model=AnlBoxPosition, pair_column="pair",
+    )
+    state = AppState(
+        adapter=adapter, supervisor=supervisor, session_factory=factory,
+        trend_manager=trend_mgr, box_manager=box_mgr, health_checker=health,
+        models=models, prefix="anl", pair_column="pair",
+    )
+
+    from fastapi import FastAPI
+    app = FastAPI()
+    app.state.app_state = state
+    app.include_router(analysis.router)
+
+    transport = ASGITransport(app=app)
+    client = AsyncClient(transport=transport, base_url="http://test")
+
+    yield client, factory
+
+    await client.aclose()
+    await supervisor.stop_all()
+    await adapter.close()
+    await engine.dispose()
+
+
+async def _seed_positions(factory: async_sessionmaker):
+    """박스 1개 + 박스포지션 2개(1승1패) + 추세포지션 2개(2승) 시드."""
+    now = datetime.now(timezone.utc)
+    async with factory() as db:
+        # 박스
+        box = AnlBox(
+            pair="xrp_jpy",
+            upper_bound=Decimal("110"),
+            lower_bound=Decimal("90"),
+            upper_touch_count=3,
+            lower_touch_count=3,
+            tolerance_pct=Decimal("2.0"),
+            status="active",
+            created_at=now - timedelta(days=10),
+        )
+        db.add(box)
+        await db.flush()
+
+        # 박스 포지션 — 승
+        bp_win = AnlBoxPosition(
+            pair="xrp_jpy",
+            box_id=box.id,
+            side="buy",
+            entry_order_id="box-entry-1",
+            entry_price=Decimal("91"),
+            entry_amount=Decimal("100"),
+            entry_jpy=Decimal("9100"),
+            exit_order_id="box-exit-1",
+            exit_price=Decimal("109"),
+            exit_amount=Decimal("100"),
+            exit_jpy=Decimal("10900"),
+            exit_reason="near_upper_exit",
+            realized_pnl_jpy=Decimal("1800"),
+            realized_pnl_pct=Decimal("19.78"),
+            status="closed",
+            created_at=now - timedelta(days=8),
+            closed_at=now - timedelta(days=7),
+        )
+        # 박스 포지션 — 패
+        bp_loss = AnlBoxPosition(
+            pair="xrp_jpy",
+            box_id=box.id,
+            side="buy",
+            entry_order_id="box-entry-2",
+            entry_price=Decimal("91"),
+            entry_amount=Decimal("100"),
+            entry_jpy=Decimal("9100"),
+            exit_order_id="box-exit-2",
+            exit_price=Decimal("88"),
+            exit_amount=Decimal("100"),
+            exit_jpy=Decimal("8800"),
+            exit_reason="stop_loss",
+            realized_pnl_jpy=Decimal("-300"),
+            realized_pnl_pct=Decimal("-3.30"),
+            status="closed",
+            created_at=now - timedelta(days=6),
+            closed_at=now - timedelta(days=5),
+        )
+        db.add_all([bp_win, bp_loss])
+
+        # 추세 포지션 — 승1
+        tp1 = AnlTrendPosition(
+            pair="xrp_jpy",
+            strategy_id=None,
+            entry_order_id="trend-entry-1",
+            entry_price=Decimal("95"),
+            entry_amount=Decimal("200"),
+            entry_jpy=Decimal("19000"),
+            stop_loss_price=Decimal("90"),
+            exit_order_id="trend-exit-1",
+            exit_price=Decimal("120"),
+            exit_amount=Decimal("200"),
+            exit_jpy=Decimal("24000"),
+            exit_reason="trailing_stop",
+            realized_pnl_jpy=Decimal("5000"),
+            realized_pnl_pct=Decimal("26.32"),
+            status="closed",
+            created_at=now - timedelta(days=4),
+            closed_at=now - timedelta(days=3),
+        )
+        # 추세 포지션 — 승2
+        tp2 = AnlTrendPosition(
+            pair="xrp_jpy",
+            strategy_id=None,
+            entry_order_id="trend-entry-2",
+            entry_price=Decimal("100"),
+            entry_amount=Decimal("150"),
+            entry_jpy=Decimal("15000"),
+            stop_loss_price=Decimal("95"),
+            exit_order_id="trend-exit-2",
+            exit_price=Decimal("115"),
+            exit_amount=Decimal("150"),
+            exit_jpy=Decimal("17250"),
+            exit_reason="ema_breakdown",
+            realized_pnl_jpy=Decimal("2250"),
+            realized_pnl_pct=Decimal("15.00"),
+            status="closed",
+            created_at=now - timedelta(days=2),
+            closed_at=now - timedelta(days=1),
+        )
+        db.add_all([tp1, tp2])
+        await db.commit()
+
+
+class TestTradeStats:
+    """trade-stats 엔드포인트: 박스 + 추세 통합 검증."""
+
+    @pytest.mark.asyncio
+    async def test_empty_returns_zero(self, setup):
+        client, _ = setup
+        resp = await client.get("/api/analysis/trade-stats?pair=xrp_jpy&period=all")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["stats"]["total_trades"] == 0
+        assert data["stats"]["by_strategy"] == {}
+
+    @pytest.mark.asyncio
+    async def test_combined_stats(self, setup):
+        """박스 2개(1승1패) + 추세 2개(2승) → 합계 4거래, 3승, 1패."""
+        client, factory = setup
+        await _seed_positions(factory)
+
+        resp = await client.get("/api/analysis/trade-stats?pair=xrp_jpy&period=all")
+        assert resp.status_code == 200
+        stats = resp.json()["stats"]
+
+        assert stats["total_trades"] == 4
+        assert stats["wins"] == 3
+        assert stats["losses"] == 1
+        assert stats["win_rate"] == 75.0
+
+        # by_strategy
+        assert "box_mean_reversion" in stats["by_strategy"]
+        assert "trend_following" in stats["by_strategy"]
+
+        box_stats = stats["by_strategy"]["box_mean_reversion"]
+        assert box_stats["trades"] == 2
+        assert box_stats["wins"] == 1
+        assert box_stats["losses"] == 1
+
+        trend_stats = stats["by_strategy"]["trend_following"]
+        assert trend_stats["trades"] == 2
+        assert trend_stats["wins"] == 2
+        assert trend_stats["losses"] == 0
+
+    @pytest.mark.asyncio
+    async def test_total_pnl_includes_trend(self, setup):
+        """total_pnl_jpy가 박스+추세 모두 반영."""
+        client, factory = setup
+        await _seed_positions(factory)
+
+        resp = await client.get("/api/analysis/trade-stats?pair=xrp_jpy&period=all")
+        stats = resp.json()["stats"]
+        # box: 1800 + (-300) = 1500, trend: 5000 + 2250 = 7250 → total = 8750
+        assert stats["total_pnl_jpy"] == 8750.0
+
+    @pytest.mark.asyncio
+    async def test_exit_reason_distribution(self, setup):
+        """청산 사유 분포에 trend 관련 사유 포함."""
+        client, factory = setup
+        await _seed_positions(factory)
+
+        resp = await client.get("/api/analysis/trade-stats?pair=xrp_jpy&period=all")
+        reasons = resp.json()["stats"]["exit_reason_distribution"]
+        assert "trailing_stop" in reasons
+        assert "ema_breakdown" in reasons
+        assert "near_upper_exit" in reasons
+        assert "stop_loss" in reasons
+
+
+class TestBoxHistory:
+    """box-history 엔드포인트: 추세추종 별도 집계 검증."""
+
+    @pytest.mark.asyncio
+    async def test_empty(self, setup):
+        client, _ = setup
+        resp = await client.get("/api/analysis/box-history?pair=xrp_jpy&days=30")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["boxes"] == []
+        assert data["summary"]["total_positions"] == 0
+
+    @pytest.mark.asyncio
+    async def test_trend_positions_section(self, setup):
+        """trend_positions 섹션이 박스와 별도로 존재."""
+        client, factory = setup
+        await _seed_positions(factory)
+
+        resp = await client.get("/api/analysis/box-history?pair=xrp_jpy&days=30")
+        data = resp.json()
+
+        assert "trend_positions" in data
+        tp = data["trend_positions"]
+        assert tp["total"] == 2
+        assert tp["wins"] == 2
+        assert tp["losses"] == 0
+        assert tp["total_pnl_jpy"] == 7250.0
+
+    @pytest.mark.asyncio
+    async def test_summary_combined(self, setup):
+        """summary가 박스+추세 합산."""
+        client, factory = setup
+        await _seed_positions(factory)
+
+        resp = await client.get("/api/analysis/box-history?pair=xrp_jpy&days=30")
+        summary = resp.json()["summary"]
+
+        # 박스포지션 2 + 추세포지션 2 = 4
+        assert summary["closed_positions"] == 4
+        assert summary["wins"] == 3
+        assert summary["losses"] == 1
+        # box pnl 1500 + trend pnl 7250 = 8750
+        assert summary["total_pnl_jpy"] == 8750.0
+
+    @pytest.mark.asyncio
+    async def test_trend_exit_reasons_prefixed(self, setup):
+        """summary exit_reason_distribution에서 trend 사유는 trend: 접두사."""
+        client, factory = setup
+        await _seed_positions(factory)
+
+        resp = await client.get("/api/analysis/box-history?pair=xrp_jpy&days=30")
+        reasons = resp.json()["summary"]["exit_reason_distribution"]
+        assert "trend:trailing_stop" in reasons
+        assert "trend:ema_breakdown" in reasons
+
+
+class TestInvalidPeriod:
+    """잘못된 period 파라미터."""
+
+    @pytest.mark.asyncio
+    async def test_invalid_period_400(self, setup):
+        client, _ = setup
+        resp = await client.get("/api/analysis/trade-stats?pair=xrp_jpy&period=yearly")
+        assert resp.status_code == 400
