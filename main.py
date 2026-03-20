@@ -71,6 +71,7 @@ from adapters.database.models import (
     create_box_model,
     create_box_position_model,
     create_candle_model,
+    create_cfd_position_model,
     create_insight_model,
     create_strategy_model,
     create_summary_model,
@@ -79,9 +80,10 @@ from adapters.database.models import (
 )
 from adapters.database.session import create_db_engine, create_session_factory
 from api.dependencies import AppState, ModelRegistry
-from api.routes import system, trading, account, strategies, boxes, candles, techniques, analysis, monitoring
+from api.routes import system, trading, account, strategies, boxes, candles, techniques, analysis, monitoring, cfd
 from core.monitoring.health import HealthChecker
 from core.strategy.box_mean_reversion import BoxMeanReversionManager
+from core.strategy.cfd_trend_following import CfdTrendFollowingManager
 from core.strategy.trend_following import TrendFollowingManager
 from core.task.supervisor import TaskSupervisor
 
@@ -138,6 +140,7 @@ def _create_models(prefix: str, pair_column: str, order_id_length: int) -> Model
         box=create_box_model(prefix, pair_column=pair_column),
         box_position=create_box_position_model(prefix, pair_column=pair_column, order_id_length=order_id_length),
         trend_position=create_trend_position_model(prefix, order_id_length=order_id_length),
+        cfd_position=create_cfd_position_model(prefix, pair_column=pair_column, order_id_length=order_id_length),
         technique=StrategyTechnique,
     )
 
@@ -196,6 +199,14 @@ async def lifespan(app: FastAPI):
         box_position_model=models.box_position,
         pair_column=pair_column,
     )
+    cfd_manager = CfdTrendFollowingManager(
+        adapter=adapter,
+        supervisor=supervisor,
+        session_factory=session_factory,
+        candle_model=models.candle,
+        cfd_position_model=models.cfd_position,
+        pair_column=pair_column,
+    )
 
     # 6. Health Checker
     health_checker = HealthChecker(
@@ -215,6 +226,7 @@ async def lifespan(app: FastAPI):
         session_factory=session_factory,
         trend_manager=trend_manager,
         box_manager=box_manager,
+        cfd_manager=cfd_manager,
         health_checker=health_checker,
         models=models,
         prefix=prefix,
@@ -244,6 +256,9 @@ async def lifespan(app: FastAPI):
             elif style == "trend_following":
                 await trend_manager.start(pair, {**params, "strategy_id": strategy.id})
                 logger.info(f"TrendFollowingManager 기동: pair={pair}")
+            elif style == "cfd_trend_following":
+                await cfd_manager.start(pair, {**params, "strategy_id": strategy.id})
+                logger.info(f"CfdTrendFollowingManager 기동: pair={pair}")
     except Exception as e:
         logger.warning(f"활성 전략 자동 기동 실패 (DB 없으면 정상): {e}")
 
@@ -283,3 +298,4 @@ app.include_router(candles.router)
 app.include_router(techniques.router)
 app.include_router(analysis.router)
 app.include_router(monitoring.router)
+app.include_router(cfd.router)

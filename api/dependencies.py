@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from core.exchange.base import ExchangeAdapter
 from core.monitoring.health import HealthChecker
 from core.strategy.box_mean_reversion import BoxMeanReversionManager
+from core.strategy.cfd_trend_following import CfdTrendFollowingManager
 from core.strategy.trend_following import TrendFollowingManager
 from core.task.supervisor import TaskSupervisor
 
@@ -32,6 +33,7 @@ class ModelRegistry:
     box_position: Type
     trend_position: Type
     technique: Type  # StrategyTechnique (공유)
+    cfd_position: Type | None = None  # BF CFD 전용
 
 
 @dataclass
@@ -46,6 +48,7 @@ class AppState:
     models: ModelRegistry
     prefix: str           # "ck" or "bf"
     pair_column: str       # "pair" or "product_code"
+    cfd_manager: CfdTrendFollowingManager | None = None  # BF CFD 전용
 
 
 def get_state(request: Request) -> AppState:

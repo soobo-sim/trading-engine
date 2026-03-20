@@ -35,6 +35,8 @@
 | 24 | GET | `/api/analysis/regime` | Analysis | 시장 체제 판단 (횡보/추세) |
 | 25 | GET | `/api/analysis/trend-signal` | Analysis | 추세추종 진입/청산 시그널 |
 | 26 | GET | `/api/monitoring/report` | Monitoring | 사만다 15분 보고용 리포트 |
+| 27 | GET | `/api/cfd/status` | CFD | CFD 실시간 상태 (포지션 + keep_rate) |
+| 28 | GET | `/api/cfd/positions` | CFD | CFD 포지션 이력 |
 
 ---
 
@@ -365,3 +367,29 @@ proposed → rejected.
 
 - [MONITORING.md](MONITORING.md) — `GET /api/system/health` 상세
 - [TASK_SUPERVISOR.md](TASK_SUPERVISOR.md) — 태스크 관리
+
+---
+
+### 8. CFD
+
+#### `GET /api/cfd/status`
+
+CFD 실시간 상태 — 인메모리 포지션 + BitFlyer 증거금/keep_rate.
+
+**Query**: `product_code` (default: `FX_BTC_JPY`)
+
+```json
+{
+  "product_code": "FX_BTC_JPY",
+  "is_running": true,
+  "position": { "side": "buy", "entry_price": 15000000, "entry_amount": 0.01, "stop_loss_price": 14000000 },
+  "collateral": { "collateral": 1000000, "open_position_pnl": 5000, "require_collateral": 75000, "keep_rate": 1333.3 },
+  "task_health": {}
+}
+```
+
+#### `GET /api/cfd/positions`
+
+CFD 포지션 이력 (DB).
+
+**Query**: `product_code` (default: `FX_BTC_JPY`), `status` (open/closed), `limit` (1-100, default: 20)

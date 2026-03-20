@@ -241,3 +241,151 @@ class TestDetectBearishDivergences:
             [], [], {"divergence_enabled": False, "volume_divergence_enabled": False},
         )
         assert result["volume_divergence"] is False
+
+
+# ── Short Entry Signal ──────────────────
+
+class TestShortEntrySignal:
+    """숏 진입 시그널 (entry_sell) 검증."""
+
+    def test_downtrend_entry_sell(self):
+        """하락 추세 + slope < threshold + RSI 범위 → entry_sell."""
+        candles = _make_downtrend_candles(30, start=200.0, step=2.0)
+        params = {"ema_slope_short_threshold": -0.01}
+        result = compute_trend_signal(candles, params=params)
+        # 강한 하락 추세에서 entry_sell 또는 exit_warning
+        assert result["signal"] in ("entry_sell", "exit_warning")
+        assert result["ema_slope_pct"] is not None
+        assert result["ema_slope_pct"] < 0
+
+    def test_weak_downtrend_no_entry_sell(self):
+        """약한 하락 → slope가 threshold 미달 → entry_sell 아님."""
+        # 거의 수평에 가까운 캔들 (미세 하락)
+        candles = _make_downtrend_candles(30, start=200.0, step=0.01)
+        params = {"ema_slope_short_threshold": -0.05}
+        result = compute_trend_signal(candles, params=params)
+        assert result["signal"] != "entry_sell"
+
+    def test_uptrend_never_entry_sell(self):
+        """상승 추세에서는 entry_sell 불가."""
+        candles = _make_uptrend_candles(30)
+        result = compute_trend_signal(candles)
+        assert result["signal"] != "entry_sell"
+
+    def test_entry_sell_rsi_out_of_range(self):
+        """RSI 범위 벗어나면 entry_sell 아님 (exit_warning)."""
+        # 극단적 하락 → RSI 매우 낮음 → rsi_in_short_range 미달
+        candles = _make_downtrend_candles(30, start=300.0, step=10.0)
+        params = {"ema_slope_short_threshold": -0.01, "entry_rsi_min_short": 35.0, "entry_rsi_max_short": 60.0}
+        result = compute_trend_signal(candles, params=params)
+        if result["rsi"] is not None and result["rsi"] < 35.0:
+            assert result["signal"] != "entry_sell"
+
+
+# ── Short Exit Signal ───────────────────
+
+class TestShortExitSignal:
+    """숏 포지션 청산 시그널 검증."""
+
+    def test_short_full_exit_on_positive_slope(self):
+        """숏 보유 중 EMA 기울기 양전환 → full_exit."""
+        result = compute_exit_signal(
+            ema_slope_pct=0.5,
+            rsi=50.0,
+            atr=1000.0,
+            current_price=15_000_000.0,
+            entry_price=15_500_000.0,
+            params={},
+            side="sell",
+        )
+        assert result["action"] == "full_exit"
+        assert result["triggers"]["ema_slope_negative"] is True
+
+    def test_short_full_exit_on_rsi_overbought(self):
+        """숏 보유 중 RSI 극단 과매수 → full_exit (매수 압력)."""
+        result = compute_exit_signal(
+            ema_slope_pct=-0.3,
+            rsi=85.0,
+            atr=1000.0,
+            current_price=15_000_000.0,
+            entry_price=15_500_000.0,
+            params={"rsi_extreme": 80},
+            side="sell",
+        )
+        assert result["action"] == "full_exit"
+        assert result["triggers"]["rsi_breakdown"] is True
+
+    def test_short_hold_when_trend_continues(self):
+        """숏 보유 중 하락 추세 지속 → hold."""
+        result = compute_exit_signal(
+            ema_slope_pct=-0.5,
+            rsi=45.0,
+            atr=1_000_000.0,
+            current_price=14_900_000.0,
+            entry_price=15_000_000.0,
+            params={},
+            side="sell",
+        )
+        assert result["action"] == "hold"
+
+    def test_short_profit_target(self):
+        """숏 이익목표 달성 → tighten_stop."""
+        result = compute_exit_signal(
+            ema_slope_pct=-0.3,
+            rsi=45.0,
+            atr=200_000.0,
+            current_price=14_000_000.0,
+            entry_price=15_000_000.0,
+            params={"partial_exit_profit_atr": 2.0},
+            side="sell",
+        )
+        # (entry - current) = 1M > atr(200K) * 2 = 400K → profit target hit
+        assert result["action"] == "tighten_stop"
+        assert result["triggers"]["profit_target_hit"] is True
+
+    def test_short_adjusted_trailing_stop_above_price(self):
+        """숏 스탑은 가격 위에 설정."""
+        result = compute_exit_signal(
+            ema_slope_pct=-0.3,
+            rsi=45.0,
+            atr=100_000.0,
+            current_price=15_000_000.0,
+            entry_price=15_500_000.0,
+            params={"tighten_stop_atr": 1.0},
+            side="sell",
+        )
+        # 숏: stop = price + atr * mult = 15_000_000 + 100_000 = 15_100_000
+        assert result["adjusted_trailing_stop"] > 15_000_000.0
+
+    def test_long_adjusted_trailing_stop_below_price(self):
+        """롱 스탑은 가격 아래에 설정 (기존 동작 유지)."""
+        result = compute_exit_signal(
+            ema_slope_pct=0.3,
+            rsi=55.0,
+            atr=100_000.0,
+            current_price=15_000_000.0,
+            entry_price=14_500_000.0,
+            params={"tighten_stop_atr": 1.0},
+            side="buy",
+        )
+        assert result["adjusted_trailing_stop"] < 15_000_000.0
+
+
+# ── Short Stop Loss in Trend Signal ─────
+
+class TestShortStopLoss:
+    """compute_trend_signal에서 side=sell 시 stop_loss_price 방향 검증."""
+
+    def test_short_stop_above_price(self):
+        """숏 스탑로스는 현재가 위에."""
+        candles = _make_downtrend_candles(30, start=200.0, step=2.0)
+        result = compute_trend_signal(candles, side="sell")
+        if result["stop_loss_price"] is not None:
+            assert result["stop_loss_price"] > result["current_price"]
+
+    def test_long_stop_below_price(self):
+        """롱 스탑로스는 현재가 아래 (기존 동작)."""
+        candles = _make_uptrend_candles(30)
+        result = compute_trend_signal(candles, side="buy")
+        if result["stop_loss_price"] is not None:
+            assert result["stop_loss_price"] < result["current_price"]

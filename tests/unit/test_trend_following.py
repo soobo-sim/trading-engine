@@ -458,6 +458,42 @@ class TestClosePosition:
             assert rec.realized_pnl_jpy is not None
             assert float(rec.realized_pnl_jpy) > 0  # 100→120, 이익
 
+    @pytest.mark.asyncio
+    async def test_close_dust_logged_after_sell(self, manager, fake_adapter, db_session_factory, caplog):
+        """BUG-009: 청산 후 dust 잔고 감지 → 로그 기록."""
+        # 소량 잔고 설정 (0.005 XRP, fee 차감 후 dust 남음)
+        fake_adapter.set_balance("xrp", 0.005)
+
+        async with db_session_factory() as db:
+            rec = TstTrendPosition(
+                pair="xrp_jpy", entry_order_id="TEST-009",
+                entry_price=100.0, entry_amount=0.005, status="open",
+            )
+            db.add(rec)
+            await db.commit()
+            await db.refresh(rec)
+            db_id = rec.id
+
+        pos = Position(
+            pair="xrp_jpy", entry_price=100.0, entry_amount=0.005,
+            db_record_id=db_id,
+        )
+        manager._position["xrp_jpy"] = pos
+        manager._params["xrp_jpy"] = {
+            "min_coin_size": 0.001,
+            "trading_fee_rate": 0.002,
+        }
+
+        import logging
+        with caplog.at_level(logging.INFO):
+            await manager._close_position("xrp_jpy", "stop_loss")
+
+        assert manager._position.get("xrp_jpy") is None
+        # dust 로그가 기록되었는지 확인
+        dust_logs = [r for r in caplog.records if "dust 잔고 감지" in r.message]
+        assert len(dust_logs) == 1
+        assert "매도 불가 수량" in dust_logs[0].message
+
 
 # ──────────────────────────────────────────────
 # 스탑 타이트닝 테스트

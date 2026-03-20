@@ -102,6 +102,7 @@ def test_all_factories_return_classes_for_ck() -> None:
     assert "pair" in CkCandle.__table__.columns
     assert "pair" in CkBox.__table__.columns
     assert "pair" in CkBoxPos.__table__.columns
+    assert "pair" in CkTrendPos.__table__.columns
 
 
 def test_all_factories_return_classes_for_bf() -> None:
@@ -127,3 +128,4 @@ def test_all_factories_return_classes_for_bf() -> None:
     assert "product_code" in BfCandle.__table__.columns
     assert "product_code" in BfBox.__table__.columns
     assert "product_code" in BfBoxPos.__table__.columns
+    assert "pair" in BfTrendPos.__table__.columns  # BUG-011: trend_position은 항상 pair

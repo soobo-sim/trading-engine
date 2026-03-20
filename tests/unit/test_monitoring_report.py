@@ -9,6 +9,8 @@ from datetime import datetime, timezone, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 from types import SimpleNamespace
 
+import httpx
+
 from api.services.monitoring_report import (
     get_trend_icon,
     get_rsi_state,
@@ -19,6 +21,19 @@ from api.services.monitoring_report import (
     get_entry_blockers,
     build_telegram_text,
     build_memory_block,
+    build_bar_chart,
+    build_health_line,
+    get_box_position_label,
+    build_box_telegram_text,
+    build_box_memory_block,
+    evaluate_alert,
+    _is_regime_shift,
+    build_alert_text,
+    _build_test_alert,
+    _prev_raw_cache,
+    _trigger_rachel_analysis,
+    _last_alert_time,
+    ALERT_COOLDOWN_SEC,
 )
 
 
@@ -295,3 +310,791 @@ class TestBuildMemoryBlock:
         assert "보유" in block
         assert "손절" in block
         assert "미실현" in block
+
+
+# ══════════════════════════════════════════════════════════════
+#  박스 전략 리포트 테스트
+# ══════════════════════════════════════════════════════════════
+
+
+class TestBuildBarChart:
+    def test_price_below_box(self):
+        assert build_bar_chart(30.0, 34.0, 36.0) == "●[━━━━━━━━━━]"
+
+    def test_price_above_box(self):
+        assert build_bar_chart(40.0, 34.0, 36.0) == "[━━━━━━━━━━]●"
+
+    def test_price_at_lower(self):
+        result = build_bar_chart(34.0, 34.0, 36.0)
+        assert result.startswith("[●")
+
+    def test_price_at_upper(self):
+        result = build_bar_chart(36.0, 34.0, 36.0)
+        assert result.endswith("●]")
+
+    def test_price_at_middle(self):
+        result = build_bar_chart(35.0, 34.0, 36.0)
+        assert "●" in result
+        assert result.startswith("[")
+        assert result.endswith("]")
+
+
+class TestBuildHealthLine:
+    def test_all_healthy(self):
+        report = SimpleNamespace(
+            healthy=True,
+            ws_connected=True,
+            tasks={
+                "box_monitor": {"alive": True, "restarts": 0},
+                "entry_monitor": {"alive": True, "restarts": 0},
+                "candle_monitor": {"alive": True, "restarts": 0},
+            },
+            position_balance=[],
+        )
+        result = build_health_line(report)
+        assert "🟢" in result
+        assert "WS✅" in result
+        assert "3/3✅" in result
+        assert "잔고✅" in result
+
+    def test_ws_disconnected(self):
+        report = SimpleNamespace(
+            healthy=False,
+            ws_connected=False,
+            tasks={"t1": {"alive": True, "restarts": 0}},
+            position_balance=[],
+        )
+        result = build_health_line(report)
+        assert "🚨" in result
+        assert "WS🔴" in result
+
+    def test_task_dead_with_restarts(self):
+        report = SimpleNamespace(
+            healthy=False,
+            ws_connected=True,
+            tasks={
+                "t1": {"alive": True, "restarts": 2},
+                "t2": {"alive": False, "restarts": 1},
+            },
+            position_balance=[],
+        )
+        result = build_health_line(report)
+        assert "1/2⚠️" in result
+        assert "재시작3" in result
+
+    def test_balance_issue(self):
+        report = SimpleNamespace(
+            healthy=True,
+            ws_connected=True,
+            tasks={"t1": {"alive": True, "restarts": 0}},
+            position_balance=[{"currency": "xrp", "expected": 100, "actual": 90}],
+        )
+        result = build_health_line(report)
+        assert "🚨" in result
+        assert "잔고⚠️" in result
+
+
+class TestGetBoxPositionLabel:
+    def test_near_lower(self):
+        assert get_box_position_label(34.15, 34.0, 36.0, 1.0) == "near_lower"
+
+    def test_near_upper(self):
+        assert get_box_position_label(35.85, 34.0, 36.0, 1.0) == "near_upper"
+
+    def test_middle(self):
+        assert get_box_position_label(35.0, 34.0, 36.0, 1.0) == "middle"
+
+    def test_outside(self):
+        assert get_box_position_label(40.0, 34.0, 36.0, 1.0) == "outside"
+
+
+class TestBuildBoxTelegramText:
+    def test_with_box_and_position(self):
+        data = {
+            "health_line": "🟢 WS✅ 태스크3/3✅ 잔고✅",
+            "current_price": 35.50,
+            "box": {
+                "id": 5,
+                "upper_bound": 35.60,
+                "lower_bound": 34.60,
+                "box_width_pct": 2.8,
+                "bar_chart": "[━━━━━●━━━━━]",
+            },
+            "position_label": "middle",
+            "position": {
+                "entry_price": 34.80,
+                "entry_amount": 100.0,
+                "unrealized_pnl_jpy": 70,
+                "unrealized_pnl_pct": 2.01,
+            },
+            "jpy_available": 5000,
+            "coin_available": 100.0,
+            "basis_timeframe": "4h",
+            "candle_open_time_jst": "20:00",
+        }
+        text = build_box_telegram_text("CK", "22:30", "xrp_jpy", data)
+        assert "[CK] 22:30" in text
+        assert "📦박스" in text
+        assert "🟢" in text
+        assert "middle" in text
+        assert "폭 2.8%" in text
+        assert "하단" in text
+        assert "상단" in text
+        assert "보유" in text
+        assert "미실현" in text
+
+    def test_no_box(self):
+        data = {
+            "health_line": "🟢 WS✅ 태스크2/2✅ 잔고✅",
+            "current_price": 35.50,
+            "box": None,
+            "position_label": "no_box",
+            "position": None,
+            "jpy_available": 5000,
+            "coin_available": 0.0,
+            "basis_timeframe": "4h",
+            "candle_open_time_jst": "20:00",
+        }
+        text = build_box_telegram_text("CK", "22:30", "xrp_jpy", data)
+        assert "📭박스 미형성" in text
+        assert "포지션 미보유" in text
+
+    def test_box_no_position(self):
+        data = {
+            "health_line": "🟢 WS✅ 태스크3/3✅ 잔고✅",
+            "current_price": 34.65,
+            "box": {
+                "id": 5,
+                "upper_bound": 35.60,
+                "lower_bound": 34.60,
+                "box_width_pct": 2.8,
+                "bar_chart": "[●━━━━━━━━━━]",
+            },
+            "position_label": "near_lower",
+            "position": None,
+            "jpy_available": 10000,
+            "coin_available": 0.0,
+            "basis_timeframe": "4h",
+            "candle_open_time_jst": "20:00",
+        }
+        text = build_box_telegram_text("CK", "22:30", "xrp_jpy", data)
+        assert "near_lower" in text
+        assert "포지션 미보유" in text
+
+
+class TestBuildBoxMemoryBlock:
+    def test_with_box_and_position(self):
+        data = {
+            "health_line": "🟢 WS✅ 태스크3/3✅ 잔고✅",
+            "current_price": 35.50,
+            "box": {
+                "id": 5,
+                "upper_bound": 35.60,
+                "lower_bound": 34.60,
+                "box_width_pct": 2.8,
+            },
+            "position_label": "middle",
+            "position": {
+                "entry_price": 34.80,
+                "entry_amount": 100.0,
+                "unrealized_pnl_jpy": 70,
+                "unrealized_pnl_pct": 2.01,
+            },
+            "jpy_available": 5000,
+            "coin_available": 100.0,
+            "strategy_name": "XRP 박스권 v1",
+            "strategy_id": 19,
+        }
+        block = build_box_memory_block("CK", "22:30", "xrp_jpy", data)
+        assert "CK" in block
+        assert "모니터링" in block
+        assert "XRP 박스권 v1" in block
+        assert "box_id: 5" in block
+        assert "보유" in block
+        assert "미실현" in block
+        assert "JPY" in block
+
+    def test_no_box(self):
+        data = {
+            "health_line": "🟢 WS✅ 태스크2/2✅ 잔고✅",
+            "current_price": 35.50,
+            "box": None,
+            "position_label": "no_box",
+            "position": None,
+            "jpy_available": 5000,
+            "coin_available": 0.0,
+            "strategy_name": "XRP 박스권 v1",
+            "strategy_id": 19,
+        }
+        block = build_box_memory_block("CK", "22:30", "xrp_jpy", data)
+        assert "박스 미형성" in block
+        assert "포지션 없음" in block
+
+
+# ══════════════════════════════════════════════════════════════
+#  Alert 평가 테스트
+# ══════════════════════════════════════════════════════════════
+
+
+class TestIsRegimeShift:
+    def test_bullish_to_bearish(self):
+        assert _is_regime_shift("entry_ok", "exit_warning") is True
+
+    def test_wait_dip_to_bearish(self):
+        assert _is_regime_shift("wait_dip", "exit_warning") is True
+
+    def test_bearish_to_bullish(self):
+        assert _is_regime_shift("exit_warning", "entry_ok") is True
+
+    def test_same_direction(self):
+        assert _is_regime_shift("entry_ok", "wait_dip") is False
+
+    def test_no_signal(self):
+        assert _is_regime_shift("no_signal", "entry_ok") is False
+
+    def test_wait_regime_not_shift(self):
+        assert _is_regime_shift("wait_regime", "exit_warning") is False
+
+
+class TestEvaluateAlert:
+    """evaluate_alert 함수의 각 트리거 조건 테스트."""
+
+    def _base_raw(self, **overrides):
+        raw = {
+            "pair": "xrp_jpy",
+            "current_price": 35.0,
+            "rsi14": 50.0,
+            "ema20": 34.5,
+            "ema_slope_pct": 0.1,
+            "candle_change_pct": 0.5,
+            "candle_1h_change_pct": 0.3,
+            "signal": "wait_dip",
+            "position": None,
+        }
+        raw.update(overrides)
+        return raw
+
+    # --- None (평상시) ---
+
+    def test_no_alert_normal_conditions(self):
+        raw = self._base_raw()
+        assert evaluate_alert(raw) is None
+
+    # --- Critical: RSI 극단 ---
+
+    def test_rsi_extreme_low(self):
+        raw = self._base_raw(rsi14=15.0)
+        alert = evaluate_alert(raw)
+        assert alert is not None
+        assert alert["level"] == "critical"
+        assert "rsi_extreme_low" in alert["triggers"]
+        assert "극단 과매도" in alert["text"]
+
+    def test_rsi_extreme_high(self):
+        raw = self._base_raw(rsi14=90.0)
+        alert = evaluate_alert(raw)
+        assert alert is not None
+        assert alert["level"] == "critical"
+        assert "rsi_extreme_high" in alert["triggers"]
+        assert "극단 과열" in alert["text"]
+
+    # --- Critical: 15분 급락/급등 ---
+
+    def test_price_crash_15m(self):
+        """15분 변동률 -3% 초과 → critical."""
+        prev = self._base_raw(current_price=36.0)
+        raw = self._base_raw(current_price=34.8)  # -3.33%
+        alert = evaluate_alert(raw, prev)
+        assert alert["level"] == "critical"
+        assert "price_crash_15m" in alert["triggers"]
+        assert "초급락" in alert["text"]
+
+    def test_price_surge_15m(self):
+        """15분 변동률 +3% 초과 → critical."""
+        prev = self._base_raw(current_price=34.0)
+        raw = self._base_raw(current_price=35.1)  # +3.24%
+        alert = evaluate_alert(raw, prev)
+        assert alert["level"] == "critical"
+        assert "price_surge_15m" in alert["triggers"]
+        assert "초급등" in alert["text"]
+
+    def test_no_15m_alert_without_prev_raw(self):
+        """prev_raw가 없으면 15분 트리거 안 뜨."""
+        raw = self._base_raw()
+        assert evaluate_alert(raw, None) is None
+
+    def test_15m_within_normal_no_alert(self):
+        """15분 변동률 ±1.5% 이내 → 알림 없음."""
+        prev = self._base_raw(current_price=35.0)
+        raw = self._base_raw(current_price=35.3)  # +0.86%
+        assert evaluate_alert(raw, prev) is None
+
+    # --- Critical: 1H 급락/급등 ---
+
+    def test_price_crash_1h(self):
+        raw = self._base_raw(candle_1h_change_pct=-6.5)
+        alert = evaluate_alert(raw)
+        assert alert["level"] == "critical"
+        assert "price_crash_1h" in alert["triggers"]
+        assert "급락" in alert["text"]
+
+    def test_price_surge_1h(self):
+        raw = self._base_raw(candle_1h_change_pct=5.5)
+        alert = evaluate_alert(raw)
+        assert alert["level"] == "critical"
+        assert "price_surge_1h" in alert["triggers"]
+        assert "급등" in alert["text"]
+
+    # --- Critical: 포지션 위험 ---
+
+    def test_position_at_risk(self):
+        pos = {"unrealized_pnl_pct": -4.5, "entry_price": 36.0, "entry_amount": 100}
+        raw = self._base_raw(position=pos)
+        alert = evaluate_alert(raw)
+        assert alert["level"] == "critical"
+        assert "position_at_risk" in alert["triggers"]
+        assert "-4.5% 손실" in alert["text"]
+
+    def test_position_small_loss_no_alert(self):
+        pos = {"unrealized_pnl_pct": -2.0}
+        raw = self._base_raw(position=pos)
+        assert evaluate_alert(raw) is None
+
+    # --- Critical: 체제 전환 ---
+
+    def test_regime_shift(self):
+        prev = self._base_raw(signal="entry_ok")
+        raw = self._base_raw(signal="exit_warning")
+        alert = evaluate_alert(raw, prev)
+        assert alert["level"] == "critical"
+        assert "regime_shift" in alert["triggers"]
+        assert "entry_ok → exit_warning" in alert["text"]
+
+    def test_no_regime_shift_same_direction(self):
+        prev = self._base_raw(signal="entry_ok")
+        raw = self._base_raw(signal="wait_dip")
+        assert evaluate_alert(raw, prev) is None
+
+    # --- Warning: RSI 경고 ---
+
+    def test_rsi_low_warning(self):
+        raw = self._base_raw(rsi14=23.0)
+        alert = evaluate_alert(raw)
+        assert alert is not None
+        assert alert["level"] == "warning"
+        assert "rsi_low" in alert["triggers"]
+
+    def test_rsi_high_warning(self):
+        raw = self._base_raw(rsi14=82.0)
+        alert = evaluate_alert(raw)
+        assert alert["level"] == "warning"
+        assert "rsi_high" in alert["triggers"]
+
+    def test_rsi_extreme_low_excludes_warning(self):
+        """RSI < 20이면 critical만 뜨고 warning rsi_low는 안 뜸."""
+        raw = self._base_raw(rsi14=18.0)
+        alert = evaluate_alert(raw)
+        assert "rsi_extreme_low" in alert["triggers"]
+        assert "rsi_low" not in alert["triggers"]
+
+    def test_rsi_extreme_high_excludes_warning(self):
+        """RSI > 85이면 critical만 뜨고 warning rsi_high는 안 뜸."""
+        raw = self._base_raw(rsi14=88.0)
+        alert = evaluate_alert(raw)
+        assert "rsi_extreme_high" in alert["triggers"]
+        assert "rsi_high" not in alert["triggers"]
+
+    # --- Warning: 15분 변동성 ---
+
+    def test_high_volatility_15m_warning(self):
+        """±1.5~3% 15분 변동 → warning."""
+        prev = self._base_raw(current_price=35.0)
+        raw = self._base_raw(current_price=35.7)  # +2.0%
+        alert = evaluate_alert(raw, prev)
+        assert alert["level"] == "warning"
+        assert "high_volatility_15m" in alert["triggers"]
+
+    def test_high_volatility_15m_negative(self):
+        """±1.5~3% 음수 변동 → warning."""
+        prev = self._base_raw(current_price=35.0)
+        raw = self._base_raw(current_price=34.3)  # -2.0%
+        alert = evaluate_alert(raw, prev)
+        assert "high_volatility_15m" in alert["triggers"]
+
+    # --- Warning: 1H 변동성 ---
+
+    def test_high_volatility_1h_warning(self):
+        raw = self._base_raw(candle_1h_change_pct=-4.0)
+        alert = evaluate_alert(raw)
+        assert alert["level"] == "warning"
+        assert "high_volatility_1h" in alert["triggers"]
+
+    def test_high_volatility_1h_positive(self):
+        raw = self._base_raw(candle_1h_change_pct=3.5)
+        alert = evaluate_alert(raw)
+        assert "high_volatility_1h" in alert["triggers"]
+
+    def test_no_volatility_1h_alert_within_normal(self):
+        """3% 이하면 1H 변동성 경고 안 뜸."""
+        raw = self._base_raw(candle_1h_change_pct=2.9)
+        assert evaluate_alert(raw) is None
+
+    # --- Warning: EMA 갭 ---
+
+    def test_large_ema_gap(self):
+        raw = self._base_raw(current_price=30.0, ema20=35.0)
+        alert = evaluate_alert(raw)
+        assert alert is not None
+        assert "large_ema_gap" in alert["triggers"]
+
+    def test_small_ema_gap_no_alert(self):
+        raw = self._base_raw(current_price=35.0, ema20=34.8)
+        assert evaluate_alert(raw) is None
+
+    # --- Warning: slope 전환 ---
+
+    def test_slope_reversal_positive_to_negative(self):
+        prev = self._base_raw(ema_slope_pct=0.15)
+        raw = self._base_raw(ema_slope_pct=-0.10)
+        alert = evaluate_alert(raw, prev)
+        assert alert is not None
+        assert "slope_reversal" in alert["triggers"]
+
+    def test_slope_reversal_negative_to_positive(self):
+        prev = self._base_raw(ema_slope_pct=-0.20)
+        raw = self._base_raw(ema_slope_pct=0.05)
+        alert = evaluate_alert(raw, prev)
+        assert "slope_reversal" in alert["triggers"]
+
+    def test_slope_same_sign_no_alert(self):
+        prev = self._base_raw(ema_slope_pct=0.10)
+        raw = self._base_raw(ema_slope_pct=0.05)
+        assert evaluate_alert(raw, prev) is None
+
+    # --- 복합 트리거 ---
+
+    def test_multiple_critical_triggers(self):
+        raw = self._base_raw(rsi14=15.0, candle_1h_change_pct=-8.0)
+        alert = evaluate_alert(raw)
+        assert alert["level"] == "critical"
+        assert "rsi_extreme_low" in alert["triggers"]
+        assert "price_crash_1h" in alert["triggers"]
+        assert "🚨🚨🚨" in alert["text"]
+
+    def test_warning_level_with_multiple_warnings(self):
+        raw = self._base_raw(rsi14=23.0, candle_1h_change_pct=-3.5)
+        alert = evaluate_alert(raw)
+        assert alert["level"] == "warning"
+        assert len(alert["triggers"]) >= 2
+
+    def test_critical_overrides_warning(self):
+        """critical + warning 동시 발생 시 level은 critical."""
+        raw = self._base_raw(rsi14=18.0, candle_1h_change_pct=-3.5)
+        alert = evaluate_alert(raw)
+        assert alert["level"] == "critical"
+
+    # --- Box 전략 (RSI/EMA 없음) ---
+
+    def test_box_no_rsi_no_ema(self):
+        raw = {
+            "pair": "xrp_jpy",
+            "current_price": 35.0,
+            "candle_change_pct": 1.0,
+            "position": None,
+        }
+        assert evaluate_alert(raw) is None
+
+    def test_box_position_at_risk(self):
+        raw = {
+            "pair": "xrp_jpy",
+            "current_price": 33.0,
+            "candle_change_pct": 0.5,
+            "position": {"unrealized_pnl_pct": -5.0},
+        }
+        alert = evaluate_alert(raw)
+        assert alert["level"] == "critical"
+        assert "position_at_risk" in alert["triggers"]
+
+    # --- prev_raw None ---
+
+    def test_no_prev_raw_no_regime_shift(self):
+        """prev_raw이 None이면 regime_shift/slope_reversal는 안 뜸."""
+        raw = self._base_raw(signal="exit_warning")
+        alert = evaluate_alert(raw, None)
+        # exit_warning 자체로는 critical 아님 (regime_shift 없이)
+        assert alert is None or "regime_shift" not in alert.get("triggers", [])
+
+
+class TestBuildAlertText:
+    """build_alert_text 함수 테스트."""
+
+    def test_critical_text_ck(self):
+        raw = {"pair": "xrp_jpy", "current_price": 35.0}
+        triggers = [
+            ("critical", "rsi_extreme_low", "RSI 15.0 극단 과매도"),
+            ("critical", "price_crash_1h", "1H -8.0% 급락"),
+        ]
+        text = build_alert_text(raw, triggers, "critical")
+        assert "🚨🚨🚨" in text
+        assert "[CK 긴급]" in text
+        assert "xrp_jpy" in text
+        assert "RSI 15.0 극단 과매도" in text
+        assert "레이첼 심층분석" in text
+
+    def test_critical_text_bf(self):
+        raw = {"pair": "BTC_JPY", "current_price": 10200000}
+        triggers = [("critical", "price_crash_1h", "1H -6.0% 급락")]
+        text = build_alert_text(raw, triggers, "critical")
+        assert "[BF 긴급]" in text
+        assert "BTC_JPY" in text
+
+    def test_warning_text(self):
+        raw = {"pair": "xrp_jpy", "current_price": 35.0}
+        triggers = [("warning", "rsi_low", "RSI 23.0 과매도")]
+        text = build_alert_text(raw, triggers, "warning")
+        assert "⚠️" in text
+        assert "[CK 주의]" in text
+        assert "RSI 23.0 과매도" in text
+        assert "🚨" not in text
+
+
+# ── 레이첼 Webhook 트리거 테스트 ─────────────────────────
+
+class TestTriggerRachelAnalysis:
+    """_trigger_rachel_analysis webhook 호출 + 쿨다운 테스트."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_cooldown(self):
+        _last_alert_time.clear()
+        yield
+        _last_alert_time.clear()
+
+    @pytest.mark.asyncio
+    async def test_critical_triggers_webhook(self, monkeypatch):
+        """토큰 설정 + critical alert → webhook POST 호출."""
+        monkeypatch.setattr("api.services.monitoring_report.RACHEL_WEBHOOK_TOKEN", "test-token")
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = "ok"
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+
+        alert = {
+            "level": "critical",
+            "triggers": ["rsi_extreme_low", "price_crash"],
+            "text": "🚨🚨🚨 [CK 긴급] xrp_jpy\n¥35\nRSI 15.0 극단 과매도",
+        }
+
+        with patch("api.services.monitoring_report.httpx.AsyncClient", return_value=mock_client):
+            await _trigger_rachel_analysis("xrp_jpy", alert)
+
+        mock_client.post.assert_called_once()
+        call_kwargs = mock_client.post.call_args
+        assert "hooks/market-alert" in call_kwargs[0][0]
+        body = call_kwargs[1]["json"]
+        assert "긴급 분석 요청" in body["message"]
+        assert "즉시 실행하라" in body["message"]
+        assert "테스트 모드" not in body["message"]
+        assert body["name"] == "MarketAlert"
+        assert body["deliver"] is True
+        assert "Bearer test-token" in call_kwargs[1]["headers"]["Authorization"]
+
+    @pytest.mark.asyncio
+    async def test_no_token_skips_webhook(self, monkeypatch):
+        """RACHEL_WEBHOOK_TOKEN 미설정 시 graceful skip."""
+        monkeypatch.setattr("api.services.monitoring_report.RACHEL_WEBHOOK_TOKEN", "")
+
+        alert = {"level": "critical", "triggers": ["price_crash"], "text": "crash"}
+
+        with patch("api.services.monitoring_report.httpx.AsyncClient") as mock_cls:
+            await _trigger_rachel_analysis("xrp_jpy", alert)
+            mock_cls.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cooldown_prevents_duplicate(self, monkeypatch):
+        """15분 이내 동일 pair → 2번째 스킵."""
+        monkeypatch.setattr("api.services.monitoring_report.RACHEL_WEBHOOK_TOKEN", "test-token")
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = "ok"
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+
+        alert = {"level": "critical", "triggers": ["price_crash"], "text": "crash"}
+
+        with patch("api.services.monitoring_report.httpx.AsyncClient", return_value=mock_client):
+            await _trigger_rachel_analysis("xrp_jpy", alert)
+            await _trigger_rachel_analysis("xrp_jpy", alert)
+
+        assert mock_client.post.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_different_pair_not_blocked(self, monkeypatch):
+        """다른 pair는 쿨다운 영향 안 받음."""
+        monkeypatch.setattr("api.services.monitoring_report.RACHEL_WEBHOOK_TOKEN", "test-token")
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = "ok"
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+
+        alert = {"level": "critical", "triggers": ["price_crash"], "text": "crash"}
+
+        with patch("api.services.monitoring_report.httpx.AsyncClient", return_value=mock_client):
+            await _trigger_rachel_analysis("xrp_jpy", alert)
+            await _trigger_rachel_analysis("BTC_JPY", alert)
+
+        assert mock_client.post.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_webhook_error_handled_gracefully(self, monkeypatch):
+        """webhook 네트워크 오류 시 예외 안 나고 로그만."""
+        monkeypatch.setattr("api.services.monitoring_report.RACHEL_WEBHOOK_TOKEN", "test-token")
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=httpx.ConnectError("connection refused"))
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+
+        alert = {"level": "critical", "triggers": ["price_crash"], "text": "crash"}
+
+        with patch("api.services.monitoring_report.httpx.AsyncClient", return_value=mock_client):
+            await _trigger_rachel_analysis("xrp_jpy", alert)  # 예외 없이 완료
+
+
+class TestBuildTestAlert:
+    """테스트용 alert 생성 함수."""
+
+    def test_critical_alert(self):
+        raw = {"pair": "xrp_jpy", "current_price": 35.5, "rsi14": 45.0}
+        alert = _build_test_alert(raw, "critical")
+        assert alert["level"] == "critical"
+        assert alert["triggers"] == ["test_forced_critical"]
+        assert "CK" in alert["text"]
+        assert "긴급 테스트" in alert["text"]
+        assert "RSI 45.0" in alert["text"]
+
+    def test_warning_alert(self):
+        raw = {"pair": "BTC_JPY", "current_price": 15000000, "rsi14": 55.0}
+        alert = _build_test_alert(raw, "warning")
+        assert alert["level"] == "warning"
+        assert alert["triggers"] == ["test_forced_warning"]
+        assert "BF" in alert["text"]
+        assert "주의 테스트" in alert["text"]
+
+    def test_critical_bf_pair(self):
+        raw = {"pair": "BTC_JPY", "current_price": 15000000, "rsi14": 30.0}
+        alert = _build_test_alert(raw, "critical")
+        assert "BF" in alert["text"]
+        assert "긴급 테스트" in alert["text"]
+
+    def test_no_rsi(self):
+        raw = {"pair": "xrp_jpy", "current_price": 35.5, "rsi14": None}
+        alert = _build_test_alert(raw, "critical")
+        assert "RSI" not in alert["text"]
+        assert alert["level"] == "critical"
+
+
+class TestTriggerRachelTestMode:
+    """테스트 모드 webhook 메시지 분기 테스트."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_cooldown(self):
+        _last_alert_time.clear()
+        yield
+        _last_alert_time.clear()
+
+    @pytest.mark.asyncio
+    async def test_test_mode_message(self, monkeypatch):
+        """테스트 모드 시 webhook message에 테스트 모드 문구 포함."""
+        monkeypatch.setattr("api.services.monitoring_report.RACHEL_WEBHOOK_TOKEN", "test-token")
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = "ok"
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+
+        alert = {
+            "level": "critical",
+            "triggers": ["test_forced_critical"],
+            "text": "테스트 강제 트리거",
+        }
+
+        with patch("api.services.monitoring_report.httpx.AsyncClient", return_value=mock_client):
+            await _trigger_rachel_analysis("BTC_JPY", alert, test=True)
+
+        mock_client.post.assert_called_once()
+        body = mock_client.post.call_args[1]["json"]
+        assert "테스트 모드" in body["message"]
+        assert "실행하지 말 것" in body["message"]
+        assert "Rachel 긴급 테스트" in body["message"]
+
+    @pytest.mark.asyncio
+    async def test_real_mode_message(self, monkeypatch):
+        """실전 모드 시 webhook message에 즉시 실행 문구 포함."""
+        monkeypatch.setattr("api.services.monitoring_report.RACHEL_WEBHOOK_TOKEN", "test-token")
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = "ok"
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+
+        alert = {
+            "level": "critical",
+            "triggers": ["rsi_extreme_low"],
+            "text": "RSI 기반 alert",
+        }
+
+        with patch("api.services.monitoring_report.httpx.AsyncClient", return_value=mock_client):
+            await _trigger_rachel_analysis("BTC_JPY", alert, test=False)
+
+        body = mock_client.post.call_args[1]["json"]
+        assert "즉시 실행하라" in body["message"]
+        assert "Rachel 긴급]" in body["message"]
+        assert "테스트 모드" not in body["message"]
+
+    @pytest.mark.asyncio
+    async def test_reset_cooldown_allows_retry(self, monkeypatch):
+        """쿨다운 리셋 후 재호출 가능."""
+        monkeypatch.setattr("api.services.monitoring_report.RACHEL_WEBHOOK_TOKEN", "test-token")
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = "ok"
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+
+        alert = {"level": "critical", "triggers": ["test_forced_critical"], "text": "test"}
+
+        with patch("api.services.monitoring_report.httpx.AsyncClient", return_value=mock_client):
+            # 1차 호출
+            await _trigger_rachel_analysis("BTC_JPY", alert)
+            # 쿨다운 리셋
+            _last_alert_time.pop("BTC_JPY", None)
+            # 2차 호출 — 쿨다운 없으므로 성공
+            await _trigger_rachel_analysis("BTC_JPY", alert)
+
+        assert mock_client.post.call_count == 2

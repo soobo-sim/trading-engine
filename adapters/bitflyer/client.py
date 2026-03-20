@@ -182,9 +182,9 @@ class BitFlyerAdapter:
         client = self._get_client()
         product_code = self._pair_to_product_code(pair)
 
-        # MARKET_BUY: JPY 금액 → 코인 수량 변환
+        # MARKET_BUY: JPY 金額 → コイン数量 変換 (현물만. CFD는 코인 수량 직접 전달)
         actual_amount = amount
-        if order_type == OrderType.MARKET_BUY:
+        if order_type == OrderType.MARKET_BUY and not product_code.startswith("FX_"):
             ticker = await self.get_ticker(pair)
             if ticker.last <= 0:
                 raise OrderError(f"BitFlyer 현재가 조회 실패: {ticker.last}")
@@ -451,6 +451,77 @@ class BitFlyerAdapter:
     ) -> None:
         """내 주문 체결 이벤트 구독 (Private WS — 향후 구현)."""
         logger.warning("subscribe_executions: 아직 미구현. Private WS 필요.")
+
+    # ── 내부 변환 헬퍼 ─────────────────────────────────────────
+
+    # ── CFD 전용 (FX_BTC_JPY) ──────────────────────────────────────
+
+    async def get_collateral(self):
+        """증거금 상태 조회. GET /v1/me/getcollateral"""
+        from core.exchange.types import Collateral
+
+        client = self._get_client()
+        path = "/v1/me/getcollateral"
+        headers = self._get_auth_headers("GET", path)
+        try:
+            response = await client.get(f"{self._base_url}{path}", headers=headers)
+            self._raise_for_exchange_error(response)
+            data = response.json()
+        except (AuthenticationError, RateLimitError, ExchangeError):
+            raise
+        except httpx.HTTPError as e:
+            raise ConnectionError(f"BitFlyer HTTP 오류: {e}") from e
+
+        collateral_val = float(data.get("collateral", 0))
+        require = float(data.get("require_collateral", 0))
+        keep_rate = (collateral_val / require) if require > 0 else 999.0
+
+        return Collateral(
+            collateral=collateral_val,
+            open_position_pnl=float(data.get("open_position_pnl", 0)),
+            require_collateral=require,
+            keep_rate=keep_rate,
+        )
+
+    async def get_positions(self, product_code: str = "FX_BTC_JPY") -> list:
+        """FX 건옥 목록 조회. GET /v1/me/getpositions"""
+        from core.exchange.types import FxPosition
+
+        client = self._get_client()
+        query = urlencode({"product_code": product_code})
+        path = f"/v1/me/getpositions?{query}"
+        headers = self._get_auth_headers("GET", path)
+        try:
+            response = await client.get(f"{self._base_url}{path}", headers=headers)
+            self._raise_for_exchange_error(response)
+            items = response.json()
+        except (AuthenticationError, RateLimitError, ExchangeError):
+            raise
+        except httpx.HTTPError as e:
+            raise ConnectionError(f"BitFlyer HTTP 오류: {e}") from e
+
+        positions = []
+        for item in (items or []):
+            open_date = None
+            raw_date = item.get("open_date")
+            if raw_date:
+                try:
+                    open_date = datetime.fromisoformat(raw_date.replace("Z", "+00:00"))
+                except (ValueError, AttributeError):
+                    pass
+            positions.append(FxPosition(
+                product_code=item.get("product_code", product_code),
+                side=item.get("side", "BUY"),
+                price=float(item.get("price", 0)),
+                size=float(item.get("size", 0)),
+                pnl=float(item.get("pnl", 0)),
+                leverage=float(item.get("leverage", 0)),
+                require_collateral=float(item.get("require_collateral", 0)),
+                swap_point_accumulate=float(item.get("swap_point_accumulate", 0)),
+                sfd=float(item.get("sfd", 0)),
+                open_date=open_date,
+            ))
+        return positions
 
     # ── 내부 변환 헬퍼 ─────────────────────────────────────────
 

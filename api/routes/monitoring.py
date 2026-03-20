@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.dependencies import AppState, get_db, get_state
-from api.services.monitoring_report import generate_trend_report
+from api.services.monitoring_report import generate_box_report, generate_trend_report, generate_cfd_report
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/monitoring", tags=["Monitoring"])
@@ -19,6 +19,8 @@ router = APIRouter(prefix="/api/monitoring", tags=["Monitoring"])
 @router.get("/report", summary="사만다 15분 보고용 모니터링 리포트")
 async def get_monitoring_report(
     pair: str = Query(..., description="페어 (e.g. xrp_jpy / BTC_JPY)"),
+    test_alert_level: str | None = Query(None, description="테스트용 alert level override (warning|critical)"),
+    reset_cooldown: bool = Query(False, description="webhook 쿨다운 리셋 (테스트용)"),
     state: AppState = Depends(get_state),
     db: AsyncSession = Depends(get_db),
 ):
@@ -49,6 +51,13 @@ async def get_monitoring_report(
             detail={"error": f"pair={pair}에 해당하는 활성 전략 없음"},
         )
 
+    # test_alert_level 검증
+    if test_alert_level and test_alert_level not in ("warning", "critical"):
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "test_alert_level must be 'warning' or 'critical'"},
+        )
+
     # 2. trading_style에 따라 분기
     if trading_style == "trend_following":
         report = await generate_trend_report(
@@ -60,9 +69,38 @@ async def get_monitoring_report(
             trend_manager=state.trend_manager,
             candle_model=state.models.candle,
             db=db,
+            test_alert_level=test_alert_level,
+            reset_cooldown=reset_cooldown,
+        )
+    elif trading_style == "box_mean_reversion":
+        report = await generate_box_report(
+            pair=pair,
+            prefix=state.prefix,
+            pair_column=state.pair_column,
+            strategy=strategy,
+            adapter=state.adapter,
+            health_checker=state.health_checker,
+            box_model=state.models.box,
+            box_position_model=state.models.box_position,
+            candle_model=state.models.candle,
+            db=db,
+            test_alert_level=test_alert_level,
+            reset_cooldown=reset_cooldown,
+        )
+    elif trading_style == "cfd_trend_following":
+        report = await generate_cfd_report(
+            pair=pair,
+            prefix=state.prefix,
+            pair_column=state.pair_column,
+            strategy=strategy,
+            adapter=state.adapter,
+            cfd_manager=state.cfd_manager,
+            candle_model=state.models.candle,
+            db=db,
+            test_alert_level=test_alert_level,
+            reset_cooldown=reset_cooldown,
         )
     else:
-        # Phase 2: box_mean_reversion 추가 예정
         raise HTTPException(
             status_code=400,
             detail={"error": f"trading_style={trading_style}은 아직 미지원"},

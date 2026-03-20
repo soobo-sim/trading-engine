@@ -472,3 +472,52 @@ def create_trend_position_model(prefix: str, order_id_length: int = 40):
     TrendPosition.__name__ = f"{prefix.capitalize()}TrendPosition"
     TrendPosition.__qualname__ = TrendPosition.__name__
     return TrendPosition
+
+
+def create_cfd_position_model(prefix: str, pair_column: str = "product_code", order_id_length: int = 40):
+    """
+    CFD 포지션 ORM 모델 팩토리.
+
+    create_cfd_position_model("bf") → table: bf_cfd_positions
+    롱/숏 양방향, 증거금 기반 건옥 관리.
+    """
+    _table = f"{prefix}_cfd_positions"
+    _strategies_table = f"{prefix}_strategies"
+    cls_name = f"{prefix.capitalize()}CfdPosition"
+
+    attrs: dict = {
+        "__tablename__": _table,
+        "__table_args__": (
+            Index(f"idx_{prefix}_cfd_positions_{pair_column}_status", pair_column, "status"),
+            Index(f"idx_{prefix}_cfd_positions_strategy", "strategy_id"),
+            Index(f"idx_{prefix}_cfd_positions_created", pair_column, "created_at"),
+            CheckConstraint("status IN ('open','closed')", name=f"{prefix}_cfd_positions_status_check"),
+            CheckConstraint("side IN ('buy','sell')", name=f"{prefix}_cfd_positions_side_check"),
+            {"extend_existing": True},
+        ),
+        "id": Column(Integer, primary_key=True, autoincrement=True),
+        "strategy_id": Column(
+            Integer, ForeignKey(f"{_strategies_table}.id", ondelete="SET NULL"), nullable=True
+        ),
+        "side": Column(String(10), nullable=False),
+        pair_column: Column(String(20), nullable=False),
+        "entry_order_id": Column(String(order_id_length), nullable=False),
+        "entry_price": Column(Numeric(18, 8), nullable=False),
+        "entry_size": Column(Numeric(18, 8), nullable=False),
+        "entry_collateral_jpy": Column(Numeric(18, 2), nullable=True),
+        "stop_loss_price": Column(Numeric(18, 8), nullable=True),
+        "exit_order_id": Column(String(order_id_length), nullable=True),
+        "exit_price": Column(Numeric(18, 8), nullable=True),
+        "exit_size": Column(Numeric(18, 8), nullable=True),
+        "exit_reason": Column(String(50), nullable=True),
+        "realized_pnl_jpy": Column(Numeric(18, 2), nullable=True),
+        "realized_pnl_pct": Column(Numeric(8, 4), nullable=True),
+        "status": Column(String(20), nullable=False, default="open"),
+        "created_at": Column(DateTime(timezone=True), server_default=func.now(), nullable=False),
+        "closed_at": Column(DateTime(timezone=True), nullable=True),
+        "__repr__": lambda self: (
+            f"<{self.__class__.__name__}(id={self.id}, side={self.side!r}, "
+            f"status={self.status})>"
+        ),
+    }
+    return type(cls_name, (Base,), attrs)

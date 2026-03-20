@@ -561,6 +561,32 @@ class TestOrderExecution:
             assert float(rec.exit_price) == 108.0
             assert float(rec.realized_pnl_jpy) > 0  # 91→108, 이익
 
+    @pytest.mark.asyncio
+    async def test_close_dust_logged_after_sell(self, manager, fake_adapter, db_session_factory, caplog):
+        """BUG-009: 청산 후 dust 잔고 감지 → 로그 기록."""
+        pair = "xrp_jpy"
+        box_id = await insert_box(db_session_factory, pair, 110.0, 90.0)
+
+        # 소량 잔고 설정 (0.005 XRP, fee 차감 후 dust 남음)
+        fake_adapter.set_balance("xrp", 0.005)
+        await manager._record_open_position(
+            pair=pair, box_id=box_id,
+            entry_order_id="ORD-BUY-009", entry_price=91.0, entry_amount=0.005,
+        )
+
+        pos = await manager._get_open_position(pair)
+        manager._params[pair] = {"min_coin_size": 0.001, "trading_fee_rate": 0.002}
+
+        import logging
+        with caplog.at_level(logging.INFO):
+            await manager._close_position_market(pair, pos, "near_upper_exit")
+
+        assert not await manager._has_open_position(pair)
+        # dust 로그가 기록되었는지 확인
+        dust_logs = [r for r in caplog.records if "dust 잔고 감지" in r.message]
+        assert len(dust_logs) == 1
+        assert "매도 불가 수량" in dust_logs[0].message
+
 
 # ══════════════════════════════════════════════
 # 테스트: 캔들 조회

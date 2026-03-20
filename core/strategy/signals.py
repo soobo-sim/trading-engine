@@ -70,11 +70,12 @@ def compute_exit_signal(
     current_price: float,
     entry_price: Optional[float],
     params: dict,
+    side: str = "buy",
 ) -> dict:
     """
     포지션 보유 중 우선순위 기반 청산 시그널 판단.
     전량 청산 > 부분 청산 > 스탑 타이트닝 > hold 순.
-    signal == 'exit_warning' (가격 < EMA) 청산은 이 함수 밖에서 별도 처리.
+    signal == 'exit_warning' (가격 vs EMA) 청산은 이 함수 밖에서 별도 처리.
 
     Args:
         ema_slope_pct:  EMA 기울기 (%)
@@ -83,6 +84,7 @@ def compute_exit_signal(
         current_price:  현재가
         entry_price:    진입가 (이익 목표 판단용)
         params:         전략 파라미터 dict
+        side:           포지션 방향 ("buy" or "sell")
 
     Returns:
         dict: {action, reason, triggers, adjusted_trailing_stop}
@@ -94,20 +96,36 @@ def compute_exit_signal(
     profit_atr_mult = params.get("partial_exit_profit_atr", 2.0)
     tighten_atr = params.get("tighten_stop_atr", 1.0)
 
-    ema_slope_negative = ema_slope_pct is not None and ema_slope_pct < 0
-    ema_slope_weakening = ema_slope_pct is not None and 0 <= ema_slope_pct < slope_weak_th
-    rsi_breakdown_hit = rsi is not None and rsi < rsi_breakdown_th
-    rsi_extreme_hit = rsi is not None and rsi > rsi_extreme_th
-    rsi_overbought_hit = rsi is not None and rsi_overbought_th < rsi <= rsi_extreme_th
+    is_short = side == "sell"
+
+    # 롱: slope < 0 = 추세 반전, 숏: slope > 0 = 추세 반전
+    ema_slope_reversal = (
+        ema_slope_pct is not None
+        and (ema_slope_pct > 0 if is_short else ema_slope_pct < 0)
+    )
+    ema_slope_weakening = (
+        ema_slope_pct is not None
+        and ((-slope_weak_th < ema_slope_pct <= 0) if is_short else (0 <= ema_slope_pct < slope_weak_th))
+    )
+    # 롱: RSI < breakdown = 붕괴, 숏: RSI > extreme = 매수 압력
+    rsi_breakdown_hit = rsi is not None and (rsi > rsi_extreme_th if is_short else rsi < rsi_breakdown_th)
+    rsi_extreme_hit = rsi is not None and (rsi < rsi_breakdown_th if is_short else rsi > rsi_extreme_th)
+    rsi_overbought_hit = rsi is not None and (
+        (rsi_breakdown_th <= rsi < rsi_breakdown_th + 5) if is_short
+        else (rsi_overbought_th < rsi <= rsi_extreme_th)
+    )
     profit_target_hit = (
         entry_price is not None
         and entry_price > 0
         and atr is not None
-        and (current_price - entry_price) > atr * profit_atr_mult
+        and (
+            (entry_price - current_price) > atr * profit_atr_mult if is_short
+            else (current_price - entry_price) > atr * profit_atr_mult
+        )
     )
 
     triggers = {
-        "ema_slope_negative": ema_slope_negative,
+        "ema_slope_negative": ema_slope_reversal,
         "ema_slope_weakening": ema_slope_weakening,
         "rsi_breakdown": rsi_breakdown_hit,
         "rsi_extreme": rsi_extreme_hit,
@@ -115,19 +133,31 @@ def compute_exit_signal(
         "profit_target_hit": profit_target_hit,
     }
 
-    adjusted_trailing_stop = round(current_price - atr * tighten_atr, 6) if atr else None
+    adjusted_trailing_stop = (
+        round(current_price + atr * tighten_atr, 6) if (atr and is_short)
+        else round(current_price - atr * tighten_atr, 6) if atr
+        else None
+    )
 
-    if ema_slope_negative:
+    if ema_slope_reversal:
+        reason = (
+            "EMA 기울기 양전환 — 추세 반전 선제 퇴장" if is_short
+            else "EMA 기울기 음전환 — 추세 반전 선제 퇴장"
+        )
         return {
             "action": "full_exit",
-            "reason": "EMA 기울기 음전환 — 추세 반전 선제 퇴장",
+            "reason": reason,
             "triggers": triggers,
             "adjusted_trailing_stop": adjusted_trailing_stop,
         }
     if rsi_breakdown_hit:
+        reason = (
+            f"RSI {rsi:.1f} 과매수 급등 — 숏 추세 붕괴 시그널" if is_short
+            else f"RSI {rsi:.1f} 과매도 급락 — 추세 붕괴 시그널"
+        )
         return {
             "action": "full_exit",
-            "reason": f"RSI {rsi:.1f} 과매도 급락 — 추세 붕괴 시그널",
+            "reason": reason,
             "triggers": triggers,
             "adjusted_trailing_stop": adjusted_trailing_stop,
         }
@@ -137,11 +167,11 @@ def compute_exit_signal(
     if rsi_extreme_hit or profit_target_hit or rsi_overbought_hit or ema_slope_weakening:
         parts = []
         if rsi_extreme_hit:
-            parts.append(f"RSI {rsi:.1f} 극단 과매수")
+            parts.append(f"RSI {rsi:.1f} 극단{'과매도' if is_short else '과매수'}")
         if profit_target_hit:
             parts.append(f"이익 ATR×{profit_atr_mult} 달성")
         if rsi_overbought_hit:
-            parts.append(f"RSI {rsi:.1f} 과매수")
+            parts.append(f"RSI {rsi:.1f} {'과매도 접근' if is_short else '과매수'}")
         if ema_slope_weakening:
             parts.append(f"EMA 기울기 {ema_slope_pct:.4f}% 둔화")
         return {
@@ -197,6 +227,7 @@ def compute_trend_signal(
     candles: List[Any],
     params: Optional[dict] = None,
     entry_price: Optional[float] = None,
+    side: Optional[str] = None,
 ) -> dict:
     """
     캔들 목록에서 트렌드 시그널 계산.
@@ -205,8 +236,9 @@ def compute_trend_signal(
     CkCandle, BfCandle 모두 호환.
 
     시그널 종류:
-      entry_ok     — EMA 위, 기울기 양수, RSI 진입 범위, 레짐 추세
-      exit_warning — 가격 < EMA (하드 청산 트리거)
+      entry_ok     — EMA 위, 기울기 양수, RSI 진입 범위 (롱 진입)
+      entry_sell   — EMA 아래, 기울기 음수, RSI 진입 범위 (숏 진입)
+      exit_warning — 가격 vs EMA 이탈 (하드 청산 트리거)
       wait_dip     — EMA 위, 기울기 양수이나 RSI 과매수
       wait_regime  — EMA 위, 기울기 양수이나 횡보 레짐
       no_signal    — 기타
@@ -253,11 +285,20 @@ def compute_trend_signal(
     rsi = rsi_series[-1] if rsi_series else None
 
     # 조건
-    rsi_entry_low, rsi_entry_high = 40.0, 65.0
+    rsi_entry_low = float(params.get("entry_rsi_min", 40.0))
+    rsi_entry_high = float(params.get("entry_rsi_max", 65.0))
     price_above_ema = (current_price > ema) if ema else None
     ema_slope_positive = (ema_slope_pct > 0) if ema_slope_pct is not None else None
+    ema_slope_negative = (ema_slope_pct < 0) if ema_slope_pct is not None else None
     rsi_in_range = (rsi_entry_low <= rsi <= rsi_entry_high) if rsi is not None else None
     rsi_overbought = (rsi > rsi_entry_high) if rsi is not None else None
+
+    # 숏 진입 조건
+    short_rsi_low = float(params.get("entry_rsi_min_short", 35.0))
+    short_rsi_high = float(params.get("entry_rsi_max_short", 60.0))
+    short_slope_th = float(params.get("ema_slope_short_threshold", -0.05))
+    rsi_in_short_range = (short_rsi_low <= rsi <= short_rsi_high) if rsi is not None else None
+    ema_slope_strong_down = (ema_slope_pct is not None and ema_slope_pct < short_slope_th)
 
     # Regime (BB width + 가격 레인지)
     bb_period = min(20, len(closes))
@@ -272,10 +313,17 @@ def compute_trend_signal(
     regime_ranging = bb_width_pct < 3.0 and range_pct < 5.0
 
     # 시그널 결정
-    if price_above_ema is False:
-        signal = "exit_warning"
-    elif price_above_ema and ema_slope_positive and rsi_in_range and not regime_ranging:
+    if price_above_ema and ema_slope_positive and rsi_in_range and not regime_ranging:
         signal = "entry_ok"
+    elif (
+        price_above_ema is False
+        and ema_slope_strong_down
+        and rsi_in_short_range
+        and not regime_ranging
+    ):
+        signal = "entry_sell"
+    elif price_above_ema is False:
+        signal = "exit_warning"
     elif price_above_ema and ema_slope_positive and rsi_overbought:
         signal = "wait_dip"
     elif price_above_ema and ema_slope_positive and regime_ranging:
@@ -284,7 +332,10 @@ def compute_trend_signal(
         signal = "no_signal"
 
     atr_multiplier = params.get("atr_multiplier_stop", 2.0)
-    stop_loss_price = round(current_price - atr * atr_multiplier, 6) if atr else None
+    if side == "sell":
+        stop_loss_price = round(current_price + atr * atr_multiplier, 6) if atr else None
+    else:
+        stop_loss_price = round(current_price - atr * atr_multiplier, 6) if atr else None
 
     exit_signal = compute_exit_signal(
         ema_slope_pct=ema_slope_pct,
@@ -293,6 +344,7 @@ def compute_trend_signal(
         current_price=current_price,
         entry_price=entry_price,
         params=params,
+        side=side or "buy",
     )
 
     return {

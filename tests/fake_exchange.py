@@ -15,8 +15,10 @@ from typing import Any, Callable, Coroutine, Optional
 from core.exchange.types import (
     Balance,
     Candle,
+    Collateral,
     CurrencyBalance,
     ExchangeConstraints,
+    FxPosition,
     Order,
     OrderSide,
     OrderStatus,
@@ -51,6 +53,15 @@ class FakeExchangeAdapter:
         self.trade_callbacks: list[Callable] = []
         self.execution_callbacks: list[Callable] = []
 
+        # CFD テスト用
+        self._collateral = Collateral(
+            collateral=1_000_000.0,
+            open_position_pnl=0.0,
+            require_collateral=0.0,
+            keep_rate=999.0,
+        )
+        self._fx_positions: list[FxPosition] = []
+
     # ── 거래소 식별 ─────────────────────────
 
     @property
@@ -80,10 +91,15 @@ class FakeExchangeAdapter:
         exec_price = price or self._ticker_price
 
         # 즉시 체결 시뮬레이션
-        base, quote = pair.split("_")  # xrp_jpy → xrp, jpy
+        parts = pair.split("_")  # xrp_jpy → [xrp, jpy], FX_BTC_JPY → [FX, BTC, JPY]
+        if len(parts) == 3:
+            base, quote = parts[1].lower(), parts[2].lower()  # CFD: FX_BTC_JPY → btc, jpy
+        else:
+            base, quote = parts[0].lower(), parts[1].lower()  # 현물: xrp_jpy → xrp, jpy
 
-        # MARKET_BUY: amount = JPY 금액 → 코인 수량 변환
-        if order_type == OrderType.MARKET_BUY:
+        # MARKET_BUY: amount = JPY 금액 → 코인 수량 변환 (현물만. CFD는 코인 수량 직접)
+        is_fx = pair.upper().startswith("FX_")
+        if order_type == OrderType.MARKET_BUY and not is_fx:
             jpy_amount = amount
             coin_amount = jpy_amount / exec_price
             self._balances[quote] = self._balances.get(quote, 0.0) - jpy_amount
@@ -174,6 +190,14 @@ class FakeExchangeAdapter:
     ) -> None:
         self.execution_callbacks.append(callback)
 
+    # ── CFD (FX) ──────────────────────────
+
+    async def get_collateral(self) -> Collateral:
+        return self._collateral
+
+    async def get_positions(self, product_code: str = "FX_BTC_JPY") -> list[FxPosition]:
+        return [p for p in self._fx_positions if p.product_code == product_code]
+
     # ── 연결 관리 ──────────────────────────
 
     async def connect(self) -> None:
@@ -199,3 +223,11 @@ class FakeExchangeAdapter:
     def order_history(self) -> list[Order]:
         """전체 주문 이력 (시간순)."""
         return sorted(self._orders.values(), key=lambda o: o.created_at or datetime.min)
+
+    def set_collateral(self, collateral: Collateral) -> None:
+        """테스트에서 증거금 직접 설정."""
+        self._collateral = collateral
+
+    def set_fx_positions(self, positions: list[FxPosition]) -> None:
+        """테스트에서 FX 포지션 직접 설정."""
+        self._fx_positions = positions

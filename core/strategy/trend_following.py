@@ -699,6 +699,18 @@ class TrendFollowingManager:
                 f"[TrendMgr] {pair}: 청산 완료 "
                 f"reason={reason} order_id={order.order_id} amount={sell_amount}"
             )
+
+            # BUG-009: 청산 후 dust 잔고 감지 로깅
+            try:
+                balance_after = await self._adapter.get_balance()
+                dust = balance_after.get_available(currency)
+                if 0 < dust < min_size:
+                    logger.info(
+                        f"[TrendMgr] {pair}: 청산 후 dust 잔고 감지 "
+                        f"({currency} {dust:.8f} < min_size {min_size}) — 매도 불가 수량, 다음 진입 시 포함됨"
+                    )
+            except Exception as de:
+                logger.debug(f"[TrendMgr] {pair}: dust 확인 실패 — {de}")
         except Exception as e:
             logger.error(f"[TrendMgr] {pair}: 청산 주문 오류 — {e}", exc_info=True)
 

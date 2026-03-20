@@ -110,7 +110,7 @@ trading-engine/
 
 - **인스턴스**: 단일 PostgreSQL (`trader-postgres`, coinmarket-data docker-compose 관리)
 - **coincheck**: `ck_trades`, `ck_strategies`, `ck_balance_entries`, `ck_insights`, `ck_summaries`, `ck_candles`, `ck_boxes`, `ck_box_positions`, `ck_trend_positions`
-- **bitflyer**: `bf_trades`, `bf_strategies`, `bf_balance_entries`, `bf_insights`, `bf_summaries`, `bf_candles`, `bf_boxes`, `bf_trend_positions`
+- **bitflyer**: `bf_trades`, `bf_strategies`, `bf_balance_entries`, `bf_insights`, `bf_summaries`, `bf_candles`, `bf_boxes`, `bf_trend_positions`, `bf_cfd_positions`
 - **coinmarket-data**: `ck_candles` + `bf_candles` (OHLCV 수집)
 - **공유**: `strategy_techniques` — 기법 원형 마스터, ck/bf 양쪽 FK 참조
 - **Enum 타입**: `strategystatus`, `ordertype`, `orderstatus`, `analysistype` (CK=UPPERCASE, BF=lowercase 별도 enum)
