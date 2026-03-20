@@ -20,6 +20,7 @@ trading-engine/
 ├── adapters/                # 외부 시스템 어댑터
 │   ├── coincheck/           # Coincheck REST + WS
 │   ├── bitflyer/            # BitFlyer REST + WS
+│   ├── gmo_fx/              # GMO FX REST + WS (외환 FX)
 │   └── database/            # SQLAlchemy ORM + 리포지토리
 ├── api/                     # FastAPI 프레젠테이션 계층
 │   ├── routes/              # 라우트
@@ -46,3 +47,4 @@ trading-engine/
 | trading-engine (CK) | 8000 | Coincheck 자동매매 |
 | trading-engine (BF) | 8001 | BitFlyer 자동매매 |
 | coinmarket-data | 8002 | 마켓 데이터 수집 (별도 서비스) |
+| trading-engine (GMO FX) | 8003 | GMO FX 외환 자동매매 |

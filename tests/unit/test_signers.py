@@ -11,6 +11,7 @@ import pytest
 
 from adapters.coincheck.signer import CoincheckSigner
 from adapters.bitflyer.signer import BitFlyerSigner
+from adapters.gmo_fx.signer import GmoFxSigner
 
 
 # ──────────────────────────────────────────────────────────────
@@ -170,3 +171,22 @@ def test_ck_nonce_longer_than_bf_timestamp() -> None:
     assert ck_len == 13, f"CK nonce should be 13 digits, got {ck_len}"
     assert bf_len == 10, f"BF timestamp should be 10 digits, got {bf_len}"
     assert ck_len > bf_len
+
+
+# ──────────────────────────────────────────────────────────────
+# GmoFxSigner (CK ms / BF sec 비교)
+# ──────────────────────────────────────────────────────────────
+
+def test_gmo_timestamp_same_unit_as_ck() -> None:
+    """GMO timestamp(ms, 13자리)는 CK nonce와 동일 단위."""
+    gmo = GmoFxSigner("k", "s")
+    headers = gmo.sign(method="GET", path="/v1/status")
+    ts_len = len(headers["API-TIMESTAMP"])
+    assert ts_len == 13, f"GMO timestamp should be 13 digits (ms), got {ts_len}"
+
+
+def test_gmo_header_names_differ_from_ck_bf() -> None:
+    """GMO 헤더: API-KEY/API-TIMESTAMP/API-SIGN (CK/BF와 다름)."""
+    gmo = GmoFxSigner("k", "s")
+    headers = gmo.sign(method="GET", path="/v1/status")
+    assert set(headers.keys()) == {"API-KEY", "API-TIMESTAMP", "API-SIGN"}

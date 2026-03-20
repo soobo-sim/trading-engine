@@ -1,6 +1,6 @@
 # Repo Architecture
 
-> 최종 업데이트: 2026-03-19
+> 최종 업데이트: 2026-03-21
 > 목적: monorepo 전체 구조 설계 및 각 프로젝트의 역할 정의
 
 ---
@@ -9,7 +9,7 @@
 
 ```
 repo/
-├── trading-engine/           ← 통합 자동매매 엔진 (CK port 8000, BF port 8001)
+├── trading-engine/           ← 통합 자동매매 엔진 (CK:8000, BF:8001, GMO FX:8003)
 │   ├── core/                 ← 순수 도메인 (전략·시그널·태스크·모니터링)
 │   ├── adapters/             ← 외부 시스템 (거래소·DB)
 │   ├── api/                  ← FastAPI 라우트
@@ -41,7 +41,8 @@ repo/
 ```
 trading-engine (단일 코드베이스)
   ├── EXCHANGE=coincheck → CoincheckAdapter → port 8000
-  └── EXCHANGE=bitflyer  → BitFlyerAdapter  → port 8001
+  ├── EXCHANGE=bitflyer  → BitFlyerAdapter  → port 8001
+  └── EXCHANGE=gmofx     → GmoFxAdapter     → port 8003
 
 사만다 (Samantha) — 매매 실행 에이전트, 양쪽 거래소 겸무
   └── 스킬: trader-common/openclaw/skills/ (trading-engine 기준)
@@ -61,7 +62,7 @@ coinmarket-data — 마켓 데이터 수집 (port 8002)
 |------|------|
 | **Hexagonal Architecture** | core/ (순수 도메인) + adapters/ (외부) + api/ (프레젠테이션) |
 | **거래소 무관성** | ExchangeAdapter Protocol — 거래소별 어댑터가 구현 |
-| **환경변수 분기** | `EXCHANGE=coincheck\|bitflyer`로 런타임 어댑터 선택 |
+| **환경변수 분기** | `EXCHANGE=coincheck\|bitflyer\|gmofx`로 런타임 어댑터 선택 |
 | **ORM 팩토리** | `create_*_model(prefix)` — ck_/bf_ 테이블 자동 분기 |
 | **TaskSupervisor** | 태스크 중첩 방지, exponential backoff 재시작, 헬스 리포트 |
 | **관찰 가능성** | JSON 구조화 로깅, 비즈니스 헬스체크, 포지션-잔고 정합성 |
@@ -93,6 +94,9 @@ trading-engine/
 │   ├── bitflyer/
 │   │   ├── client.py         ← BitFlyerAdapter (REST + WS)
 │   │   └── signer.py         ← HMAC-SHA256 서명
+│   ├── gmo_fx/
+│   │   ├── client.py         ← GmoFxAdapter (REST + WS, FX 외환)
+│   │   └── signer.py         ← HMAC-SHA256 서명 (ms timestamp)
 │   └── database/
 │       ├── models.py         ← ORM 팩토리 (ck_/bf_ 프리픽스)
 │       └── session.py        ← AsyncSession 관리
@@ -101,7 +105,7 @@ trading-engine/
 │   └── routes/               ← system, trading, account, strategies, boxes, candles, techniques, analysis
 ├── main.py                   ← lifespan DI 조립(EXCHANGE 분기) + JSON 로깅
 ├── Dockerfile                ← multi-stage (test→production)
-└── docker-compose.yml        ← coincheck-trader(:8000) + bitflyer-trader(:8001)
+└── docker-compose.yml        ← coincheck-trader(:8000) + bitflyer-trader(:8001) + gmofx-trader(:8003)
 ```
 
 ---
@@ -111,8 +115,9 @@ trading-engine/
 - **인스턴스**: 단일 PostgreSQL (`trader-postgres`, coinmarket-data docker-compose 관리)
 - **coincheck**: `ck_trades`, `ck_strategies`, `ck_balance_entries`, `ck_insights`, `ck_summaries`, `ck_candles`, `ck_boxes`, `ck_box_positions`, `ck_trend_positions`
 - **bitflyer**: `bf_trades`, `bf_strategies`, `bf_balance_entries`, `bf_insights`, `bf_summaries`, `bf_candles`, `bf_boxes`, `bf_trend_positions`, `bf_cfd_positions`
-- **coinmarket-data**: `ck_candles` + `bf_candles` (OHLCV 수집)
-- **공유**: `strategy_techniques` — 기법 원형 마스터, ck/bf 양쪽 FK 참조
+- **gmo_fx**: `gmo_trades`, `gmo_strategies`, `gmo_balance_entries`, `gmo_insights`, `gmo_summaries`, `gmo_trend_positions` (trading-engine), `gmo_candles` (coinmarket-data)
+- **coinmarket-data**: `ck_candles` + `bf_candles` + `gmo_candles` (OHLCV 수집)
+- **공유**: `strategy_techniques` — 기법 원형 마스터, ck/bf/gmo 양쪽 FK 참조
 - **Enum 타입**: `strategystatus`, `ordertype`, `orderstatus`, `analysistype` (CK=UPPERCASE, BF=lowercase 별도 enum)
 - **ORM**: `adapters/database/models.py` 팩토리 함수가 prefix로 테이블명 분기, `create_type=False`로 기존 enum 재사용
 
@@ -157,13 +162,13 @@ symlink 재생성: `bash trader-common/.create-symlink.sh`
 # 1. coinmarket-data (PostgreSQL 포함) — 반드시 먼저 기동
 cd coinmarket-data && docker-compose up -d --build
 
-# 2. trading-engine (CK + BF)
+# 2. trading-engine (CK + BF + GMO FX)
 cd trading-engine && docker-compose up -d --build
-# → coincheck-trader (:8000) + bitflyer-trader (:8001)
+# → coincheck-trader (:8000) + bitflyer-trader (:8001) + gmofx-trader (:8003)
 ```
 
 - Multi-stage Dockerfile: test stage (pytest 207개) → production stage
-- `EXCHANGE` 환경변수로 어댑터 선택 (coincheck / bitflyer)
+- `EXCHANGE` 환경변수로 어댑터 선택 (coincheck / bitflyer / gmofx)
 - `.env`에 API 키·시크릿·URL 일괄 관리
 - 외부 네트워크 `trader-network` (coinmarket-data가 생성)
 - JSON 구조화 로깅 (exchange 필드 포함, Docker logs에서 jq로 파싱 가능)

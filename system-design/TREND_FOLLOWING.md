@@ -399,5 +399,5 @@ trading-engine은 `ExchangeAdapter` Protocol로 거래소 차이를 추상화한
 ## 11. 관련 문서
 
 - [박스권 역추세 전략 설계](BOX_MEAN_REVERSION.md) — 횡보장 전환 시 사용
-- [전략 일반 설계](../../trader-common/solution-design/STRATEGY_DESIGN.md) — 전략 유형 원칙
+- [전략 일반 설계](STRATEGY_DESIGN.md) — 전략 유형 원칙
 - [추세추종 설계안 (Rachel 보고서)](../../trader-common/solution-design/archive/TREND_FOLLOWING_DESIGN.md) — 초기 설계 분석

@@ -1,0 +1,1 @@
+# GMO FX adapter package

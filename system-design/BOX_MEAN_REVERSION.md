@@ -278,5 +278,5 @@ trading-engine은 `ExchangeAdapter` Protocol로 거래소 차이를 추상화한
 ## 10. 관련 문서
 
 - [추세추종 전략 설계](TREND_FOLLOWING.md) — 추세장 전환 시 사용
-- [전략 일반 설계](../../trader-common/solution-design/STRATEGY_DESIGN.md) — 전략 유형 원칙
+- [전략 일반 설계](STRATEGY_DESIGN.md) — 전략 유형 원칙
 - [XRP 특화 전략](../../trader-common/solution-design/XRP_STRATEGY_DESIGN.md) — XRP 자산 특성

@@ -110,6 +110,15 @@ _EXCHANGE_CONFIG = {
         "env_base_url": "BITFLYER_BASE_URL",
         "default_base_url": "https://api.bitflyer.com",
     },
+    "gmofx": {
+        "prefix": "gmo",
+        "pair_column": "pair",
+        "order_id_length": 40,
+        "env_api_key": "GMOFX_API_KEY",
+        "env_api_secret": "GMOFX_API_SECRET",
+        "env_base_url": "GMOFX_BASE_URL",
+        "default_base_url": "https://forex-api.coin.z.com",
+    },
 }
 
 
@@ -123,6 +132,9 @@ def _create_adapter(exchange: str):
     if exchange == "coincheck":
         from adapters.coincheck.client import CoincheckAdapter
         return CoincheckAdapter(api_key=api_key, api_secret=api_secret, base_url=base_url)
+    elif exchange == "gmofx":
+        from adapters.gmo_fx.client import GmoFxAdapter
+        return GmoFxAdapter(api_key=api_key, api_secret=api_secret, base_url=base_url)
     else:
         from adapters.bitflyer.client import BitFlyerAdapter
         return BitFlyerAdapter(api_key=api_key, api_secret=api_secret, base_url=base_url)
@@ -152,7 +164,7 @@ async def lifespan(app: FastAPI):
     """startup → yield → shutdown"""
     exchange = os.environ.get("EXCHANGE", "coincheck").lower()
     if exchange not in _EXCHANGE_CONFIG:
-        raise ValueError(f"Unknown EXCHANGE: {exchange}. 'coincheck' 또는 'bitflyer'만 가능.")
+        raise ValueError(f"Unknown EXCHANGE: {exchange}. {list(_EXCHANGE_CONFIG.keys())}만 가능.")
 
     # 로깅 초기화 (exchange 이름 포함)
     setup_logging(exchange)

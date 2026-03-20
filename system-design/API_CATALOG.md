@@ -1,7 +1,7 @@
 # Trading Engine — API Catalog
 
-> 최종 업데이트: 2026-03-19 (모니터링 리포트 API 추가)
-> 단일 코드베이스, `EXCHANGE` 환경변수로 CK(port 8000)/BF(port 8001) 분기
+> 최종 업데이트: 2026-03-21 (GMO FX 어댑터 추가)
+> 단일 코드베이스, `EXCHANGE` 환경변수로 CK(port 8000)/BF(port 8001)/GMO FX(port 8003) 분기
 
 ---
 
