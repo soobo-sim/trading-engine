@@ -1,6 +1,6 @@
 # Trading Dashboard — 구현 정본
 
-> 최종 갱신: 2026-03-21 | Phase 0 구현 완료
+> 최종 갱신: 2026-03-22 | Phase 1 + 1.5 구현 완료
 
 ---
 
@@ -54,7 +54,7 @@ Browser (Tailscale VPN)
 - 계정 1개: 환경변수 `DASHBOARD_USER` + `DASHBOARD_PASSWORD` (bcrypt hash)
 - JWT 만료: 24시간 (설정: `JWT_EXPIRE_MINUTES=1440`)
 
-## BFF API (Phase 0)
+## BFF API (Phase 1.5)
 
 | 엔드포인트 | 인증 | 내부 호출 |
 |-----------|------|----------|
@@ -62,11 +62,13 @@ Browser (Tailscale VPN)
 | `POST /bff/auth/login` | 불필요 | — |
 | `POST /bff/auth/logout` | 불필요 | — |
 | `GET /bff/auth/me` | JWT | — |
-| `GET /bff/overview` | JWT | balance×2, strategies/active×2, health×3, ticker×N(coinmarket-data), positions×N |
-| `GET /bff/reports` | JWT | rachel_reports 테이블 |
+| `GET /bff/overview` | JWT | balance×2, strategies/active×2, health×3, ticker×N, positions×N |
+| `GET /bff/reports?report_type=&limit=&offset=` | JWT | rachel_reports 테이블 (콤마 구분 다중 타입 필터 지원) |
 | `GET /bff/reports/{id}` | JWT | rachel_reports 테이블 |
-| `POST /bff/reports` | JWT | rachel_reports INSERT |
+| `POST /bff/reports` | JWT 또는 API Key | rachel_reports INSERT |
 | `GET /bff/assets/history` | JWT | asset_snapshots 테이블 |
+| `GET /bff/candles/{exchange}/{pair}/{tf}` | JWT | coinmarket-data candles+ema+rsi+atr 번들 |
+| `GET /bff/positions?exchange=` | JWT | trading-engine 오픈포지션+거래이력+미체결주문 통합 |
 
 ## DB 테이블
 
@@ -76,7 +78,7 @@ Browser (Tailscale VPN)
 |------|------|------|
 | id | SERIAL PK | |
 | created_at | TIMESTAMPTZ | 생성 시각 |
-| report_type | VARCHAR(20) | daily_am, daily_pm, deep, ad_hoc |
+| report_type | VARCHAR(20) | daily_am, daily_pm, deep, ad_hoc, **monitoring**, **alert** |
 | timeframe | VARCHAR(10) | short, medium, long, NULL |
 | market_regime | VARCHAR(20) | trending, ranging, unclear |
 | regime_confidence | NUMERIC(4,2) | 0.00~1.00 |
@@ -117,12 +119,16 @@ Browser (Tailscale VPN)
 - lifespan에서 `asyncio.create_task(snapshot_loop())`로 시작
 - 수집: balance + ticker → JPY 환산 → INSERT
 
-## 프론트엔드 구성 (Phase 0)
+## 프론트엔드 구성 (Phase 1.5)
 
 | 페이지 | 경로 | 설명 |
 |--------|------|------|
 | Login | /login | ID/PW 로그인 |
-| Dashboard | / | 총 자산, 활성 포지션, 전략, 시스템 상태 |
+| Dashboard | / | 총 자산, 활성 포지션, 전략, 시스템 상태, **최근 보고 피드** |
+| Charts | /charts | 캔들차트(TradingView LC) + EMA + RSI/ATR 서브차트 |
+| Positions | /positions | 오픈 포지션(가격 게이지) + 거래 이력 + 미체결 주문 |
+| Reports | /reports | 보고 목록 (레이첼/사만다 필터) |
+| ReportDetail | /reports/:id | 보고 상세 (섹션 + 권고 + 괴리 분석 + 텔레그램 원문) |
 
 ## CORS
 
@@ -153,7 +159,8 @@ cd trading-dashboard && docker-compose up -d --build
 | Phase | 범위 | 상태 |
 |-------|------|------|
 | **0** | 뼈대 + 홈 + 인증 + 자산수집 | **구현 완료** |
-| 1 | 차트 (TradingView LC) + 포지션 + 레이첼 리포트 뷰어 | 대기 |
+| **1** | 차트 (TradingView LC) + 포지션 + 리포트 뷰어 | **구현 완료** |
+| **1.5** | 보고 통합 UI (report_type 확장, /reports/:id, 최근 보고 피드) | **구현 완료** |
 | 2 | 성과 분석 + 백테스트 UI + 괴리 대시보드 | 대기 |
 | 3 | 전략 관리 + 시장 현황 + 계좌 | 대기 |
 | 4 | 시스템 모니터링 + 2FA + audit log | 대기 |

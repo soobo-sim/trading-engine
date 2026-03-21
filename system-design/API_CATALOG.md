@@ -484,3 +484,54 @@ CFD 포지션 이력 (DB).
 ```
 
 **응답**: `grid_search.results` (top_n개), `grid_search.best_params`, `grid_search.best_sharpe`
+
+---
+
+## Trading Dashboard BFF (port 8010)
+
+> BFF(Backend-for-Frontend)는 trading-dashboard 전용 게이트웨이. 내부적으로 CK(8000), BF(8001), coinmarket-data(8002)를 호출.
+
+### 인증
+
+| 엔드포인트 | 메서드 | 설명 |
+|-----------|--------|------|
+| `/bff/auth/login` | POST | ID/PW 로그인 → JWT httpOnly 쿠키 발급 |
+| `/bff/auth/logout` | POST | 쿠키 삭제 |
+| `/bff/auth/me` | GET | 현재 로그인 사용자 정보 (JWT 필수) |
+
+### 대시보드
+
+| 엔드포인트 | 메서드 | 설명 |
+|-----------|--------|------|
+| `/bff/health` | GET | BFF 헬스체크 (인증 불필요) |
+| `/bff/overview` | GET | 종합 대시보드: 잔고×2 + 전략×2 + 헬스×3 + 티커×N + 포지션×N |
+
+### 차트
+
+| 엔드포인트 | 메서드 | 설명 |
+|-----------|--------|------|
+| `/bff/candles/{exchange}/{pair}/{tf}` | GET | 캔들+EMA+RSI+ATR 번들. coinmarket-data(8002) 4개 API 병렬 호출 |
+
+- `exchange`: `coincheck` \| `bitflyer`
+- `pair`: `btc_jpy`, `xrp_jpy`, `BTC_JPY` 등
+- `tf`: `4h`, `1h`, `15m` 등
+
+### 포지션
+
+| 엔드포인트 | 메서드 | 설명 |
+|-----------|--------|------|
+| `/bff/positions` | GET | 오픈 포지션 + 거래 이력 + 미체결 주문 통합. `?exchange=coincheck\|bitflyer` 필터 가능 |
+
+### 보고
+
+| 엔드포인트 | 메서드 | 설명 |
+|-----------|--------|------|
+| `/bff/reports` | GET | 보고 목록. `?report_type=daily_am,deep` 콤마 구분 다중 필터, `?limit=&offset=` 페이징 |
+| `/bff/reports/{id}` | GET | 보고 상세 (sections, recommendations, divergence_analysis, telegram_raw) |
+| `/bff/reports` | POST | 보고 생성. JWT 또는 API Key (`X-API-Key` 헤더) 인증 |
+
+### 자산
+
+| 엔드포인트 | 메서드 | 설명 |
+|-----------|--------|------|
+| `/bff/assets/history` | GET | 자산 스냅샷 이력 (asset_snapshots 테이블) |
