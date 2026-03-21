@@ -105,8 +105,11 @@ async def get_box_history(
             .order_by(TrendPos.closed_at)
         )
         trend_closed = trend_result.scalars().all()
-        trend_wins = [p for p in trend_closed if p.realized_pnl_jpy and float(p.realized_pnl_jpy) > 0]
-        trend_pnl_jpy = sum(float(p.realized_pnl_jpy) for p in trend_closed if p.realized_pnl_jpy)
+        trend_valid = [p for p in trend_closed if p.realized_pnl_jpy is not None]
+        trend_wins = [p for p in trend_valid if float(p.realized_pnl_jpy) > 0]
+        trend_losses = [p for p in trend_valid if float(p.realized_pnl_jpy) <= 0]
+        trend_unknown = len(trend_closed) - len(trend_valid)
+        trend_pnl_jpy = sum(float(p.realized_pnl_jpy) for p in trend_valid)
         trend_exit_reasons: Dict[str, int] = {}
         for p in trend_closed:
             if p.exit_reason:
@@ -119,9 +122,11 @@ async def get_box_history(
             "boxes": [],
             "trend_positions": {
                 "total": len(trend_closed),
+                "valid_trades": len(trend_valid),
                 "wins": len(trend_wins),
-                "losses": len(trend_closed) - len(trend_wins),
-                "win_rate": round(len(trend_wins) / len(trend_closed) * 100, 1) if trend_closed else None,
+                "losses": len(trend_losses),
+                "unknown": trend_unknown,
+                "win_rate": round(len(trend_wins) / len(trend_valid) * 100, 1) if trend_valid else None,
                 "total_pnl_jpy": round(trend_pnl_jpy, 2),
                 "exit_reason_distribution": trend_exit_reasons,
             },
@@ -131,9 +136,11 @@ async def get_box_history(
                 "invalidated_boxes": 0,
                 "total_positions": len(trend_closed),
                 "closed_positions": len(trend_closed),
+                "valid_trades": len(trend_valid),
                 "wins": len(trend_wins),
-                "losses": len(trend_closed) - len(trend_wins),
-                "win_rate": round(len(trend_wins) / len(trend_closed) * 100, 1) if trend_closed else None,
+                "losses": len(trend_losses),
+                "unknown": trend_unknown,
+                "win_rate": round(len(trend_wins) / len(trend_valid) * 100, 1) if trend_valid else None,
                 "avg_pnl_pct": None,
                 "total_pnl_jpy": round(trend_pnl_jpy, 2),
             },
@@ -159,7 +166,10 @@ async def get_box_history(
     box_list = []
     total_pos = 0
     total_closed = 0
+    total_valid = 0
     total_wins = 0
+    total_losses = 0
+    total_unknown = 0
     total_pnl_jpy = 0.0
     total_pnl_pct_sum = 0.0
     exit_reason_agg: Dict[str, int] = {}
@@ -167,9 +177,12 @@ async def get_box_history(
     for box in boxes:
         box_positions = pos_by_box.get(box.id, [])
         closed_pos = [p for p in box_positions if p.status == "closed"]
-        wins = [p for p in closed_pos if p.realized_pnl_jpy and float(p.realized_pnl_jpy) > 0]
-        pnl_jpy = sum(float(p.realized_pnl_jpy) for p in closed_pos if p.realized_pnl_jpy)
-        pnl_pct_sum = sum(float(p.realized_pnl_pct) for p in closed_pos if p.realized_pnl_pct)
+        valid_pos = [p for p in closed_pos if p.realized_pnl_jpy is not None]
+        wins = [p for p in valid_pos if float(p.realized_pnl_jpy) > 0]
+        pos_losses = [p for p in valid_pos if float(p.realized_pnl_jpy) <= 0]
+        pos_unknown = len(closed_pos) - len(valid_pos)
+        pnl_jpy = sum(float(p.realized_pnl_jpy) for p in valid_pos)
+        pnl_pct_sum = sum(float(p.realized_pnl_pct) for p in valid_pos if p.realized_pnl_pct is not None)
 
         exit_reasons: Dict[str, int] = {}
         for p in closed_pos:
@@ -179,7 +192,10 @@ async def get_box_history(
 
         total_pos += len(box_positions)
         total_closed += len(closed_pos)
+        total_valid += len(valid_pos)
         total_wins += len(wins)
+        total_losses += len(pos_losses)
+        total_unknown += pos_unknown
         total_pnl_jpy += pnl_jpy
         total_pnl_pct_sum += pnl_pct_sum
 
@@ -203,10 +219,12 @@ async def get_box_history(
                 "total": len(box_positions),
                 "closed": len(closed_pos),
                 "open": len([p for p in box_positions if p.status == "open"]),
+                "valid_trades": len(valid_pos),
                 "wins": len(wins),
-                "losses": len(closed_pos) - len(wins),
-                "win_rate": round(len(wins) / len(closed_pos) * 100, 1) if closed_pos else None,
-                "avg_pnl_pct": round(pnl_pct_sum / len(closed_pos), 4) if closed_pos else None,
+                "losses": len(pos_losses),
+                "unknown": pos_unknown,
+                "win_rate": round(len(wins) / len(valid_pos) * 100, 1) if valid_pos else None,
+                "avg_pnl_pct": round(pnl_pct_sum / len(valid_pos), 4) if valid_pos else None,
                 "total_pnl_jpy": round(pnl_jpy, 2),
                 "exit_reasons": exit_reasons,
             },
@@ -227,8 +245,11 @@ async def get_box_history(
         .order_by(TrendPos.closed_at)
     )
     trend_closed = trend_result.scalars().all()
-    trend_wins = [p for p in trend_closed if p.realized_pnl_jpy and float(p.realized_pnl_jpy) > 0]
-    trend_pnl_jpy = sum(float(p.realized_pnl_jpy) for p in trend_closed if p.realized_pnl_jpy)
+    trend_valid = [p for p in trend_closed if p.realized_pnl_jpy is not None]
+    trend_wins = [p for p in trend_valid if float(p.realized_pnl_jpy) > 0]
+    trend_losses = [p for p in trend_valid if float(p.realized_pnl_jpy) <= 0]
+    trend_unknown = len(trend_closed) - len(trend_valid)
+    trend_pnl_jpy = sum(float(p.realized_pnl_jpy) for p in trend_valid)
 
     trend_exit_reasons: Dict[str, int] = {}
     for p in trend_closed:
@@ -242,9 +263,11 @@ async def get_box_history(
         "boxes": box_list,
         "trend_positions": {
             "total": len(trend_closed),
+            "valid_trades": len(trend_valid),
             "wins": len(trend_wins),
-            "losses": len(trend_closed) - len(trend_wins),
-            "win_rate": round(len(trend_wins) / len(trend_closed) * 100, 1) if trend_closed else None,
+            "losses": len(trend_losses),
+            "unknown": trend_unknown,
+            "win_rate": round(len(trend_wins) / len(trend_valid) * 100, 1) if trend_valid else None,
             "total_pnl_jpy": round(trend_pnl_jpy, 2),
             "exit_reason_distribution": trend_exit_reasons,
         },
@@ -254,12 +277,14 @@ async def get_box_history(
             "invalidated_boxes": len(boxes) - active_count,
             "total_positions": total_pos + len(trend_closed),
             "closed_positions": total_closed + len(trend_closed),
+            "valid_trades": total_valid + len(trend_valid),
             "wins": total_wins + len(trend_wins),
-            "losses": (total_closed - total_wins) + (len(trend_closed) - len(trend_wins)),
+            "losses": total_losses + len(trend_losses),
+            "unknown": total_unknown + trend_unknown,
             "win_rate": round(
-                (total_wins + len(trend_wins)) / (total_closed + len(trend_closed)) * 100, 1
-            ) if (total_closed + len(trend_closed)) > 0 else None,
-            "avg_pnl_pct": round(total_pnl_pct_sum / total_closed, 4) if total_closed > 0 else None,
+                (total_wins + len(trend_wins)) / (total_valid + len(trend_valid)) * 100, 1
+            ) if (total_valid + len(trend_valid)) > 0 else None,
+            "avg_pnl_pct": round(total_pnl_pct_sum / total_valid, 4) if total_valid > 0 else None,
             "total_pnl_jpy": round(total_pnl_jpy + trend_pnl_jpy, 2),
             "exit_reason_distribution": {
                 **exit_reason_agg,
@@ -333,8 +358,10 @@ async def get_trade_stats(
             "since": since.isoformat(),
             "stats": {
                 "total_trades": 0,
+                "valid_trades": 0,
                 "wins": 0,
                 "losses": 0,
+                "unknown": 0,
                 "win_rate": None,
                 "avg_win_pct": None,
                 "avg_loss_pct": None,
@@ -346,13 +373,15 @@ async def get_trade_stats(
             },
         }
 
-    wins = [p for p in all_positions if p.realized_pnl_jpy and float(p.realized_pnl_jpy) > 0]
-    losses = [p for p in all_positions if p.realized_pnl_jpy and float(p.realized_pnl_jpy) <= 0]
+    wins = [p for p in all_positions if p.realized_pnl_jpy is not None and float(p.realized_pnl_jpy) > 0]
+    losses = [p for p in all_positions if p.realized_pnl_jpy is not None and float(p.realized_pnl_jpy) <= 0]
 
     total = len(all_positions)
     win_count = len(wins)
     loss_count = len(losses)
-    win_rate = win_count / total if total > 0 else 0
+    valid_count = win_count + loss_count
+    unknown_count = total - valid_count
+    win_rate = win_count / valid_count if valid_count > 0 else 0
 
     avg_win_pct = (
         sum(float(p.realized_pnl_pct) for p in wins if p.realized_pnl_pct) / win_count
@@ -370,11 +399,12 @@ async def get_trade_stats(
     max_consec_loss = 0
     cur_consec = 0
     for p in all_positions:
-        if p.realized_pnl_jpy and float(p.realized_pnl_jpy) <= 0:
+        if p.realized_pnl_jpy is not None and float(p.realized_pnl_jpy) <= 0:
             cur_consec += 1
             max_consec_loss = max(max_consec_loss, cur_consec)
-        else:
+        elif p.realized_pnl_jpy is not None:
             cur_consec = 0
+        # PnL unknown: don't affect streak
 
     exit_reasons: Dict[str, int] = {}
     for p in all_positions:
@@ -389,13 +419,18 @@ async def get_trade_stats(
         closed = [p for p in pos_list if p.status == "closed"]
         if not closed:
             continue
-        s_wins = [p for p in closed if p.realized_pnl_jpy and float(p.realized_pnl_jpy) > 0]
-        s_pnl = sum(float(p.realized_pnl_jpy) for p in closed if p.realized_pnl_jpy)
+        s_valid = [p for p in closed if p.realized_pnl_jpy is not None]
+        s_wins = [p for p in s_valid if float(p.realized_pnl_jpy) > 0]
+        s_losses = [p for p in s_valid if float(p.realized_pnl_jpy) <= 0]
+        s_unknown = len(closed) - len(s_valid)
+        s_pnl = sum(float(p.realized_pnl_jpy) for p in s_valid)
         by_strategy[label] = {
             "trades": len(closed),
+            "valid_trades": len(s_valid),
             "wins": len(s_wins),
-            "losses": len(closed) - len(s_wins),
-            "win_rate": round(len(s_wins) / len(closed) * 100, 1),
+            "losses": len(s_losses),
+            "unknown": s_unknown,
+            "win_rate": round(len(s_wins) / len(s_valid) * 100, 1) if s_valid else 0.0,
             "total_pnl_jpy": round(s_pnl, 2),
         }
 
@@ -406,8 +441,10 @@ async def get_trade_stats(
         "since": since.isoformat(),
         "stats": {
             "total_trades": total,
+            "valid_trades": valid_count,
             "wins": win_count,
             "losses": loss_count,
+            "unknown": unknown_count,
             "win_rate": round(win_rate * 100, 1),
             "avg_win_pct": round(avg_win_pct, 4) if avg_win_pct is not None else None,
             "avg_loss_pct": round(avg_loss_pct, 4) if avg_loss_pct is not None else None,
@@ -565,6 +602,7 @@ async def get_trend_signal(
     atr_period: int = Query(14, ge=5, le=100, description="ATR 기간"),
     rsi_entry_low: float = Query(40.0, ge=20.0, le=60.0, description="RSI 진입 하한"),
     rsi_entry_high: float = Query(65.0, ge=50.0, le=80.0, description="RSI 진입 상한"),
+    ema_slope_entry_min: float = Query(0.0, ge=-0.5, le=0.5, description="EMA slope 진입 최소 임곗값(%)"),
     entry_price: Optional[float] = Query(None, description="현재 포지션 진입가 (청산 시그널 판단용)"),
     state: AppState = Depends(get_state),
     db: AsyncSession = Depends(get_db),
@@ -640,7 +678,7 @@ async def get_trend_signal(
 
     # 조건 평가
     price_above_ema = (current_price > ema) if ema else None
-    ema_slope_positive = (ema_slope_pct > 0) if ema_slope_pct is not None else None
+    ema_slope_positive = (ema_slope_pct >= ema_slope_entry_min) if ema_slope_pct is not None else None
     rsi_in_entry_range = (rsi_entry_low <= rsi <= rsi_entry_high) if rsi is not None else None
     rsi_overbought = (rsi > rsi_entry_high) if rsi is not None else None
 

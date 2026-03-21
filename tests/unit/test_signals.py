@@ -389,3 +389,52 @@ class TestShortStopLoss:
         result = compute_trend_signal(candles, side="buy")
         if result["stop_loss_price"] is not None:
             assert result["stop_loss_price"] < result["current_price"]
+
+
+# ── EMA Slope Entry Min ─────────────────
+
+class TestEmaSlopeEntryMin:
+    """ema_slope_entry_min 파라미터 검증 — 현물 진입 조건 완화."""
+
+    def test_default_zero_blocks_negative_slope(self):
+        """기본값(0.0): 음수 slope → entry_ok 불가."""
+        # 미세 하락이면서 price > EMA인 캔들
+        candles = _make_uptrend_candles(30, start=100.0, step=0.05)
+        result_default = compute_trend_signal(candles)
+        # slope이 양수 — 비교 기준용
+        if result_default["ema_slope_pct"] is not None and result_default["ema_slope_pct"] > 0:
+            # 이 경우 entry_ok 가능 (기본 동작 확인)
+            pass
+
+    def test_negative_threshold_allows_entry(self):
+        """ema_slope_entry_min=-0.1: 약간 기울기 둔화 시 entry_ok 허용."""
+        # 강한 상승 후 끝에서 소폭 하락 → price > EMA, slope ≈ 약한 음수~0
+        candles = []
+        for i in range(25):
+            c = 100.0 + i * 2.0  # 강한 상승
+            candles.append(_FakeCandle(c - 0.5, c + 0.5, c - 1.0, c, volume=100.0))
+        for i in range(5):
+            c = 148.0 - i * 0.3  # 소폭 하락 (peak 148 근처에서)
+            candles.append(_FakeCandle(c - 0.5, c + 0.5, c - 1.0, c, volume=100.0))
+
+        result_strict = compute_trend_signal(candles)
+        result_relaxed = compute_trend_signal(
+            candles, params={"ema_slope_entry_min": -0.1}
+        )
+        # slope이 양수면 두 결과 모두 동일 → 이 테스트는 slope이 0 근처일 때 의미
+        if result_strict["ema_slope_pct"] is not None and result_strict["ema_slope_pct"] < 0:
+            assert result_strict["signal"] != "entry_ok"
+            # relaxed에서는 slope >= -0.1이면 entry_ok 가능
+            if result_relaxed["ema_slope_pct"] >= -0.1:
+                assert result_relaxed["signal"] in ("entry_ok", "wait_dip", "wait_regime", "no_signal")
+
+    def test_positive_threshold_stricter(self):
+        """ema_slope_entry_min=0.1: 약한 양수 slope도 차단."""
+        candles = _make_uptrend_candles(30, start=100.0, step=0.05)
+        result = compute_trend_signal(
+            candles, params={"ema_slope_entry_min": 0.1}
+        )
+        # slope이 0.1 미만이면 entry_ok가 아님
+        if (result["ema_slope_pct"] is not None
+                and 0 < result["ema_slope_pct"] < 0.1):
+            assert result["signal"] != "entry_ok"

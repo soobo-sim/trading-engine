@@ -259,14 +259,15 @@ proposed → rejected.
     "days": 30,
     "boxes": [{...}],
     "trend_positions": {
-        "total": 2, "wins": 2, "losses": 0,
+        "total": 2, "valid_trades": 2, "wins": 2, "losses": 0, "unknown": 0,
         "win_rate": 100.0, "total_pnl_jpy": 7250.0,
         "exit_reason_distribution": {"trailing_stop": 1, "ema_breakdown": 1}
     },
     "summary": {
         "total_boxes": 1, "active_boxes": 1,
         "total_positions": 4, "closed_positions": 4,
-        "wins": 3, "losses": 1, "win_rate": 75.0,
+        "valid_trades": 4, "wins": 3, "losses": 1, "unknown": 0,
+        "win_rate": 75.0,
         "total_pnl_jpy": 8750.0,
         "exit_reason_distribution": {"near_upper_exit": 1, "trend:trailing_stop": 1, ...}
     }
@@ -284,14 +285,15 @@ proposed → rejected.
 {
     "success": true,
     "stats": {
-        "total_trades": 4, "wins": 3, "losses": 1,
+        "total_trades": 4, "valid_trades": 4,
+        "wins": 3, "losses": 1, "unknown": 0,
         "win_rate": 75.0, "expected_value_pct": 0.0143,
         "total_pnl_jpy": 8750.0,
         "max_consecutive_losses": 1,
         "exit_reason_distribution": {...},
         "by_strategy": {
-            "box_mean_reversion": {"trades": 2, "wins": 1, ...},
-            "trend_following": {"trades": 2, "wins": 2, ...}
+            "box_mean_reversion": {"trades": 2, "valid_trades": 2, "wins": 1, ...},
+            "trend_following": {"trades": 2, "valid_trades": 2, "wins": 2, ...}
         }
     }
 }

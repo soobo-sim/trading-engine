@@ -287,8 +287,9 @@ def compute_trend_signal(
     # 조건
     rsi_entry_low = float(params.get("entry_rsi_min", 40.0))
     rsi_entry_high = float(params.get("entry_rsi_max", 65.0))
+    slope_entry_min = float(params.get("ema_slope_entry_min", 0.0))
     price_above_ema = (current_price > ema) if ema else None
-    ema_slope_positive = (ema_slope_pct > 0) if ema_slope_pct is not None else None
+    ema_slope_positive = (ema_slope_pct >= slope_entry_min) if ema_slope_pct is not None else None
     ema_slope_negative = (ema_slope_pct < 0) if ema_slope_pct is not None else None
     rsi_in_range = (rsi_entry_low <= rsi <= rsi_entry_high) if rsi is not None else None
     rsi_overbought = (rsi > rsi_entry_high) if rsi is not None else None

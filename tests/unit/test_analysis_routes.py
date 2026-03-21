@@ -234,6 +234,8 @@ class TestTradeStats:
         assert resp.status_code == 200
         data = resp.json()
         assert data["stats"]["total_trades"] == 0
+        assert data["stats"]["valid_trades"] == 0
+        assert data["stats"]["unknown"] == 0
         assert data["stats"]["by_strategy"] == {}
 
     @pytest.mark.asyncio
@@ -247,8 +249,10 @@ class TestTradeStats:
         stats = resp.json()["stats"]
 
         assert stats["total_trades"] == 4
+        assert stats["valid_trades"] == 4
         assert stats["wins"] == 3
         assert stats["losses"] == 1
+        assert stats["unknown"] == 0
         assert stats["win_rate"] == 75.0
 
         # by_strategy
@@ -314,8 +318,10 @@ class TestBoxHistory:
         assert "trend_positions" in data
         tp = data["trend_positions"]
         assert tp["total"] == 2
+        assert tp["valid_trades"] == 2
         assert tp["wins"] == 2
         assert tp["losses"] == 0
+        assert tp["unknown"] == 0
         assert tp["total_pnl_jpy"] == 7250.0
 
     @pytest.mark.asyncio
@@ -329,8 +335,10 @@ class TestBoxHistory:
 
         # 박스포지션 2 + 추세포지션 2 = 4
         assert summary["closed_positions"] == 4
+        assert summary["valid_trades"] == 4
         assert summary["wins"] == 3
         assert summary["losses"] == 1
+        assert summary["unknown"] == 0
         # box pnl 1500 + trend pnl 7250 = 8750
         assert summary["total_pnl_jpy"] == 8750.0
 
@@ -354,3 +362,114 @@ class TestInvalidPeriod:
         client, _ = setup
         resp = await client.get("/api/analysis/trade-stats?pair=xrp_jpy&period=yearly")
         assert resp.status_code == 400
+
+
+async def _seed_with_unknown_pnl(factory: async_sessionmaker):
+    """PnL null 포지션 포함 시드: 박스 1승 + 추세 1건(PnL null)."""
+    now = datetime.now(timezone.utc)
+    async with factory() as db:
+        box = AnlBox(
+            pair="xrp_jpy",
+            upper_bound=Decimal("110"),
+            lower_bound=Decimal("90"),
+            upper_touch_count=3,
+            lower_touch_count=3,
+            tolerance_pct=Decimal("2.0"),
+            status="active",
+            created_at=now - timedelta(days=10),
+        )
+        db.add(box)
+        await db.flush()
+
+        bp = AnlBoxPosition(
+            pair="xrp_jpy",
+            box_id=box.id,
+            side="buy",
+            entry_order_id="box-e-1",
+            entry_price=Decimal("91"),
+            entry_amount=Decimal("100"),
+            entry_jpy=Decimal("9100"),
+            exit_order_id="box-x-1",
+            exit_price=Decimal("109"),
+            exit_amount=Decimal("100"),
+            exit_jpy=Decimal("10900"),
+            exit_reason="near_upper_exit",
+            realized_pnl_jpy=Decimal("1800"),
+            realized_pnl_pct=Decimal("19.78"),
+            status="closed",
+            created_at=now - timedelta(days=8),
+            closed_at=now - timedelta(days=7),
+        )
+        db.add(bp)
+
+        # PnL null 추세 포지션 (BUG-008 수정 이전 청산건)
+        tp_unknown = AnlTrendPosition(
+            pair="xrp_jpy",
+            strategy_id=None,
+            entry_order_id="trend-null-1",
+            entry_price=Decimal("95"),
+            entry_amount=Decimal("200"),
+            entry_jpy=Decimal("19000"),
+            stop_loss_price=Decimal("90"),
+            exit_order_id="trend-null-x1",
+            exit_price=None,
+            exit_amount=None,
+            exit_jpy=None,
+            exit_reason="trailing_stop",
+            realized_pnl_jpy=None,
+            realized_pnl_pct=None,
+            status="closed",
+            created_at=now - timedelta(days=4),
+            closed_at=now - timedelta(days=3),
+        )
+        db.add(tp_unknown)
+        await db.commit()
+
+
+class TestUnknownPnl:
+    """PnL null 포지션이 unknown으로 분류되는 검증."""
+
+    @pytest.mark.asyncio
+    async def test_trade_stats_unknown(self, setup):
+        """PnL null → unknown 카운트, win_rate는 valid 기준."""
+        client, factory = setup
+        await _seed_with_unknown_pnl(factory)
+
+        resp = await client.get("/api/analysis/trade-stats?pair=xrp_jpy&period=all")
+        stats = resp.json()["stats"]
+
+        assert stats["total_trades"] == 2  # box 1 + trend 1
+        assert stats["valid_trades"] == 1  # box 1만 PnL 있음
+        assert stats["wins"] == 1
+        assert stats["losses"] == 0
+        assert stats["unknown"] == 1
+        assert stats["win_rate"] == 100.0  # 1/1 * 100
+
+        # by_strategy
+        trend_stats = stats["by_strategy"]["trend_following"]
+        assert trend_stats["trades"] == 1
+        assert trend_stats["valid_trades"] == 0
+        assert trend_stats["unknown"] == 1
+        assert trend_stats["win_rate"] == 0.0
+
+    @pytest.mark.asyncio
+    async def test_box_history_unknown(self, setup):
+        """box-history summary에서 unknown 분리."""
+        client, factory = setup
+        await _seed_with_unknown_pnl(factory)
+
+        resp = await client.get("/api/analysis/box-history?pair=xrp_jpy&days=30")
+        data = resp.json()
+
+        tp = data["trend_positions"]
+        assert tp["total"] == 1
+        assert tp["valid_trades"] == 0
+        assert tp["unknown"] == 1
+        assert tp["win_rate"] is None
+
+        summary = data["summary"]
+        assert summary["valid_trades"] == 1  # box 1만
+        assert summary["unknown"] == 1
+        assert summary["wins"] == 1
+        assert summary["losses"] == 0
+        assert summary["win_rate"] == 100.0

@@ -283,6 +283,7 @@ RSI + 볼륨 다이버전스 기반 스탑 타이트닝은 Phase 3으로 CandleM
 | `divergence_lookback` | `40` | 피봇 탐색 캔들 수 (4H×40≈7일, `_compute_signal` limit 결정에도 사용) |
 | `volume_divergence_enabled` | `true` | 볼륨 다이버전스 감지 ON/OFF (divergence_enabled와 독립) |
 | `volume_divergence_min_drop` | `0.15` | 거래량 최소 감소율 (0.15=15%, 노이즈 필터) |
+| `ema_slope_entry_min` | `0.0` | EMA slope 진입 최소 임곗값 (%) — 현물은 음수 허용으로 조기 진입 가능 |
 
 > **제거된 파라미터**: `trailing_stop_atr` (1.5 고정) → `trailing_stop_atr_initial/mature`로 교체.
 > `partial_exit_rsi_pct`, `partial_exit_profit_pct` — 부분 청산 제거로 미사용.
