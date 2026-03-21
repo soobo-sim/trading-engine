@@ -80,7 +80,7 @@ from adapters.database.models import (
 )
 from adapters.database.session import create_db_engine, create_session_factory
 from api.dependencies import AppState, ModelRegistry
-from api.routes import system, trading, account, strategies, boxes, candles, techniques, analysis, monitoring, cfd
+from api.routes import system, trading, account, strategies, boxes, candles, techniques, analysis, monitoring, cfd, performance
 from core.monitoring.health import HealthChecker
 from core.strategy.box_mean_reversion import BoxMeanReversionManager
 from core.strategy.cfd_trend_following import CfdTrendFollowingManager
@@ -311,3 +311,4 @@ app.include_router(techniques.router)
 app.include_router(analysis.router)
 app.include_router(monitoring.router)
 app.include_router(cfd.router)
+app.include_router(performance.router)

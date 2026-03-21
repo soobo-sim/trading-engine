@@ -62,7 +62,7 @@ Browser (Tailscale VPN)
 | `POST /bff/auth/login` | 불필요 | — |
 | `POST /bff/auth/logout` | 불필요 | — |
 | `GET /bff/auth/me` | JWT | — |
-| `GET /bff/overview` | JWT | balance×2, strategies/active×2, health×3, ticker×N, positions×N |
+| `GET /bff/overview` | JWT | balance×2, strategies/active×2, health×3, ticker×N(coinmarket-data), positions×N |
 | `GET /bff/reports` | JWT | rachel_reports 테이블 |
 | `GET /bff/reports/{id}` | JWT | rachel_reports 테이블 |
 | `POST /bff/reports` | JWT | rachel_reports INSERT |

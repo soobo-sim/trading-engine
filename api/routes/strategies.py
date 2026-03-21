@@ -9,6 +9,7 @@ PUT    /api/strategies/{id}/activate — 활성화
 PUT    /api/strategies/{id}/archive  — 아카이브
 PUT    /api/strategies/{id}/reject   — 거부
 """
+import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -17,6 +18,8 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.dependencies import AppState, get_db, get_state
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/strategies", tags=["Strategies"])
 
@@ -154,7 +157,7 @@ async def archive_strategy(
     state: AppState = Depends(get_state),
     db: AsyncSession = Depends(get_db),
 ):
-    """active|proposed → archived."""
+    """active|proposed → archived. 성과 카드 자동 생성."""
     Model = state.models.strategy
     row = await db.get(Model, strategy_id)
     if not row:
@@ -164,6 +167,21 @@ async def archive_strategy(
 
     row.status = "archived"
     row.archived_at = datetime.now(timezone.utc)
+
+    # 성과 카드 자동 생성 (1-B)
+    pair = (row.parameters or {}).get("pair") or (row.parameters or {}).get("product_code")
+    if pair and row.activated_at:
+        try:
+            from api.routes.performance import compute_performance_summary
+            summary = await compute_performance_summary(
+                db=db, state=state,
+                strategy_id=row.id, pair=pair,
+                activated_at=row.activated_at, archived_at=row.archived_at,
+            )
+            row.performance_summary = summary
+        except Exception as e:
+            logger.warning(f"성과 카드 생성 실패 (strategy_id={strategy_id}): {e}")
+
     await db.commit()
     await db.refresh(row)
     return _strategy_to_dict(row)

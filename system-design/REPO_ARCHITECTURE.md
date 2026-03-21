@@ -82,7 +82,10 @@ trading-engine/
 │   ├── strategy/
 │   │   ├── trend_following.py  ← 추세추종 매니저
 │   │   ├── box_mean_reversion.py ← 박스권 매니저
+│   │   ├── cfd_trend_following.py ← CFD 매니저 (BF FX_BTC_JPY)
 │   │   └── signals.py        ← EMA, RSI, ATR, 다이버전스 등
+│   ├── backtest/
+│   │   └── engine.py         ← 캔들 리플레이 백테스트 + 그리드 서치
 │   ├── task/
 │   │   └── supervisor.py     ← TaskSupervisor
 │   └── monitoring/
@@ -102,7 +105,7 @@ trading-engine/
 │       └── session.py        ← AsyncSession 관리
 ├── api/
 │   ├── dependencies.py       ← AppState + ModelRegistry DI
-│   └── routes/               ← system, trading, account, strategies, boxes, candles, techniques, analysis
+│   └── routes/               ← system, trading, account, strategies, boxes, candles, techniques, analysis, performance
 ├── main.py                   ← lifespan DI 조립(EXCHANGE 분기) + JSON 로깅
 ├── Dockerfile                ← multi-stage (test→production)
 └── docker-compose.yml        ← coincheck-trader(:8000) + bitflyer-trader(:8001) + gmofx-trader(:8003)

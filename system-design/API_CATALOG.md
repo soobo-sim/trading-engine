@@ -1,6 +1,6 @@
 # Trading Engine — API Catalog
 
-> 최종 업데이트: 2026-03-21 (GMO FX 어댑터 추가)
+> 최종 업데이트: 2026-03-21 (Phase 1-B/1-C: 성과 메트릭 + 백테스트 엔진)
 > 단일 코드베이스, `EXCHANGE` 환경변수로 CK(port 8000)/BF(port 8001)/GMO FX(port 8003) 분기
 
 ---
@@ -37,6 +37,10 @@
 | 26 | GET | `/api/monitoring/report` | Monitoring | 사만다 15분 보고용 리포트 |
 | 27 | GET | `/api/cfd/status` | CFD | CFD 실시간 상태 (포지션 + keep_rate) |
 | 28 | GET | `/api/cfd/positions` | CFD | CFD 포지션 이력 |
+| 29 | GET | `/api/performance` | Performance | 종합 성과 메트릭 (수익률, 샤프, 드로다운) |
+| 30 | GET | `/api/performance/compare` | Performance | 백테스트 vs 실전 괴리 비교 |
+| 31 | POST | `/api/backtest/run` | Backtest | 백테스트 실행 (캔들 리플레이) |
+| 32 | POST | `/api/backtest/grid` | Backtest | 파라미터 그리드 서치 |
 
 ---
 
@@ -395,3 +399,88 @@ CFD 실시간 상태 — 인메모리 포지션 + BitFlyer 증거금/keep_rate.
 CFD 포지션 이력 (DB).
 
 **Query**: `product_code` (default: `FX_BTC_JPY`), `status` (open/closed), `limit` (1-100, default: 20)
+
+---
+
+### 11. Performance (Phase 1-B)
+
+#### `GET /api/performance`
+
+종합 성과 메트릭. 추세추종 + 박스 포지션 통합 집계.
+
+**Query**: `pair` (필수), `period` (7d|30d|90d|180d|365d|all, default: 30d), `strategy_type` (선택: trend_following|box_mean_reversion)
+
+```json
+{
+  "success": true,
+  "pair": "xrp_jpy",
+  "period": "90d",
+  "metrics": {
+    "total_trades": 25, "valid_trades": 23, "wins": 14, "losses": 9, "unknown": 2,
+    "win_rate": 60.9, "total_pnl_jpy": 12800.0, "total_return_pct": 12.8,
+    "avg_win_pct": 3.2, "avg_loss_pct": -1.8, "expected_value_pct": 1.22,
+    "sharpe_ratio": 1.1, "max_drawdown_pct": 6.3, "max_consecutive_losses": 3,
+    "avg_holding_hours": 28.5,
+    "monthly": [{"month": "2026-01", "trades": 8, "return_pct": 2.8, "avg_pct": 0.35}]
+  },
+  "by_strategy": {"trend_following": {...}, "box_mean_reversion": {...}}
+}
+```
+
+#### `GET /api/performance/compare`
+
+백테스트 vs 실전 괴리 비교. 활성(또는 최근 archived) 전략 파라미터로 동일 기간 백테스트 자동 실행.
+
+**Query**: `pair` (필수), `period` (default: 90d), `strategy_type` (선택)
+
+```json
+{
+  "success": true,
+  "pair": "xrp_jpy",
+  "period": "90d",
+  "backtest": {"total_trades": 28, "win_rate": 60.7, "total_return_pct": 15.2, "sharpe_ratio": 1.3, "max_drawdown_pct": 5.8},
+  "live": {"total_trades": 25, "win_rate": 60.9, "total_return_pct": 12.8, "sharpe_ratio": 1.1, "max_drawdown_pct": 6.3},
+  "gap": {"return_gap": -2.4, "sharpe_gap": -0.2, "drawdown_gap": 0.5},
+  "reliability_score": 84
+}
+```
+
+---
+
+### 12. Backtest (Phase 1-C)
+
+#### `POST /api/backtest/run`
+
+백테스트 실행. 실전과 동일한 `signals.py` 호출, 슬리피지/수수료 시뮬레이션 포함.
+
+**Body**:
+```json
+{
+  "pair": "xrp_jpy",
+  "params": {"trailing_stop_atr_initial": 2.0, "entry_rsi_max": 65, ...},
+  "days": 90,
+  "timeframe": "4h",
+  "initial_capital_jpy": 100000,
+  "slippage_pct": 0.05,
+  "fee_pct": 0.15
+}
+```
+
+**응답**: `result` 필드에 BacktestResult (trades, win_rate, sharpe, drawdown, monthly 등)
+
+#### `POST /api/backtest/grid`
+
+파라미터 그리드 서치. 모든 조합으로 백테스트 실행 후 Sharpe ratio 기준 정렬.
+
+**Body**:
+```json
+{
+  "pair": "xrp_jpy",
+  "base_params": {...},
+  "param_grid": {"trailing_stop_atr_initial": [1.5, 2.0, 2.5], "entry_rsi_max": [60, 65, 70]},
+  "days": 90,
+  "top_n": 10
+}
+```
+
+**응답**: `grid_search.results` (top_n개), `grid_search.best_params`, `grid_search.best_sharpe`

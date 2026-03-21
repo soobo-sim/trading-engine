@@ -19,7 +19,6 @@ import logging
 import os
 import sys
 
-import httpx
 from decimal import Decimal
 from sqlalchemy import text, update
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
@@ -31,21 +30,22 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")
 COINMARKET_URL = os.getenv("COINMARKET_URL", "http://localhost:8002")
 
 
-async def fetch_candle_close(pair: str, closed_at_iso: str) -> float | None:
-    """coinmarket-data에서 closed_at 시점 가장 가까운 1min candle close 조회."""
-    url = f"{COINMARKET_URL}/api/ck/candles/{pair}/1min"
-    params = {"limit": 1, "before": closed_at_iso}
-    async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.get(url, params=params)
-        if resp.status_code != 200:
-            logger.error("Candle API 실패: %s %s", resp.status_code, resp.text)
-            return None
-        data = resp.json()
-        candles = data.get("candles", [])
-        if not candles:
-            logger.warning("해당 시점 캔들 없음: %s", closed_at_iso)
-            return None
-        return float(candles[0]["close"])
+async def fetch_candle_close_from_db(session: AsyncSession, pair: str, closed_at) -> float | None:
+    """DB에서 closed_at 시점 직전 1h candle close 조회 (coinmarket-data ck_candles 테이블 직접)."""
+    result = await session.execute(
+        text(
+            "SELECT close FROM ck_candles "
+            "WHERE pair = :pair AND timeframe = '1h' AND is_complete = true "
+            "AND open_time <= :closed_at "
+            "ORDER BY open_time DESC LIMIT 1"
+        ),
+        {"pair": pair, "closed_at": closed_at},
+    )
+    row = result.first()
+    if not row:
+        logger.warning("해당 시점 캔들 없음: %s", closed_at)
+        return None
+    return float(row[0])
 
 
 async def backfill_bf_position_1(session: AsyncSession, apply: bool) -> None:
@@ -108,8 +108,7 @@ async def backfill_ck_positions(session: AsyncSession, apply: bool) -> None:
             logger.warning("CK position %d: closed_at 없음 — 스킵", pos_id)
             continue
 
-        closed_at_iso = closed_at.isoformat() if hasattr(closed_at, "isoformat") else str(closed_at)
-        exit_p = await fetch_candle_close("xrp_jpy", closed_at_iso)
+        exit_p = await fetch_candle_close_from_db(session, "xrp_jpy", closed_at)
 
         if exit_p is None:
             logger.warning("CK position %d: 캔들 조회 실패 — 스킵", pos_id)
