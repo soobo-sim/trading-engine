@@ -85,6 +85,7 @@ from core.monitoring.health import HealthChecker
 from core.strategy.box_mean_reversion import BoxMeanReversionManager
 from core.strategy.cfd_trend_following import CfdTrendFollowingManager
 from core.strategy.trend_following import TrendFollowingManager
+from core.task.auto_reporter import create_auto_reporter
 from core.task.supervisor import TaskSupervisor
 
 logger = logging.getLogger(__name__)
@@ -263,11 +264,18 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"활성 전략 자동 기동 실패 (DB 없으면 정상): {e}")
 
+    # 9. AutoReporter (환경변수로 ON/OFF)
+    auto_reporter = create_auto_reporter(session_factory, state)
+    if auto_reporter:
+        await auto_reporter.start()
+
     logger.info("Application startup complete")
     yield
 
     # === Shutdown ===
     logger.info("Shutting down trading-engine...")
+    if auto_reporter:
+        await auto_reporter.stop()
     await supervisor.stop_all()
     await adapter.close()
     await engine.dispose()
