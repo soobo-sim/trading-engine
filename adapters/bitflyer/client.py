@@ -44,6 +44,7 @@ from core.exchange.types import (
     Ticker,
 )
 from adapters.bitflyer.signer import BitFlyerSigner
+from adapters.bitflyer import parsers as _parsers
 
 logger = logging.getLogger(__name__)
 
@@ -213,13 +214,16 @@ class BitFlyerAdapter:
             raise OrderError(f"BitFlyer 주문 실패: {data}")
 
         side = OrderSide.BUY if order_type in (OrderType.BUY, OrderType.MARKET_BUY) else OrderSide.SELL
+        # BUG-016: MARKET_BUY는 actual_amount(코인 수량)를 반환해야 한다.
+        # amount는 JPY 입력값이므로 그대로 반환하면 entry_amount가 JPY로 저장되어
+        # 헬스체크 balance_mismatch 오탐 + PnL 계산 오류 발생.
         return Order(
             order_id=str(order_id),
             pair=pair,
             order_type=order_type,
             side=side,
             price=price,
-            amount=amount,
+            amount=actual_amount,
             status=OrderStatus.OPEN,
             created_at=datetime.now(timezone.utc),
             raw=data,
@@ -523,65 +527,8 @@ class BitFlyerAdapter:
             ))
         return positions
 
-    # ── 내부 변환 헬퍼 ─────────────────────────────────────────
+    # ── 내부 변환 헬퍼 (parsers.py 위임) ──────────────────────
 
-    def _parse_order(self, data: dict, pair: str = "") -> Order:
-        """BitFlyer 주문 응답 → Order DTO."""
-        side_str = data.get("side", "BUY").upper()
-        side = OrderSide.BUY if side_str == "BUY" else OrderSide.SELL
-
-        child_order_type = data.get("child_order_type", "LIMIT").upper()
-        if side == OrderSide.BUY:
-            order_type = OrderType.BUY if child_order_type == "LIMIT" else OrderType.MARKET_BUY
-        else:
-            order_type = OrderType.SELL if child_order_type == "LIMIT" else OrderType.MARKET_SELL
-
-        price: Optional[float] = None
-        raw_price = data.get("price")
-        if raw_price is not None:
-            try:
-                price = float(raw_price)
-            except (ValueError, TypeError):
-                pass
-
-        raw_size = data.get("size", data.get("outstanding_size", 0))
-        try:
-            amount = float(raw_size)
-        except (ValueError, TypeError):
-            amount = 0.0
-
-        # product_code → pair 역변환 (XRP_JPY → xrp_jpy)
-        product_code = data.get("product_code", "")
-        resolved_pair = pair or product_code.lower() if product_code else pair
-
-        order_state = data.get("child_order_state", "ACTIVE")
-        if order_state == "COMPLETED":
-            status = OrderStatus.COMPLETED
-        elif order_state == "CANCELED":
-            status = OrderStatus.CANCELLED
-        else:
-            status = OrderStatus.OPEN
-
-        created_at: Optional[datetime] = None
-        raw_ts = data.get("child_order_date")
-        if raw_ts:
-            try:
-                created_at = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
-            except (ValueError, AttributeError):
-                pass
-
-        order_id = str(
-            data.get("child_order_acceptance_id") or data.get("child_order_id", "")
-        )
-
-        return Order(
-            order_id=order_id,
-            pair=resolved_pair,
-            order_type=order_type,
-            side=side,
-            price=price,
-            amount=amount,
-            status=status,
-            created_at=created_at,
-            raw=data,
-        )
+    @staticmethod
+    def _parse_order(data: dict, pair: str = "") -> Order:
+        return _parsers.parse_order(data, pair)

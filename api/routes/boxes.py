@@ -187,7 +187,16 @@ async def _get_trend_position(pair: str, state: AppState, db: AsyncSession) -> d
     row = result.scalar_one_or_none()
     if not row:
         return {"position": None, "pair": pair, "type": "trend_following"}
-    return {"position": _trend_pos_to_dict(row), "pair": pair, "type": "trend_following"}
+
+    # 미실현 손익 계산
+    current_price = None
+    try:
+        ticker = await state.adapter.get_ticker(pair)
+        current_price = ticker.last
+    except Exception:
+        pass
+
+    return {"position": _trend_pos_to_dict(row, current_price), "pair": pair, "type": "trend_following"}
 
 
 async def _get_box_position(pair: str, state: AppState, db: AsyncSession) -> dict:
@@ -202,8 +211,17 @@ async def _get_box_position(pair: str, state: AppState, db: AsyncSession) -> dic
     row = result.scalar_one_or_none()
     if not row:
         return {"position": None, "pair": pair, "type": "box_mean_reversion"}
+
+    # 미실현 손익 계산
+    current_price = None
+    try:
+        ticker = await state.adapter.get_ticker(pair)
+        current_price = ticker.last
+    except Exception:
+        pass
+
     return {
-        "position": _box_pos_to_dict(row, state.pair_column),
+        "position": _box_pos_to_dict(row, state.pair_column, current_price),
         "pair": pair,
         "type": "box_mean_reversion",
     }
@@ -226,15 +244,29 @@ def _box_to_dict(box, pair_column: str) -> dict:
     }
 
 
-def _trend_pos_to_dict(row) -> dict:
+def _trend_pos_to_dict(row, current_price: float | None = None) -> dict:
+    entry_price = float(row.entry_price)
+    entry_amount = float(row.entry_amount)
+    quantity = entry_amount / entry_price if entry_price else None
+
+    unrealized_pnl_jpy = None
+    unrealized_pnl_pct = None
+    if current_price and entry_price and quantity:
+        unrealized_pnl_jpy = round((current_price - entry_price) * quantity, 0)
+        unrealized_pnl_pct = round((current_price - entry_price) / entry_price * 100, 2)
+
     return {
         "id": row.id,
         "pair": row.pair,
-        "entry_price": float(row.entry_price),
-        "entry_amount": float(row.entry_amount),
+        "entry_price": entry_price,
+        "entry_amount": entry_amount,
+        "quantity": quantity,
         "stop_loss_price": float(row.stop_loss_price) if row.stop_loss_price else None,
         "exit_price": float(row.exit_price) if row.exit_price else None,
         "exit_reason": row.exit_reason,
+        "current_price": current_price,
+        "unrealized_pnl_jpy": unrealized_pnl_jpy,
+        "unrealized_pnl_pct": unrealized_pnl_pct,
         "realized_pnl_jpy": float(row.realized_pnl_jpy) if row.realized_pnl_jpy else None,
         "realized_pnl_pct": float(row.realized_pnl_pct) if row.realized_pnl_pct else None,
         "status": row.status,
@@ -243,15 +275,29 @@ def _trend_pos_to_dict(row) -> dict:
     }
 
 
-def _box_pos_to_dict(row, pair_column: str) -> dict:
+def _box_pos_to_dict(row, pair_column: str, current_price: float | None = None) -> dict:
+    entry_price = float(row.entry_price)
+    entry_amount = float(row.entry_amount)
+    quantity = entry_amount / entry_price if entry_price else None
+
+    unrealized_pnl_jpy = None
+    unrealized_pnl_pct = None
+    if current_price and entry_price and quantity:
+        unrealized_pnl_jpy = round((current_price - entry_price) * quantity, 0)
+        unrealized_pnl_pct = round((current_price - entry_price) / entry_price * 100, 2)
+
     return {
         "id": row.id,
         "pair": getattr(row, pair_column),
         "box_id": row.box_id,
-        "entry_price": float(row.entry_price),
-        "entry_amount": float(row.entry_amount),
+        "entry_price": entry_price,
+        "entry_amount": entry_amount,
+        "quantity": quantity,
         "exit_price": float(row.exit_price) if row.exit_price else None,
         "exit_reason": row.exit_reason,
+        "current_price": current_price,
+        "unrealized_pnl_jpy": unrealized_pnl_jpy,
+        "unrealized_pnl_pct": unrealized_pnl_pct,
         "realized_pnl_jpy": float(row.realized_pnl_jpy) if row.realized_pnl_jpy else None,
         "realized_pnl_pct": float(row.realized_pnl_pct) if row.realized_pnl_pct else None,
         "status": row.status,

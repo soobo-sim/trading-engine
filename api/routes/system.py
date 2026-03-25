@@ -16,7 +16,7 @@ router = APIRouter(tags=["System"])
 
 @router.get("/api/system/health")
 async def system_health(state: AppState = Depends(get_state)):
-    """비즈니스 수준 헬스 체크."""
+    """비즈니스 수준 헬스 체크 (안전장치 포함)."""
     report = await state.health_checker.check()
 
     return JSONResponse(

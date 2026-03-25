@@ -1,12 +1,12 @@
 """
 Trading Engine — FastAPI 엔트리포인트.
 
-EXCHANGE 환경변수로 CoincheckAdapter / BitFlyerAdapter 자동 선택.
+EXCHANGE 환경변수로 BitFlyerAdapter / GmoFxAdapter 자동 선택.
 lifespan에서 전체 의존성 조립 + 활성 전략 자동 기동.
 
 사용:
-    EXCHANGE=coincheck uvicorn main:app --port 8000
     EXCHANGE=bitflyer  uvicorn main:app --port 8001
+    EXCHANGE=gmofx     uvicorn main:app --port 8003
 """
 from __future__ import annotations
 
@@ -92,15 +92,6 @@ logger = logging.getLogger(__name__)
 # ── 거래소별 설정 ────────────────────────────────────────────
 
 _EXCHANGE_CONFIG = {
-    "coincheck": {
-        "prefix": "ck",
-        "pair_column": "pair",
-        "order_id_length": 25,
-        "env_api_key": "COINCHECK_API_KEY",
-        "env_api_secret": "COINCHECK_API_SECRET",
-        "env_base_url": "COINCHECK_BASE_URL",
-        "default_base_url": "https://coincheck.com",
-    },
     "bitflyer": {
         "prefix": "bf",
         "pair_column": "product_code",
@@ -129,10 +120,7 @@ def _create_adapter(exchange: str):
     api_secret = os.environ.get(cfg["env_api_secret"], "")
     base_url = os.environ.get(cfg["env_base_url"], cfg["default_base_url"])
 
-    if exchange == "coincheck":
-        from adapters.coincheck.client import CoincheckAdapter
-        return CoincheckAdapter(api_key=api_key, api_secret=api_secret, base_url=base_url)
-    elif exchange == "gmofx":
+    if exchange == "gmofx":
         from adapters.gmo_fx.client import GmoFxAdapter
         return GmoFxAdapter(api_key=api_key, api_secret=api_secret, base_url=base_url)
     else:
@@ -162,7 +150,7 @@ def _create_models(prefix: str, pair_column: str, order_id_length: int) -> Model
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """startup → yield → shutdown"""
-    exchange = os.environ.get("EXCHANGE", "coincheck").lower()
+    exchange = os.environ.get("EXCHANGE", "bitflyer").lower()
     if exchange not in _EXCHANGE_CONFIG:
         raise ValueError(f"Unknown EXCHANGE: {exchange}. {list(_EXCHANGE_CONFIG.keys())}만 가능.")
 
@@ -229,6 +217,7 @@ async def lifespan(app: FastAPI):
         trend_position_model=models.trend_position,
         box_position_model=models.box_position,
         pair_column=pair_column,
+        trend_manager=trend_manager,
     )
 
     # 7. AppState → app.state

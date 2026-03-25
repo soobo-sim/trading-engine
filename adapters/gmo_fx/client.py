@@ -48,6 +48,7 @@ from core.exchange.types import (
     Ticker,
 )
 from adapters.gmo_fx.signer import GmoFxSigner
+from adapters.gmo_fx import parsers as _parsers
 
 logger = logging.getLogger(__name__)
 
@@ -655,68 +656,100 @@ class GmoFxAdapter:
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 30)
 
+    async def _get_ws_auth_token(self) -> str:
+        """
+        Private WS 인증 토큰 취득.
+
+        POST /private/v1/ws-auth → access token
+        토큰 유효시간 60분. 접속 중에는 자동 연장.
+        """
+        sign_path = "/v1/ws-auth"
+        body_str = ""
+        headers = self._get_auth_headers("POST", sign_path, body=body_str)
+        headers["Content-Type"] = "application/json"
+
+        try:
+            response = await self._post_with_rate_limit(
+                f"{self._private_url}{sign_path}", headers, body_str
+            )
+            data = response.json()
+            self._raise_for_exchange_error(response, data)
+        except (AuthenticationError, RateLimitError, ExchangeError):
+            raise
+        except httpx.HTTPError as e:
+            raise ConnectionError(f"GMO FX ws-auth HTTP 오류: {e}") from e
+
+        return data.get("data", "")
+
     async def subscribe_executions(
         self,
         callback: Callable[[dict], Coroutine[Any, Any, None]],
     ) -> None:
-        """내 주문 체결 이벤트 구독 (Private WS — Phase 2 구현)."""
-        logger.warning("subscribe_executions: GMO FX Private WS — Phase 2 예정")
+        """
+        Private WS 체결 이벤트 구독.
 
-    # ── 내부 변환 헬퍼 ─────────────────────────────────────────
+        1. POST /private/v1/ws-auth → access token
+        2. wss://...ws/private/v1/{token} 접속
+        3. subscribe executionEvents + orderEvents
 
-    def _parse_order(self, data: dict, pair: str = "") -> Order:
-        """GMO FX 주문 응답 → Order DTO."""
-        side_str = data.get("side", "BUY").upper()
-        side = OrderSide.BUY if side_str == "BUY" else OrderSide.SELL
+        callback: 체결 이벤트 dict를 받는 코루틴.
+        """
+        delay = 1
 
-        exec_type = data.get("executionType", "MARKET").upper()
-        if side == OrderSide.BUY:
-            order_type = OrderType.BUY if exec_type == "LIMIT" else OrderType.MARKET_BUY
-        else:
-            order_type = OrderType.SELL if exec_type == "LIMIT" else OrderType.MARKET_SELL
-
-        price: Optional[float] = None
-        raw_price = data.get("price") or data.get("orderPrice")
-        if raw_price is not None:
+        while True:
             try:
-                price = float(raw_price)
-            except (ValueError, TypeError):
-                pass
+                token = await self._get_ws_auth_token()
+                if not token:
+                    raise AuthenticationError("GMO FX ws-auth 토큰 획득 실패")
 
-        raw_size = data.get("size", data.get("orderSize", 0))
-        try:
-            amount = float(raw_size)
-        except (ValueError, TypeError):
-            amount = 0.0
+                ws_url = f"{self._ws_private_url}/{token}"
 
-        # symbol → pair (USD_JPY → usd_jpy)
-        symbol = data.get("symbol", "")
-        resolved_pair = pair or symbol.lower()
+                async with websockets.connect(
+                    ws_url,
+                    ping_interval=30,
+                    ping_timeout=10,
+                    close_timeout=5,
+                ) as ws:
+                    logger.info("[GMO FX Private WS] 연결 성공")
 
-        order_status_str = data.get("orderStatus", "ORDERED").upper()
-        status_map = {
-            "WAITING": OrderStatus.PENDING,
-            "ORDERED": OrderStatus.OPEN,
-            "MODIFYING": OrderStatus.OPEN,
-            "EXECUTED": OrderStatus.COMPLETED,
-            "CANCELED": OrderStatus.CANCELLED,
-            "EXPIRED": OrderStatus.CANCELLED,
-        }
-        status = status_map.get(order_status_str, OrderStatus.OPEN)
+                    # executionEvents 구독 (INITIAL: 미체결 초기 데이터 1회)
+                    await ws.send(json.dumps({
+                        "command": "subscribe",
+                        "channel": "executionEvents",
+                        "option": "INITIAL",
+                    }))
+                    logger.info("[GMO FX Private WS] executionEvents 구독")
 
-        root_order_id = str(data.get("rootOrderId", data.get("orderId", "")))
+                    # orderEvents 구독
+                    await ws.send(json.dumps({
+                        "command": "subscribe",
+                        "channel": "orderEvents",
+                    }))
+                    logger.info("[GMO FX Private WS] orderEvents 구독")
 
-        return Order(
-            order_id=root_order_id,
-            pair=resolved_pair,
-            order_type=order_type,
-            side=side,
-            price=price,
-            amount=amount,
-            status=status,
-            created_at=datetime.now(timezone.utc),
-            raw=data,
-        )
+                    async for raw in ws:
+                        try:
+                            data = json.loads(raw)
+                            channel = data.get("channel", "")
+                            if channel in ("executionEvents", "orderEvents"):
+                                await callback(data)
+                        except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+                            continue
+
+                    delay = 1
+
+            except asyncio.CancelledError:
+                raise
+            except (ConnectionClosed, OSError, Exception) as e:
+                logger.warning(f"[GMO FX Private WS] 끊김: {e}. {delay}초 후 재접속...")
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 60)
+
+    # ── 내부 변환 헬퍼 (parsers.py 위임) ──────────────────────
+
+    @staticmethod
+    def _parse_order(data: dict, pair: str = "") -> Order:
+        return _parsers.parse_order(data, pair)
 
     # ── KLine (Public API) ─────────────────────────────────────
 
@@ -760,6 +793,236 @@ class GmoFxAdapter:
             raise ConnectionError(f"GMO FX HTTP 오류: {e}") from e
 
         return data.get("data", [])
+
+    # ── IFD / IFDOCO 주문 ─────────────────────────────────────
+
+    async def place_ifd_order(
+        self,
+        pair: str,
+        side: str,
+        size: int,
+        first_execution_type: str = "LIMIT",
+        first_price: Optional[float] = None,
+        second_execution_type: str = "LIMIT",
+        second_size: Optional[int] = None,
+        second_price: Optional[float] = None,
+    ) -> dict:
+        """
+        IFD 주문 — 신규 + 결제 동시 설정.
+
+        POST /private/v1/ifdOrder
+        1st 주문 체결 시 자동으로 2nd 결제 주문 발동.
+
+        Returns:
+            {"rootOrderId": ..., "clientOrderId": ..., ...}
+        """
+        payload: dict[str, Any] = {
+            "symbol": self._pair_to_symbol(pair),
+            "firstSide": side.upper(),
+            "firstExecutionType": first_execution_type,
+            "firstSize": str(size),
+            "secondExecutionType": second_execution_type,
+            "secondSize": str(second_size or size),
+        }
+        if first_execution_type == "LIMIT" and first_price is not None:
+            payload["firstPrice"] = str(first_price)
+        if first_execution_type == "STOP" and first_price is not None:
+            payload["firstStopPrice"] = str(first_price)
+        if second_execution_type == "LIMIT" and second_price is not None:
+            payload["secondPrice"] = str(second_price)
+        if second_execution_type == "STOP" and second_price is not None:
+            payload["secondStopPrice"] = str(second_price)
+
+        sign_path = "/v1/ifdOrder"
+        body_str = json.dumps(payload, separators=(",", ":"))
+        headers = self._get_auth_headers("POST", sign_path, body=body_str)
+        headers["Content-Type"] = "application/json"
+
+        try:
+            response = await self._post_with_rate_limit(
+                f"{self._private_url}{sign_path}", headers, body_str
+            )
+            data = response.json()
+            self._raise_for_exchange_error(response, data)
+        except (AuthenticationError, RateLimitError, ExchangeError):
+            raise
+        except httpx.HTTPError as e:
+            raise ConnectionError(f"GMO FX HTTP 오류: {e}") from e
+
+        result = data.get("data", [{}])
+        return result[0] if result else data
+
+    async def place_ifdoco_order(
+        self,
+        pair: str,
+        side: str,
+        size: int,
+        first_execution_type: str = "LIMIT",
+        first_price: Optional[float] = None,
+        second_size: Optional[int] = None,
+        take_profit_price: Optional[float] = None,
+        stop_loss_price: Optional[float] = None,
+    ) -> dict:
+        """
+        IFDOCO 주문 — 신규 + (TP or SL) OCO.
+
+        POST /private/v1/ifoOrder
+        1st 체결 → take_profit(LIMIT) + stop_loss(STOP) 둘 다 발동.
+        한쪽 체결되면 다른 쪽 자동 취소.
+
+        Returns:
+            {"rootOrderId": ..., ...}
+        """
+        payload: dict[str, Any] = {
+            "symbol": self._pair_to_symbol(pair),
+            "firstSide": side.upper(),
+            "firstExecutionType": first_execution_type,
+            "firstSize": str(size),
+            "secondSize": str(second_size or size),
+        }
+        if first_execution_type == "LIMIT" and first_price is not None:
+            payload["firstPrice"] = str(first_price)
+        if first_execution_type == "STOP" and first_price is not None:
+            payload["firstStopPrice"] = str(first_price)
+        if take_profit_price is not None:
+            payload["secondLimitPrice"] = str(take_profit_price)
+        if stop_loss_price is not None:
+            payload["secondStopPrice"] = str(stop_loss_price)
+
+        sign_path = "/v1/ifoOrder"
+        body_str = json.dumps(payload, separators=(",", ":"))
+        headers = self._get_auth_headers("POST", sign_path, body=body_str)
+        headers["Content-Type"] = "application/json"
+
+        try:
+            response = await self._post_with_rate_limit(
+                f"{self._private_url}{sign_path}", headers, body_str
+            )
+            data = response.json()
+            self._raise_for_exchange_error(response, data)
+        except (AuthenticationError, RateLimitError, ExchangeError):
+            raise
+        except httpx.HTTPError as e:
+            raise ConnectionError(f"GMO FX HTTP 오류: {e}") from e
+
+        result = data.get("data", [{}])
+        return result[0] if result else data
+
+    # ── 주문 변경 ──────────────────────────────────────────────
+
+    async def change_order(
+        self, root_order_id: int, price: float
+    ) -> bool:
+        """
+        주문 가격 변경.
+
+        POST /private/v1/changeOrder
+        """
+        payload = {
+            "rootOrderId": root_order_id,
+            "price": str(price),
+        }
+
+        sign_path = "/v1/changeOrder"
+        body_str = json.dumps(payload, separators=(",", ":"))
+        headers = self._get_auth_headers("POST", sign_path, body=body_str)
+        headers["Content-Type"] = "application/json"
+
+        try:
+            response = await self._post_with_rate_limit(
+                f"{self._private_url}{sign_path}", headers, body_str
+            )
+            data = response.json()
+            if data.get("status") != 0:
+                logger.warning(f"GMO FX 주문 변경 실패: {data}")
+                return False
+            return True
+        except (AuthenticationError, RateLimitError, ExchangeError):
+            raise
+        except httpx.HTTPError as e:
+            raise ConnectionError(f"GMO FX HTTP 오류: {e}") from e
+
+    async def cancel_bulk_orders(self, symbol: str) -> bool:
+        """
+        특정 심볼 전체 주문 일괄 취소.
+
+        POST /private/v1/cancelBulkOrder
+        """
+        payload = {"symbol": symbol.upper(), "desc": True}
+
+        sign_path = "/v1/cancelBulkOrder"
+        body_str = json.dumps(payload, separators=(",", ":"))
+        headers = self._get_auth_headers("POST", sign_path, body=body_str)
+        headers["Content-Type"] = "application/json"
+
+        try:
+            response = await self._post_with_rate_limit(
+                f"{self._private_url}{sign_path}", headers, body_str
+            )
+            data = response.json()
+            if data.get("status") != 0:
+                logger.warning(f"GMO FX 일괄 취소 실패: {data}")
+                return False
+            return True
+        except (AuthenticationError, RateLimitError, ExchangeError):
+            raise
+        except httpx.HTTPError as e:
+            raise ConnectionError(f"GMO FX HTTP 오류: {e}") from e
+
+    # ── 약정 조회 ──────────────────────────────────────────────
+
+    async def get_executions(
+        self, order_id: Optional[str] = None, symbol: Optional[str] = None
+    ) -> list[dict]:
+        """
+        약정(체결) 내역 조회.
+
+        GET /private/v1/executions?orderId={orderId}
+        """
+        client = self._get_client()
+        params: dict[str, str] = {}
+        if order_id:
+            params["orderId"] = order_id
+        if symbol:
+            params["symbol"] = symbol.upper()
+
+        query = urlencode(params) if params else ""
+        sign_path = f"/v1/executions?{query}" if query else "/v1/executions"
+        headers = self._get_auth_headers("GET", sign_path)
+
+        try:
+            response = await client.get(f"{self._private_url}{sign_path}", headers=headers)
+            data = response.json()
+            self._raise_for_exchange_error(response, data)
+        except (AuthenticationError, RateLimitError, ExchangeError):
+            raise
+        except httpx.HTTPError as e:
+            raise ConnectionError(f"GMO FX HTTP 오류: {e}") from e
+
+        return data.get("data", {}).get("list", [])
+
+    async def get_latest_executions(self, symbol: str, count: int = 100) -> list[dict]:
+        """
+        최신 약정 내역.
+
+        GET /private/v1/latestExecutions?symbol={SYMBOL}&count={COUNT}
+        """
+        client = self._get_client()
+        params = {"symbol": symbol.upper(), "count": str(count)}
+        query = urlencode(params)
+        sign_path = f"/v1/latestExecutions?{query}"
+        headers = self._get_auth_headers("GET", sign_path)
+
+        try:
+            response = await client.get(f"{self._private_url}{sign_path}", headers=headers)
+            data = response.json()
+            self._raise_for_exchange_error(response, data)
+        except (AuthenticationError, RateLimitError, ExchangeError):
+            raise
+        except httpx.HTTPError as e:
+            raise ConnectionError(f"GMO FX HTTP 오류: {e}") from e
+
+        return data.get("data", {}).get("list", [])
 
     async def get_symbols(self) -> list[dict]:
         """

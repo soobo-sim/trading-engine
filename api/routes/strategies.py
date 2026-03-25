@@ -172,7 +172,7 @@ async def archive_strategy(
     pair = (row.parameters or {}).get("pair") or (row.parameters or {}).get("product_code")
     if pair and row.activated_at:
         try:
-            from api.routes.performance import compute_performance_summary
+            from api.services.performance_service import compute_performance_summary
             summary = await compute_performance_summary(
                 db=db, state=state,
                 strategy_id=row.id, pair=pair,

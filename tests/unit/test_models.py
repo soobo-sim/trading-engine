@@ -25,23 +25,11 @@ from adapters.database.models import (
 # create_trade_model
 # ──────────────────────────────────────────────────────────────
 
-def test_create_trade_model_ck_tablename() -> None:
-    """CK trade 팩토리: __tablename__ == 'ck_trades'."""
-    CkTrade = create_trade_model("ck", order_id_length=25)
-    assert CkTrade.__tablename__ == "ck_trades"
-
 
 def test_create_trade_model_bf_tablename() -> None:
     """BF trade 팩토리: __tablename__ == 'bf_trades'."""
     BfTrade = create_trade_model("bf", order_id_length=40)
     assert BfTrade.__tablename__ == "bf_trades"
-
-
-def test_create_trade_model_ck_order_id_length() -> None:
-    """CK order_id: VARCHAR(25)."""
-    CkTrade = create_trade_model("ck", order_id_length=25)
-    col = CkTrade.__table__.columns["order_id"]
-    assert col.type.length == 25
 
 
 def test_create_trade_model_bf_order_id_length() -> None:
@@ -53,9 +41,7 @@ def test_create_trade_model_bf_order_id_length() -> None:
 
 def test_create_trade_model_class_name() -> None:
     """팩토리 반환 클래스의 __name__ 에 prefix 가 반영된다."""
-    CkTrade = create_trade_model("ck", 25)
     BfTrade = create_trade_model("bf", 40)
-    assert CkTrade.__name__ == "CkTrade"
     assert BfTrade.__name__ == "BfTrade"
 
 
