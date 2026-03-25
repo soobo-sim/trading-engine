@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import httpx
 
-from api.services.monitoring_report import (
+from api.services.monitoring import (
     get_trend_icon,
     get_rsi_state,
     get_ema_state,
@@ -872,7 +872,7 @@ class TestTriggerRachelAnalysis:
     @pytest.mark.asyncio
     async def test_critical_triggers_webhook(self, monkeypatch):
         """토큰 설정 + critical alert → webhook POST 호출."""
-        monkeypatch.setattr("api.services.monitoring_report.RACHEL_WEBHOOK_TOKEN", "test-token")
+        monkeypatch.setattr("api.services.monitoring.alerts.RACHEL_WEBHOOK_TOKEN", "test-token")
 
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -889,7 +889,7 @@ class TestTriggerRachelAnalysis:
             "text": "🚨🚨🚨 [CK 긴급] xrp_jpy\n¥35\nRSI 15.0 극단 과매도",
         }
 
-        with patch("api.services.monitoring_report.httpx.AsyncClient", return_value=mock_client):
+        with patch("api.services.monitoring.alerts.httpx.AsyncClient", return_value=mock_client):
             await _trigger_rachel_analysis("xrp_jpy", alert)
 
         mock_client.post.assert_called_once()
@@ -906,18 +906,18 @@ class TestTriggerRachelAnalysis:
     @pytest.mark.asyncio
     async def test_no_token_skips_webhook(self, monkeypatch):
         """RACHEL_WEBHOOK_TOKEN 미설정 시 graceful skip."""
-        monkeypatch.setattr("api.services.monitoring_report.RACHEL_WEBHOOK_TOKEN", "")
+        monkeypatch.setattr("api.services.monitoring.alerts.RACHEL_WEBHOOK_TOKEN", "")
 
         alert = {"level": "critical", "triggers": ["price_crash"], "text": "crash"}
 
-        with patch("api.services.monitoring_report.httpx.AsyncClient") as mock_cls:
+        with patch("api.services.monitoring.alerts.httpx.AsyncClient") as mock_cls:
             await _trigger_rachel_analysis("xrp_jpy", alert)
             mock_cls.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_cooldown_prevents_duplicate(self, monkeypatch):
         """15분 이내 동일 pair → 2번째 스킵."""
-        monkeypatch.setattr("api.services.monitoring_report.RACHEL_WEBHOOK_TOKEN", "test-token")
+        monkeypatch.setattr("api.services.monitoring.alerts.RACHEL_WEBHOOK_TOKEN", "test-token")
 
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -930,7 +930,7 @@ class TestTriggerRachelAnalysis:
 
         alert = {"level": "critical", "triggers": ["price_crash"], "text": "crash"}
 
-        with patch("api.services.monitoring_report.httpx.AsyncClient", return_value=mock_client):
+        with patch("api.services.monitoring.alerts.httpx.AsyncClient", return_value=mock_client):
             await _trigger_rachel_analysis("xrp_jpy", alert)
             await _trigger_rachel_analysis("xrp_jpy", alert)
 
@@ -939,7 +939,7 @@ class TestTriggerRachelAnalysis:
     @pytest.mark.asyncio
     async def test_different_pair_not_blocked(self, monkeypatch):
         """다른 pair는 쿨다운 영향 안 받음."""
-        monkeypatch.setattr("api.services.monitoring_report.RACHEL_WEBHOOK_TOKEN", "test-token")
+        monkeypatch.setattr("api.services.monitoring.alerts.RACHEL_WEBHOOK_TOKEN", "test-token")
 
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -952,7 +952,7 @@ class TestTriggerRachelAnalysis:
 
         alert = {"level": "critical", "triggers": ["price_crash"], "text": "crash"}
 
-        with patch("api.services.monitoring_report.httpx.AsyncClient", return_value=mock_client):
+        with patch("api.services.monitoring.alerts.httpx.AsyncClient", return_value=mock_client):
             await _trigger_rachel_analysis("xrp_jpy", alert)
             await _trigger_rachel_analysis("BTC_JPY", alert)
 
@@ -961,7 +961,7 @@ class TestTriggerRachelAnalysis:
     @pytest.mark.asyncio
     async def test_webhook_error_handled_gracefully(self, monkeypatch):
         """webhook 네트워크 오류 시 예외 안 나고 로그만."""
-        monkeypatch.setattr("api.services.monitoring_report.RACHEL_WEBHOOK_TOKEN", "test-token")
+        monkeypatch.setattr("api.services.monitoring.alerts.RACHEL_WEBHOOK_TOKEN", "test-token")
 
         mock_client = AsyncMock()
         mock_client.post = AsyncMock(side_effect=httpx.ConnectError("connection refused"))
@@ -970,7 +970,7 @@ class TestTriggerRachelAnalysis:
 
         alert = {"level": "critical", "triggers": ["price_crash"], "text": "crash"}
 
-        with patch("api.services.monitoring_report.httpx.AsyncClient", return_value=mock_client):
+        with patch("api.services.monitoring.alerts.httpx.AsyncClient", return_value=mock_client):
             await _trigger_rachel_analysis("xrp_jpy", alert)  # 예외 없이 완료
 
 
@@ -1019,7 +1019,7 @@ class TestTriggerRachelTestMode:
     @pytest.mark.asyncio
     async def test_test_mode_message(self, monkeypatch):
         """테스트 모드 시 webhook message에 테스트 모드 문구 포함."""
-        monkeypatch.setattr("api.services.monitoring_report.RACHEL_WEBHOOK_TOKEN", "test-token")
+        monkeypatch.setattr("api.services.monitoring.alerts.RACHEL_WEBHOOK_TOKEN", "test-token")
 
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -1036,7 +1036,7 @@ class TestTriggerRachelTestMode:
             "text": "테스트 강제 트리거",
         }
 
-        with patch("api.services.monitoring_report.httpx.AsyncClient", return_value=mock_client):
+        with patch("api.services.monitoring.alerts.httpx.AsyncClient", return_value=mock_client):
             await _trigger_rachel_analysis("BTC_JPY", alert, test=True)
 
         mock_client.post.assert_called_once()
@@ -1048,7 +1048,7 @@ class TestTriggerRachelTestMode:
     @pytest.mark.asyncio
     async def test_real_mode_message(self, monkeypatch):
         """실전 모드 시 webhook message에 즉시 실행 문구 포함."""
-        monkeypatch.setattr("api.services.monitoring_report.RACHEL_WEBHOOK_TOKEN", "test-token")
+        monkeypatch.setattr("api.services.monitoring.alerts.RACHEL_WEBHOOK_TOKEN", "test-token")
 
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -1065,7 +1065,7 @@ class TestTriggerRachelTestMode:
             "text": "RSI 기반 alert",
         }
 
-        with patch("api.services.monitoring_report.httpx.AsyncClient", return_value=mock_client):
+        with patch("api.services.monitoring.alerts.httpx.AsyncClient", return_value=mock_client):
             await _trigger_rachel_analysis("BTC_JPY", alert, test=False)
 
         body = mock_client.post.call_args[1]["json"]
@@ -1076,7 +1076,7 @@ class TestTriggerRachelTestMode:
     @pytest.mark.asyncio
     async def test_reset_cooldown_allows_retry(self, monkeypatch):
         """쿨다운 리셋 후 재호출 가능."""
-        monkeypatch.setattr("api.services.monitoring_report.RACHEL_WEBHOOK_TOKEN", "test-token")
+        monkeypatch.setattr("api.services.monitoring.alerts.RACHEL_WEBHOOK_TOKEN", "test-token")
 
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -1089,7 +1089,7 @@ class TestTriggerRachelTestMode:
 
         alert = {"level": "critical", "triggers": ["test_forced_critical"], "text": "test"}
 
-        with patch("api.services.monitoring_report.httpx.AsyncClient", return_value=mock_client):
+        with patch("api.services.monitoring.alerts.httpx.AsyncClient", return_value=mock_client):
             # 1차 호출
             await _trigger_rachel_analysis("BTC_JPY", alert)
             # 쿨다운 리셋

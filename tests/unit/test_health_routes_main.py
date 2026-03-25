@@ -7,7 +7,7 @@ HealthChecker + API 라우트 + main.py 테스트.
   - main.py (lifespan + 거래소 선택)
 """
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 import pytest_asyncio
@@ -206,13 +206,14 @@ class TestHealthChecker:
     async def test_position_balance_mismatch(self, app_state, db_session, adapter):
         """DB 포지션 vs 실잔고 불일치 감지."""
         session, factory = db_session
-        # DB에 오픈 포지션 기록 (50 XRP)
+        # DB에 오픈 포지션 기록 (50 XRP) — grace period 회피를 위해 2분 전 생성
         pos = HlthTrendPosition(
             pair="xrp_jpy",
             entry_order_id="FAKE-001",
             entry_price=80.0,
             entry_amount=50.0,
             status="open",
+            created_at=datetime.now(timezone.utc) - timedelta(minutes=2),
         )
         session.add(pos)
         await session.commit()
@@ -584,28 +585,12 @@ class TestTechniquesRoute:
 
 class TestMainConfig:
 
-    def test_exchange_config_coincheck(self):
-        from main import _EXCHANGE_CONFIG
-        cfg = _EXCHANGE_CONFIG["coincheck"]
-        assert cfg["prefix"] == "ck"
-        assert cfg["pair_column"] == "pair"
-        assert cfg["order_id_length"] == 25
-
     def test_exchange_config_bitflyer(self):
         from main import _EXCHANGE_CONFIG
         cfg = _EXCHANGE_CONFIG["bitflyer"]
         assert cfg["prefix"] == "bf"
         assert cfg["pair_column"] == "product_code"
         assert cfg["order_id_length"] == 40
-
-    def test_create_models_coincheck(self):
-        """ck/bf prefix는 test_models.py와 충돌하므로 tmc/tmb 사용."""
-        from main import _create_models
-        models = _create_models("tmc", "pair", 25)
-        assert models.strategy.__tablename__ == "tmc_strategies"
-        assert models.candle.__tablename__ == "tmc_candles"
-        assert models.box.__tablename__ == "tmc_boxes"
-        assert models.trend_position.__tablename__ == "tmc_trend_positions"
 
     def test_create_models_bitflyer(self):
         """ck/bf prefix는 test_models.py와 충돌하므로 tmc/tmb 사용."""
@@ -614,13 +599,6 @@ class TestMainConfig:
         assert models.strategy.__tablename__ == "tmb_strategies"
         assert models.candle.__tablename__ == "tmb_candles"
         assert models.box.__tablename__ == "tmb_boxes"
-
-    def test_create_adapter_coincheck(self, monkeypatch):
-        monkeypatch.setenv("COINCHECK_API_KEY", "test_key")
-        monkeypatch.setenv("COINCHECK_API_SECRET", "test_secret")
-        from main import _create_adapter
-        adapter = _create_adapter("coincheck")
-        assert adapter.exchange_name == "coincheck"
 
     def test_create_adapter_bitflyer(self, monkeypatch):
         monkeypatch.setenv("BITFLYER_API_KEY", "test_key")
