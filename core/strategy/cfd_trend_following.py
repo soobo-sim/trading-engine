@@ -1,60 +1,41 @@
 """
 CfdTrendFollowingManager — BitFlyer CFD (FX_BTC_JPY) 전용 추세추종 매니저.
 
-현물 TrendFollowingManager와 동일한 signals.py를 재사용하되,
-CFD 고유 로직을 추가한다:
-- 롱/숏 양방향 진입
-- 증거금(getcollateral) 기반 주문
-- keep_rate 모니터링 → 자동 청산
-- 포지션 보유 시간 제한 → 스왑 비용 관리
-- getpositions으로 실 포지션 정합성 검사
+BaseTrendManager를 상속하여 CFD 고유 로직만 구현한다.
+
+CFD 고유 로직:
+    - 롱/숏 양방향 진입
+    - 증거금(getcollateral) 기반 주문 + 레버리지 제한
+    - keep_rate 모니터링 → 자동 청산
+    - 포지션 보유 시간 제한 → 스왑 비용 관리
+    - getpositions으로 실 포지션 정합성 검사
+    - 양방향 스탑로스/트레일링
 
 모든 리스크 수치는 strategy.parameters에서 읽는다 (하드코딩 금지).
-
-아키텍처:
-    main.py (EXCHANGE=bitflyer 전용)
-      → BitFlyerAdapter
-      → CfdTrendFollowingManager (이 클래스)
-        → TaskSupervisor
-        → signals.py
-        → ORM models (bf_cfd_positions)
-
-태스크 구성 (product_code당 2개):
-    1. CandleMonitor  — 60초 폴링, 시그널 계산 → 진입/청산/트레일링
-    2. StopLossMonitor — WS 틱 기반 하드 스탑 + keep_rate 감시
 """
 from __future__ import annotations
 
-import asyncio
 import logging
-import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Type
+from typing import Dict, Optional, Type
 
-from sqlalchemy import and_, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from core.exchange.base import ExchangeAdapter
 from core.exchange.types import OrderType, Position
-from core.strategy.signals import (
-    compute_adaptive_trailing_mult,
-    compute_trend_signal,
-    detect_bearish_divergences,
-)
+from core.exchange.session import is_fx_market_open, should_close_for_weekend, minutes_until_market_close
+from core.strategy.base_trend import BaseTrendManager
 from core.task.supervisor import TaskSupervisor
 
 logger = logging.getLogger(__name__)
 
-_CANDLE_POLL_INTERVAL = 60  # 초
 
+class CfdTrendFollowingManager(BaseTrendManager):
+    """BitFlyer CFD (FX_BTC_JPY) 추세추종 매니저. 양방향."""
 
-class CfdTrendFollowingManager:
-    """
-    BitFlyer CFD (FX_BTC_JPY) 추세추종 매니저.
-
-    현물 TrendFollowingManager와 동일 구조 (start/stop/stop_all + 태스크 2개).
-    CFD 고유 로직: 양방향, 증거금 기반, keep_rate 감시, 보유 시간 제한.
-    """
+    _task_prefix = "cfd"
+    _log_prefix = "[CfdMgr]"
 
     def __init__(
         self,
@@ -65,105 +46,19 @@ class CfdTrendFollowingManager:
         cfd_position_model: Type,
         pair_column: str = "product_code",
     ) -> None:
-        self._adapter = adapter
-        self._supervisor = supervisor
-        self._session_factory = session_factory
-        self._candle_model = candle_model
-        self._cfd_position_model = cfd_position_model
-        self._pair_column = pair_column
-
-        # product_code별 상태
-        self._params: Dict[str, Dict] = {}
-        self._position: Dict[str, Optional[Position]] = {}
-        self._latest_price: Dict[str, float] = {}
-        self._last_seen_open_time: Dict[str, Optional[str]] = {}
-        self._ema_slope_history: Dict[str, List[float]] = {}
-        self._ema_slope_last_key: Dict[str, Optional[str]] = {}
-
-        # 스탑로스 백오프
-        self._close_fail_count: Dict[str, int] = {}
-        self._close_fail_until: Dict[str, float] = {}
-        # 잔고 정합성 검사 카운터
-        self._position_sync_counter: Dict[str, int] = {}
+        super().__init__(
+            adapter=adapter,
+            supervisor=supervisor,
+            session_factory=session_factory,
+            candle_model=candle_model,
+            position_model=cfd_position_model,
+            pair_column=pair_column,
+        )
+        # keep_rate 캐시 (캔들 사이클 내에서 진입 시 참조)
+        self._last_keep_rate: Dict[str, Optional[float]] = {}
 
     # ──────────────────────────────────────────
-    # 시작 / 종료
-    # ──────────────────────────────────────────
-
-    async def start(self, product_code: str, params: Dict) -> None:
-        """product_code에 대한 CFD 추세추종 태스크 2개 등록."""
-        self._params[product_code] = params
-        self._last_seen_open_time[product_code] = None
-        self._latest_price.pop(product_code, None)
-        self._ema_slope_history[product_code] = []
-        self._ema_slope_last_key[product_code] = None
-        self._close_fail_count[product_code] = 0
-        self._close_fail_until[product_code] = 0
-
-        # 기존 포지션 복원
-        pos = await self._detect_existing_position(product_code)
-        self._position[product_code] = pos
-        if pos:
-            pos.db_record_id = await self._recover_db_position_id(product_code)
-
-        await self._supervisor.register(
-            f"cfd_candle:{product_code}",
-            lambda pc=product_code: self._candle_monitor(pc),
-            max_restarts=5,
-        )
-        await self._supervisor.register(
-            f"cfd_stoploss:{product_code}",
-            lambda pc=product_code: self._stop_loss_monitor(pc),
-            max_restarts=5,
-        )
-
-        logger.info(
-            f"[CfdMgr] {product_code}: CFD 추세추종 시작 "
-            f"(position={'있음' if pos else '없음'}, exchange={self._adapter.exchange_name})"
-        )
-
-    async def stop(self, product_code: str) -> None:
-        """product_code에 대한 CFD 태스크 종료."""
-        await self._supervisor.stop(f"cfd_candle:{product_code}")
-        await self._supervisor.stop(f"cfd_stoploss:{product_code}")
-        self._params.pop(product_code, None)
-        self._position.pop(product_code, None)
-        self._last_seen_open_time.pop(product_code, None)
-        self._latest_price.pop(product_code, None)
-        self._ema_slope_history.pop(product_code, None)
-        self._ema_slope_last_key.pop(product_code, None)
-        self._close_fail_count.pop(product_code, None)
-        self._close_fail_until.pop(product_code, None)
-        logger.info(f"[CfdMgr] {product_code}: CFD 추세추종 태스크 종료")
-
-    async def stop_all(self) -> None:
-        for pc in list(self._params.keys()):
-            await self.stop(pc)
-        logger.info("[CfdMgr] 전체 CFD 추세추종 인프라 종료")
-
-    def is_running(self, product_code: str) -> bool:
-        return (
-            self._supervisor.is_running(f"cfd_candle:{product_code}")
-            or self._supervisor.is_running(f"cfd_stoploss:{product_code}")
-        )
-
-    def running_pairs(self) -> list[str]:
-        return [pc for pc in self._params if self.is_running(pc)]
-
-    def get_position(self, product_code: str) -> Optional[Position]:
-        return self._position.get(product_code)
-
-    def get_task_health(self) -> dict:
-        result: Dict[str, dict] = {}
-        for pc in self._params:
-            result[pc] = {
-                "candle_monitor": self._supervisor.get_health().get(f"cfd_candle:{pc}", {}),
-                "stop_loss_monitor": self._supervisor.get_health().get(f"cfd_stoploss:{pc}", {}),
-            }
-        return result
-
-    # ──────────────────────────────────────────
-    # 재시작 시 포지션 복원 (getpositions 사용)
+    # 포지션 감지 / 동기화
     # ──────────────────────────────────────────
 
     async def _detect_existing_position(self, product_code: str) -> Optional[Position]:
@@ -174,7 +69,6 @@ class CfdTrendFollowingManager:
             fx_positions = await self._adapter.get_positions(product_code)
             if not fx_positions:
                 return None
-            # 모든 포지션의 사이드·수량 집계
             total_size = sum(p.size for p in fx_positions)
             if total_size <= 0:
                 return None
@@ -185,45 +79,16 @@ class CfdTrendFollowingManager:
                 f"(side={first.side}, size={total_size:.6f} BTC, avg_price=¥{avg_price:.0f})"
             )
             return Position(
-                pair=product_code,
-                entry_price=avg_price,
-                entry_amount=total_size,
-                stop_loss_price=None,
+                pair=product_code, entry_price=avg_price,
+                entry_amount=total_size, stop_loss_price=None,
                 extra={"side": first.side.lower()},
             )
         except Exception as e:
             logger.warning(f"[CfdMgr] {product_code}: 포지션 복원 실패 — {e}")
         return None
 
-    async def _recover_db_position_id(self, product_code: str) -> Optional[int]:
-        """열린 DB 포지션 레코드 ID 복원."""
-        try:
-            Model = self._cfd_position_model
-            pair_col = getattr(Model, self._pair_column)
-            async with self._session_factory() as db:
-                result = await db.execute(
-                    select(Model)
-                    .where(
-                        pair_col == product_code,
-                        Model.status == "open",
-                    )
-                    .order_by(Model.created_at.desc())
-                    .limit(1)
-                )
-                rec = result.scalars().first()
-                if rec:
-                    logger.info(f"[CfdMgr] {product_code}: DB CFD 포지션 복원 id={rec.id}")
-                    return rec.id
-        except Exception as e:
-            logger.warning(f"[CfdMgr] {product_code}: DB 포지션 ID 복원 실패 — {e}")
-        return None
-
-    # ──────────────────────────────────────────
-    # 포지션-실잔고 정합성 검사 (getpositions vs 인메모리)
-    # ──────────────────────────────────────────
-
     async def _sync_position_state(self, product_code: str) -> None:
-        """getpositions와 인메모리 포지션 비교. 괴리 시 갱신."""
+        """getpositions vs 인메모리 비교 → 괴리 시 갱신."""
         pos = self._position.get(product_code)
         if pos is None:
             return
@@ -243,16 +108,12 @@ class CfdTrendFollowingManager:
                     f"차이 {drift_pct:.1f}%) → 인메모리 갱신"
                 )
                 if real_size <= 0:
-                    # 포지션이 외부에서 청산됨
                     self._position[product_code] = None
                 else:
                     self._position[product_code] = Position(
-                        pair=pos.pair,
-                        entry_price=pos.entry_price,
-                        entry_amount=real_size,
-                        stop_loss_price=pos.stop_loss_price,
-                        db_record_id=pos.db_record_id,
-                        stop_tightened=pos.stop_tightened,
+                        pair=pos.pair, entry_price=pos.entry_price,
+                        entry_amount=real_size, stop_loss_price=pos.stop_loss_price,
+                        db_record_id=pos.db_record_id, stop_tightened=pos.stop_tightened,
                         extra=pos.extra,
                     )
         except Exception as e:
@@ -263,10 +124,7 @@ class CfdTrendFollowingManager:
     # ──────────────────────────────────────────
 
     async def _check_keep_rate(self, product_code: str) -> Optional[float]:
-        """getcollateral로 keep_rate 확인. 위험 시 자동 청산.
-
-        Returns: 현재 keep_rate (조회 실패 시 None)
-        """
+        """getcollateral로 keep_rate 확인. 위험 시 자동 청산."""
         try:
             if not hasattr(self._adapter, "get_collateral"):
                 return None
@@ -288,308 +146,142 @@ class CfdTrendFollowingManager:
             return None
 
     # ──────────────────────────────────────────
-    # Task 1: 캔들 모니터 (진입 / EMA 이탈 청산)
+    # Hooks (base override)
     # ──────────────────────────────────────────
 
-    async def _candle_monitor(self, product_code: str) -> None:
-        """
-        60초마다 캔들 시그널 재계산 → 진입/청산 결정.
-        현물 TrendFollowingManager의 _candle_monitor와 동일 구조.
+    async def _on_candle_extra_checks(self, pair: str, params: Dict) -> bool:
+        """keep_rate + 보유 시간 + 주말 청산 + 스왑 추적 체크."""
+        keep_rate = await self._check_keep_rate(pair)
+        self._last_keep_rate[pair] = keep_rate
 
-        추가: keep_rate 경고 체크, 보유 시간 제한 체크.
-        """
-        while True:
-            await asyncio.sleep(_CANDLE_POLL_INTERVAL)
+        pos = self._position.get(pair)
 
-            params = self._params.get(product_code, {})
-            basis_tf = params.get("basis_timeframe", "4h")
-            pos = self._position.get(product_code)
-            entry_price = pos.entry_price if pos else None
+        # ── 주말 자동 청산 (FX 전용) ───────────────────────
+        is_fx = self._adapter.exchange_name == "gmofx"
+        if is_fx and pos is not None and should_close_for_weekend():
+            mins = minutes_until_market_close()
+            logger.warning(
+                f"[CfdMgr] {pair}: 주말 마감 임박 (잔여 {mins}분) → 자동 청산"
+            )
+            await self._close_position(pair, "weekend_close")
+            return False
 
-            # 5사이클(5분)마다 포지션 정합성 검사
-            if pos is not None:
-                cnt = self._position_sync_counter.get(product_code, 0) + 1
-                self._position_sync_counter[product_code] = cnt
-                if cnt % 5 == 0:
-                    await self._sync_position_state(product_code)
+        # ── FX 시장 휴장 시 진입 차단 ─────────────────────
+        if is_fx and not is_fx_market_open():
+            logger.debug(f"[CfdMgr] {pair}: FX 시장 휴장 — 사이클 스킵")
+            return False
 
-            # keep_rate 체크
-            keep_rate = await self._check_keep_rate(product_code)
-            # risk_cut으로 포지션이 청산됐을 수 있음
-            pos = self._position.get(product_code)
-
-            # 보유 시간 제한 체크
-            if pos is not None:
-                max_hours = float(params.get("max_holding_hours", 0))
-                if max_hours > 0 and pos.extra.get("opened_at"):
-                    opened_at = pos.extra["opened_at"]
-                    elapsed_hours = (datetime.now(timezone.utc) - opened_at).total_seconds() / 3600
-                    if elapsed_hours >= max_hours:
-                        logger.info(
-                            f"[CfdMgr] {product_code}: 보유 시간 초과 "
-                            f"{elapsed_hours:.1f}h ≥ {max_hours}h → 자동 청산"
-                        )
-                        await self._close_position(product_code, "time_limit")
-                        continue
-
+        # ── 스왑 포인트 로깅 (FX 전용) ────────────────────
+        if is_fx and pos is not None and hasattr(self._adapter, "get_positions"):
             try:
-                pos_side = pos.extra.get("side") if pos else None
-                signal_data = await self._compute_signal(
-                    product_code, basis_tf,
-                    entry_price=entry_price,
-                    params=params,
-                    side=pos_side,
+                fx_positions = await self._adapter.get_positions(pair)
+                total_swap = sum(p.swap_point_accumulate for p in fx_positions) if fx_positions else 0.0
+                if total_swap != 0:
+                    logger.info(f"[CfdMgr] {pair}: 누적 스왑: ¥{total_swap:.1f}")
+            except Exception:
+                pass  # 스왑 로깅 실패는 무시
+
+        # ── 보유 시간 제한 ────────────────────────────────
+        if pos is not None:
+            max_hours = float(params.get("max_holding_hours", 0))
+            if max_hours > 0 and pos.extra.get("opened_at"):
+                opened_at = pos.extra["opened_at"]
+                elapsed_hours = (datetime.now(timezone.utc) - opened_at).total_seconds() / 3600
+                if elapsed_hours >= max_hours:
+                    logger.info(
+                        f"[CfdMgr] {pair}: 보유 시간 초과 "
+                        f"{elapsed_hours:.1f}h ≥ {max_hours}h → 자동 청산"
+                    )
+                    await self._close_position(pair, "time_limit")
+                    return False  # 이번 사이클 스킵 (continue)
+        return True
+
+    def _check_exit_warning(self, pair, signal, realtime_price, ema, pos):
+        """양방향 exit_warning. 포지션 없으면 스킵."""
+        if pos is None:
+            return signal
+        side = pos.extra.get("side", "buy")
+        if side == "buy" and realtime_price < ema:
+            if signal != "exit_warning":
+                logger.info(
+                    f"[CfdMgr] {pair}: 롱 실시간가 ¥{realtime_price} < EMA ¥{ema:.4f} → exit_warning"
                 )
-            except Exception as e:
-                logger.warning(f"[CfdMgr] {product_code}: 시그널 계산 실패 — {e}")
-                continue
-
-            if signal_data is None:
-                continue
-
-            signal = signal_data["signal"]
-            current_price = signal_data["current_price"]
-            atr = signal_data.get("atr")
-            ema = signal_data.get("ema")
-            ema_slope_pct = signal_data.get("ema_slope_pct")
-            rsi = signal_data.get("rsi")
-            exit_signal = signal_data.get("exit_signal", {})
-            exit_action = exit_signal.get("action", "hold")
-            latest_candle_key = signal_data.get("latest_candle_open_time")
-
-            # 실시간 가격으로 exit_warning 보정 (포지션 보유 시만)
-            realtime_price = self._latest_price.get(product_code)
-            if pos is not None and realtime_price is not None and ema is not None:
-                pos_side = pos.extra.get("side", "buy")
-                if pos_side == "buy" and realtime_price < ema:
-                    signal = "exit_warning"
-                elif pos_side == "sell" and realtime_price > ema:
-                    signal = "exit_warning"
-
-            logger.debug(
-                f"[CfdMgr] {product_code}: signal={signal} exit={exit_action} "
-                f"price={current_price} pos={'있음' if pos else '없음'}"
-            )
-
-            # ── EMA 기울기 이력 갱신 ──
-            if latest_candle_key != self._ema_slope_last_key.get(product_code):
-                slope_history = self._ema_slope_history.setdefault(product_code, [])
-                slope_history.append(ema_slope_pct)
-                if len(slope_history) > 3:
-                    slope_history.pop(0)
-                self._ema_slope_last_key[product_code] = latest_candle_key
-
-                if (
-                    len(slope_history) == 3
-                    and all(s is not None for s in slope_history)
-                    and slope_history[0] > slope_history[1] > slope_history[2]
-                    and pos is not None
-                    and not pos.stop_tightened
-                    and atr is not None
-                ):
-                    logger.info(
-                        f"[CfdMgr] {product_code}: EMA 기울기 3캔들 연속 하락 → 스탑 타이트닝"
-                    )
-                    await self._apply_stop_tightening(product_code, current_price, atr, params)
-
-                # 다이버전스 감지
-                if (
-                    pos is not None
-                    and params.get("divergence_enabled", True)
-                    and not pos.stop_tightened
-                    and atr is not None
-                ):
-                    div_candles = signal_data.get("candles", [])
-                    rsi_series = signal_data.get("rsi_series", [])
-                    if div_candles and rsi_series:
-                        div = detect_bearish_divergences(div_candles, rsi_series, params)
-                        if div["both"] or div["rsi_divergence"] or div["volume_divergence"]:
-                            logger.info(
-                                f"[CfdMgr] {product_code}: 다이버전스 감지 → 스탑 타이트닝"
-                            )
-                            await self._apply_stop_tightening(product_code, current_price, atr, params)
-
-            # ── 포지션 있을 때: 청산 우선순위 ──
-            if pos is not None:
-                if signal == "exit_warning":
-                    logger.info(f"[CfdMgr] {product_code}: exit_warning → 전량 청산")
-                    await self._close_position(product_code, "exit_warning")
-                    continue
-
-                if exit_action == "full_exit":
-                    triggers = exit_signal.get("triggers", {})
-                    reason_code = (
-                        "full_exit_ema_slope" if triggers.get("ema_slope_negative")
-                        else "full_exit_rsi_breakdown" if triggers.get("rsi_breakdown")
-                        else "full_exit"
-                    )
-                    logger.info(f"[CfdMgr] {product_code}: {reason_code} → 전량 청산")
-                    await self._close_position(product_code, reason_code)
-                    continue
-
-                if exit_action == "tighten_stop" and not pos.stop_tightened:
-                    if atr:
-                        await self._apply_stop_tightening(product_code, current_price, atr, params)
-
-                # 적응형 트레일링 스탑
-                if atr is not None:
-                    side = pos.extra.get("side", "buy")
-                    if pos.stop_tightened:
-                        mult = float(params.get("tighten_stop_atr", 1.0))
-                    else:
-                        mult = compute_adaptive_trailing_mult(ema_slope_pct, rsi, params)
-
-                    if side == "buy":
-                        new_sl = round(current_price - atr * mult, 6)
-                        current_sl = pos.stop_loss_price
-                        if current_sl is None or new_sl > current_sl:
-                            pos.stop_loss_price = new_sl
-                            await self._update_trailing_stop_in_db(product_code, new_sl)
-                            logger.info(
-                                f"[CfdMgr] {product_code}: 롱 트레일링 스탑 "
-                                f"¥{current_sl} → ¥{new_sl} (x{mult:.1f})"
-                            )
-                    else:
-                        new_sl = round(current_price + atr * mult, 6)
-                        current_sl = pos.stop_loss_price
-                        if current_sl is None or new_sl < current_sl:
-                            pos.stop_loss_price = new_sl
-                            await self._update_trailing_stop_in_db(product_code, new_sl)
-                            logger.info(
-                                f"[CfdMgr] {product_code}: 숏 트레일링 스탑 "
-                                f"¥{current_sl} → ¥{new_sl} (x{mult:.1f})"
-                            )
-
-            # ── 포지션 없을 때: 진입 ──
-            elif signal in ("entry_ok", "entry_sell"):
-                # keep_rate 경고 체크 — 신규 주문 차단
-                warn_threshold = float(params.get("keep_rate_warn", 1.5))
-                if keep_rate is not None and keep_rate < warn_threshold:
-                    logger.info(
-                        f"[CfdMgr] {product_code}: keep_rate={keep_rate:.2f} < "
-                        f"warn={warn_threshold} → 신규 주문 차단"
-                    )
-                    continue
-
-                entry_side = "sell" if signal == "entry_sell" else "buy"
-                logger.info(f"[CfdMgr] {product_code}: {signal} → {entry_side} 진입 시도")
-                await self._open_position(product_code, entry_side, current_price, atr, params)
-
-    # ──────────────────────────────────────────
-    # Task 2: 스탑로스 모니터 (WS 틱 기반)
-    # ──────────────────────────────────────────
-
-    async def _stop_loss_monitor(self, product_code: str) -> None:
-        """WS 실시간 체결가 → 스탑로스 이탈 시 청산."""
-        price_queue: asyncio.Queue[float] = asyncio.Queue()
-
-        async def _on_trade(price: float, amount: float) -> None:
-            await price_queue.put(price)
-
-        await self._adapter.subscribe_trades(product_code, _on_trade)
-
-        try:
-            while True:
-                try:
-                    price = await asyncio.wait_for(price_queue.get(), timeout=30.0)
-                except asyncio.TimeoutError:
-                    continue
-
-                pos = self._position.get(product_code)
-                if pos is None:
-                    continue
-
-                stop_loss_price = pos.stop_loss_price
-                if stop_loss_price is None:
-                    continue
-
-                self._latest_price[product_code] = price
-                side = pos.extra.get("side", "buy")
-
-                triggered = False
-                if side == "buy" and price <= stop_loss_price:
-                    triggered = True
-                elif side == "sell" and price >= stop_loss_price:
-                    triggered = True
-
-                if triggered:
-                    cooldown_until = self._close_fail_until.get(product_code, 0)
-                    if time.time() < cooldown_until:
-                        continue
-
-                    logger.info(
-                        f"[CfdMgr] {product_code}: 하드 스탑로스 발동 "
-                        f"(side={side}, price=¥{price}, stop=¥{stop_loss_price})"
-                    )
-                    await self._close_position(product_code, "stop_loss")
-
-                    if self._position.get(product_code) is None:
-                        self._close_fail_count[product_code] = 0
-                        self._close_fail_until[product_code] = 0
-                    else:
-                        fail_count = self._close_fail_count.get(product_code, 0) + 1
-                        self._close_fail_count[product_code] = fail_count
-                        if fail_count % 5 == 0:
-                            self._close_fail_until[product_code] = time.time() + 60
-                            logger.warning(
-                                f"[CfdMgr] {product_code}: 청산 {fail_count}회 실패 — 60초 쿨다운"
-                            )
-        except asyncio.CancelledError:
-            raise
-
-    # ──────────────────────────────────────────
-    # 시그널 계산
-    # ──────────────────────────────────────────
-
-    async def _compute_signal(
-        self, product_code: str, timeframe: str,
-        entry_price: Optional[float] = None,
-        params: Optional[dict] = None,
-        side: Optional[str] = None,
-    ) -> Optional[dict]:
-        ema_period, atr_period = 20, 14
-        limit = max(ema_period * 2, atr_period + 1, int((params or {}).get("divergence_lookback", 40)))
-
-        CandleModel = self._candle_model
-        pair_col = getattr(CandleModel, self._pair_column)
-
-        async with self._session_factory() as db:
-            result = await db.execute(
-                select(CandleModel)
-                .where(
-                    and_(
-                        pair_col == product_code,
-                        CandleModel.timeframe == timeframe,
-                        CandleModel.is_complete == True,  # noqa: E712
-                    )
+            return "exit_warning"
+        elif side == "sell" and realtime_price > ema:
+            if signal != "exit_warning":
+                logger.info(
+                    f"[CfdMgr] {pair}: 숏 실시간가 ¥{realtime_price} > EMA ¥{ema:.4f} → exit_warning"
                 )
-                .order_by(CandleModel.open_time.desc())
-                .limit(limit)
+            return "exit_warning"
+        return signal
+
+    def _is_stop_triggered(self, pos, price, stop_loss_price):
+        """양방향 스탑로스."""
+        side = pos.extra.get("side", "buy")
+        if side == "buy":
+            return price <= stop_loss_price
+        return price >= stop_loss_price
+
+    async def _update_trailing_stop(self, pair, pos, current_price, atr, ema_slope_pct, rsi, params):
+        """양방향 적응형 트레일링 스탑."""
+        from core.strategy.signals import compute_adaptive_trailing_mult
+
+        side = pos.extra.get("side", "buy")
+        if pos.stop_tightened:
+            mult = float(params.get("tighten_stop_atr", 1.0))
+        else:
+            mult = compute_adaptive_trailing_mult(ema_slope_pct, rsi, params)
+
+        if side == "buy":
+            new_sl = round(current_price - atr * mult, 6)
+            current_sl = pos.stop_loss_price
+            if current_sl is None or new_sl > current_sl:
+                pos.stop_loss_price = new_sl
+                await self._update_trailing_stop_in_db(pair, new_sl)
+                logger.info(
+                    f"[CfdMgr] {pair}: 롱 트레일링 스탑 ¥{current_sl} → ¥{new_sl} (x{mult:.1f})"
+                )
+        else:
+            new_sl = round(current_price + atr * mult, 6)
+            current_sl = pos.stop_loss_price
+            if current_sl is None or new_sl < current_sl:
+                pos.stop_loss_price = new_sl
+                await self._update_trailing_stop_in_db(pair, new_sl)
+                logger.info(
+                    f"[CfdMgr] {pair}: 숏 트레일링 스탑 ¥{current_sl} → ¥{new_sl} (x{mult:.1f})"
+                )
+
+    async def _on_entry_signal(self, pair, signal, current_price, atr, params, signal_data):
+        """entry_ok / entry_sell → 진입. keep_rate 경고 / 주말 시 차단."""
+        if signal not in ("entry_ok", "entry_sell"):
+            return
+
+        # FX: 주말 임박 시 신규 진입 차단
+        is_fx = self._adapter.exchange_name == "gmofx"
+        if is_fx and (should_close_for_weekend() or not is_fx_market_open()):
+            logger.info(f"[CfdMgr] {pair}: FX 시장 휴장/주말 임박 → 진입 차단")
+            return
+
+        keep_rate = self._last_keep_rate.get(pair)
+        warn_threshold = float(params.get("keep_rate_warn", 1.5))
+        if keep_rate is not None and keep_rate < warn_threshold:
+            logger.info(
+                f"[CfdMgr] {pair}: keep_rate={keep_rate:.2f} < warn={warn_threshold} → 차단"
             )
-            candles = list(reversed(result.scalars().all()))
-
-        if len(candles) < ema_period + 1:
-            logger.debug(f"[CfdMgr] {product_code}: 캔들 부족 ({len(candles)}개)")
-            return None
-
-        result = compute_trend_signal(
-            candles, params=params or {}, entry_price=entry_price, side=side,
-        )
-        if result is not None:
-            result["latest_candle_open_time"] = str(candles[-1].open_time)
-            result["candles"] = candles
-        return result
+            return
+        entry_side = "sell" if signal == "entry_sell" else "buy"
+        logger.info(f"[CfdMgr] {pair}: {signal} → {entry_side} 진입 시도")
+        await self._open_position(pair, entry_side, current_price, atr, params)
 
     # ──────────────────────────────────────────
     # 진입
     # ──────────────────────────────────────────
 
     async def _open_position(
-        self, product_code: str, side: str, price: float, atr: Optional[float], params: Dict
+        self, product_code: str, side: str, price: float, atr, params: Dict
     ) -> None:
         """증거금 기반 CFD 포지션 진입."""
         try:
-            # 여유 증거금 확인
             if not hasattr(self._adapter, "get_collateral"):
                 logger.error(f"[CfdMgr] {product_code}: 어댑터에 get_collateral 없음")
                 return
@@ -615,9 +307,7 @@ class CfdTrendFollowingManager:
             effective_leverage = (coin_size * price) / collateral.collateral if collateral.collateral > 0 else 0
             if effective_leverage > max_leverage:
                 coin_size = round(collateral.collateral * max_leverage / price, 8)
-                logger.info(
-                    f"[CfdMgr] {product_code}: 레버리지 제한 → size={coin_size:.8f}"
-                )
+                logger.info(f"[CfdMgr] {product_code}: 레버리지 제한 → size={coin_size:.8f}")
 
             min_coin = float(params.get("min_coin_size", 0.001))
             if coin_size < min_coin:
@@ -638,19 +328,14 @@ class CfdTrendFollowingManager:
             except Exception as e:
                 logger.warning(f"[CfdMgr] {product_code}: 시세 조회 실패 — {e}")
 
-            # 주문 실행
             order_type = OrderType.MARKET_BUY if side == "buy" else OrderType.MARKET_SELL
-            # CFD: 어댑터가 FX_ 상품은 JPY→코인 변환을 스킵하므로 항상 코인 수량 전달
             order = await self._adapter.place_order(
-                order_type=order_type,
-                pair=product_code,
-                amount=coin_size,
+                order_type=order_type, pair=product_code, amount=coin_size,
             )
 
             exec_price = order.price or price
             exec_amount = order.amount if order.amount > 0 else coin_size
 
-            # 초기 스탑로스
             atr_mult = float(params.get("atr_multiplier_stop", 2.0))
             if side == "buy":
                 initial_sl = round(exec_price - atr * atr_mult, 6) if atr else None
@@ -658,26 +343,17 @@ class CfdTrendFollowingManager:
                 initial_sl = round(exec_price + atr * atr_mult, 6) if atr else None
 
             pos = Position(
-                pair=product_code,
-                entry_price=exec_price,
-                entry_amount=exec_amount,
-                stop_loss_price=initial_sl,
-                extra={
-                    "side": side,
-                    "opened_at": datetime.now(timezone.utc),
-                },
+                pair=product_code, entry_price=exec_price,
+                entry_amount=exec_amount, stop_loss_price=initial_sl,
+                extra={"side": side, "opened_at": datetime.now(timezone.utc)},
             )
             self._position[product_code] = pos
 
             pos.db_record_id = await self._record_open(
-                product_code=product_code,
-                side=side,
-                order_id=order.order_id,
-                price=exec_price,
-                size=exec_amount,
-                collateral_jpy=invest_jpy,
-                stop_loss_price=initial_sl,
-                strategy_id=params.get("strategy_id"),
+                product_code=product_code, side=side,
+                order_id=order.order_id, price=exec_price,
+                size=exec_amount, collateral_jpy=invest_jpy,
+                stop_loss_price=initial_sl, strategy_id=params.get("strategy_id"),
             )
 
             logger.info(
@@ -711,27 +387,15 @@ class CfdTrendFollowingManager:
                 self._position[product_code] = None
                 if prev_db_id:
                     await self._record_close(
-                        db_record_id=prev_db_id,
-                        product_code=product_code,
-                        side=side,
-                        order_id="",
-                        price=0.0,
-                        size=close_size,
-                        reason="dust_position_cleared",
-                        entry_price=pos.entry_price,
+                        db_record_id=prev_db_id, product_code=product_code,
+                        side=side, order_id="", price=0.0, size=close_size,
+                        reason="dust_position_cleared", entry_price=pos.entry_price,
                     )
                 return
 
-            # 반대 매매
-            if side == "buy":
-                order_type = OrderType.MARKET_SELL
-            else:
-                order_type = OrderType.MARKET_BUY
-
+            order_type = OrderType.MARKET_SELL if side == "buy" else OrderType.MARKET_BUY
             order = await self._adapter.place_order(
-                order_type=order_type,
-                pair=product_code,
-                amount=close_size,
+                order_type=order_type, pair=product_code, amount=close_size,
             )
 
             prev_pos = self._position.get(product_code)
@@ -747,13 +411,9 @@ class CfdTrendFollowingManager:
                     pass
 
             await self._record_close(
-                db_record_id=prev_db_id,
-                product_code=product_code,
-                side=side,
-                order_id=order.order_id,
-                price=exec_price,
-                size=close_size,
-                reason=reason,
+                db_record_id=prev_db_id, product_code=product_code,
+                side=side, order_id=order.order_id, price=exec_price,
+                size=close_size, reason=reason,
                 entry_price=prev_pos.entry_price if prev_pos else None,
             )
 
@@ -767,6 +427,7 @@ class CfdTrendFollowingManager:
     async def _apply_stop_tightening(
         self, product_code: str, current_price: float, atr: float, params: dict
     ) -> None:
+        """양방향 스탑 타이트닝."""
         pos = self._position.get(product_code)
         if pos is None:
             return
@@ -795,32 +456,23 @@ class CfdTrendFollowingManager:
     # DB 기록 헬퍼
     # ──────────────────────────────────────────
 
-    async def _record_open(
-        self,
-        product_code: str,
-        side: str,
-        order_id: str,
-        price: float,
-        size: float,
-        collateral_jpy: float,
-        stop_loss_price: Optional[float],
-        strategy_id: Optional[int],
-    ) -> Optional[int]:
+    async def _record_open(self, **kwargs) -> Optional[int]:
+        product_code = kwargs["product_code"]
         try:
-            Model = self._cfd_position_model
+            Model = self._position_model
             async with self._session_factory() as db:
-                kwargs = {
+                db_kwargs = {
                     self._pair_column: product_code,
-                    "strategy_id": strategy_id,
-                    "side": side,
-                    "entry_order_id": order_id,
-                    "entry_price": price,
-                    "entry_size": size,
-                    "entry_collateral_jpy": round(collateral_jpy, 2),
-                    "stop_loss_price": stop_loss_price,
+                    "strategy_id": kwargs.get("strategy_id"),
+                    "side": kwargs["side"],
+                    "entry_order_id": kwargs["order_id"],
+                    "entry_price": kwargs["price"],
+                    "entry_size": kwargs["size"],
+                    "entry_collateral_jpy": round(kwargs["collateral_jpy"], 2),
+                    "stop_loss_price": kwargs.get("stop_loss_price"),
                     "status": "open",
                 }
-                rec = Model(**kwargs)
+                rec = Model(**db_kwargs)
                 db.add(rec)
                 await db.commit()
                 await db.refresh(rec)
@@ -830,20 +482,17 @@ class CfdTrendFollowingManager:
             logger.error(f"[CfdMgr] {product_code}: DB 진입 기록 실패 — {e}", exc_info=True)
             return None
 
-    async def _record_close(
-        self,
-        db_record_id: Optional[int],
-        product_code: str,
-        side: str,
-        order_id: str,
-        price: float,
-        size: float,
-        reason: str,
-        entry_price: Optional[float],
-    ) -> None:
+    async def _record_close(self, **kwargs) -> None:
+        product_code = kwargs.get("product_code", "")
+        db_record_id = kwargs.get("db_record_id")
         try:
             if db_record_id is None:
                 return
+
+            price = kwargs["price"]
+            size = kwargs["size"]
+            side = kwargs["side"]
+            entry_price = kwargs.get("entry_price")
 
             pnl_jpy: Optional[float] = None
             pnl_pct: Optional[float] = None
@@ -854,7 +503,7 @@ class CfdTrendFollowingManager:
                     pnl_jpy = round((entry_price - price) * size, 2)
                 pnl_pct = round(pnl_jpy / (entry_price * size) * 100, 4)
 
-            Model = self._cfd_position_model
+            Model = self._position_model
             async with self._session_factory() as db:
                 result = await db.execute(
                     select(Model).where(Model.id == db_record_id)
@@ -862,10 +511,10 @@ class CfdTrendFollowingManager:
                 rec = result.scalars().first()
                 if rec is None:
                     return
-                rec.exit_order_id = order_id
+                rec.exit_order_id = kwargs["order_id"]
                 rec.exit_price = price
                 rec.exit_size = size
-                rec.exit_reason = reason
+                rec.exit_reason = kwargs["reason"]
                 rec.realized_pnl_jpy = pnl_jpy
                 rec.realized_pnl_pct = pnl_pct
                 rec.status = "closed"
@@ -877,20 +526,3 @@ class CfdTrendFollowingManager:
                 )
         except Exception as e:
             logger.error(f"[CfdMgr] {product_code}: DB 청산 기록 실패 — {e}", exc_info=True)
-
-    async def _update_trailing_stop_in_db(self, product_code: str, stop_loss_price: float) -> None:
-        try:
-            pos = self._position.get(product_code)
-            if pos is None or pos.db_record_id is None:
-                return
-            Model = self._cfd_position_model
-            async with self._session_factory() as db:
-                result = await db.execute(
-                    select(Model).where(Model.id == pos.db_record_id)
-                )
-                rec = result.scalars().first()
-                if rec:
-                    rec.stop_loss_price = stop_loss_price
-                    await db.commit()
-        except Exception as e:
-            logger.warning(f"[CfdMgr] {product_code}: DB 트레일링 스탑 갱신 실패 — {e}")
