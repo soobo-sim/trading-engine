@@ -466,6 +466,13 @@ def create_trend_position_model(prefix: str, order_id_length: int = 40):
         # 정신차리자 보고 자동화 (WAKE_UP_REVIEW_AUTO)
         loss_webhook_sent = Column(Boolean, nullable=False, server_default="false")
 
+        # 진입 시그널 스냅샷 (Alice 사후 분석용)
+        entry_rsi = Column(Numeric(8, 4), nullable=True)
+        entry_ema_slope = Column(Numeric(10, 6), nullable=True)
+        entry_atr = Column(Numeric(18, 8), nullable=True)
+        entry_regime = Column(String(20), nullable=True)  # trending/ranging/unclear
+        entry_bb_width = Column(Numeric(8, 4), nullable=True)
+
         def __repr__(self) -> str:
             return (
                 f"<{self.__class__.__name__}(id={self.id}, pair={self.pair!r}, "

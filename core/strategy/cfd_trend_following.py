@@ -278,7 +278,7 @@ class CfdTrendFollowingManager(BaseTrendManager):
     # ──────────────────────────────────────────
 
     async def _open_position(
-        self, product_code: str, side: str, price: float, atr, params: Dict
+        self, product_code: str, side: str, price: float, atr, params: Dict, *, signal_data: dict | None = None
     ) -> None:
         """증거금 기반 CFD 포지션 진입."""
         try:

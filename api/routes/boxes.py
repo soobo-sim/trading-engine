@@ -129,6 +129,22 @@ async def get_active_position(
         return await _get_box_position(pair, state, db)
 
 
+@router.get("/positions/{position_id}")
+async def get_position_by_id(
+    position_id: int,
+    state: AppState = Depends(get_state),
+    db: AsyncSession = Depends(get_db),
+):
+    """포지션 단건 조회 (Alice 사후 분석용). GET /api/boxes/positions/{position_id}"""
+    TrendPos = state.models.trend_position
+    stmt = select(TrendPos).where(TrendPos.id == position_id)
+    result = await db.execute(stmt)
+    row = result.scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"position {position_id} not found")
+    return {"position": _trend_pos_to_dict(row), "type": "trend_following"}
+
+
 @router.get("/{pair}/positions/history")
 async def get_position_history(
     pair: str,
@@ -272,6 +288,12 @@ def _trend_pos_to_dict(row, current_price: float | None = None) -> dict:
         "status": row.status,
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "closed_at": row.closed_at.isoformat() if row.closed_at else None,
+        # 진입 시그널 스냅샷 (Alice 사후 분석용)
+        "entry_rsi": float(row.entry_rsi) if getattr(row, "entry_rsi", None) is not None else None,
+        "entry_ema_slope": float(row.entry_ema_slope) if getattr(row, "entry_ema_slope", None) is not None else None,
+        "entry_atr": float(row.entry_atr) if getattr(row, "entry_atr", None) is not None else None,
+        "entry_regime": getattr(row, "entry_regime", None),
+        "entry_bb_width": float(row.entry_bb_width) if getattr(row, "entry_bb_width", None) is not None else None,
     }
 
 

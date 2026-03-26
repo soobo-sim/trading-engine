@@ -136,7 +136,7 @@ class TrendFollowingManager(BaseTrendManager):
     # ──────────────────────────────────────────
 
     async def _open_position(
-        self, pair: str, price: float, atr: Optional[float], params: Dict
+        self, pair: str, price: float, atr: Optional[float], params: Dict, *, signal_data: dict | None = None
     ) -> None:
         """market_buy 자동 진입 + 인메모리 포지션 기록."""
         try:
@@ -192,6 +192,7 @@ class TrendFollowingManager(BaseTrendManager):
                 price=exec_price, amount=exec_amount,
                 invest_jpy=invest_jpy, stop_loss_price=initial_sl,
                 strategy_id=params.get("strategy_id"),
+                signal_data=signal_data or {},
             )
 
             logger.info(
@@ -302,6 +303,7 @@ class TrendFollowingManager(BaseTrendManager):
     async def _record_open(self, **kwargs) -> Optional[int]:
         """진입 시 trend_positions 레코드 생성."""
         pair = kwargs["pair"]
+        sd = kwargs.get("signal_data") or {}
         try:
             Model = self._position_model
             async with self._session_factory() as db:
@@ -314,6 +316,12 @@ class TrendFollowingManager(BaseTrendManager):
                     entry_jpy=round(kwargs["invest_jpy"], 2),
                     stop_loss_price=kwargs.get("stop_loss_price"),
                     status="open",
+                    # 진입 시그널 스냅샷
+                    entry_rsi=round(sd["rsi"], 4) if sd.get("rsi") is not None else None,
+                    entry_ema_slope=round(sd["ema_slope_pct"], 6) if sd.get("ema_slope_pct") is not None else None,
+                    entry_atr=sd.get("atr"),
+                    entry_regime=sd.get("regime"),
+                    entry_bb_width=round(sd["bb_width_pct"], 4) if sd.get("bb_width_pct") is not None else None,
                 )
                 db.add(rec)
                 await db.commit()

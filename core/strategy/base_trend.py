@@ -507,7 +507,7 @@ class BaseTrendManager(ABC):
         """진입 시그널 처리. 기본: entry_ok → buy 진입."""
         if signal == "entry_ok":
             logger.info(f"{self._log_prefix} {pair}: entry_ok @ ¥{current_price} → 진입 시도")
-            await self._open_position(pair, current_price, atr, params)
+            await self._open_position(pair, current_price, atr, params, signal_data=signal_data)
 
     def _is_stop_triggered(self, pos: Position, price: float, stop_loss_price: float) -> bool:
         """스탑로스 발동 여부. 기본: 롱(price <= stop)."""
@@ -528,7 +528,7 @@ class BaseTrendManager(ABC):
         ...
 
     @abstractmethod
-    async def _open_position(self, pair: str, price: float, atr: Optional[float], params: Dict) -> None:
+    async def _open_position(self, pair: str, price: float, atr: Optional[float], params: Dict, *, signal_data: dict | None = None) -> None:
         """진입 주문 실행."""
         ...
 
