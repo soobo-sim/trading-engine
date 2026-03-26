@@ -56,6 +56,21 @@ def compute_safety_status(checks: list[SafetyCheck]) -> str:
     return "all_ok"
 
 
+def format_safety_summary(report: "SafetyReport") -> str:
+    """SafetyReport → 한 줄 요약 텍스트. n/a 항목은 분모에서 제외."""
+    active = [c for c in report.checks if c.status != "n/a"]
+    ok_count = sum(1 for c in active if c.status == "ok")
+    total = len(active)
+    if report.status == "all_ok":
+        return f"🛡️ 안전장치: ✅ 전체 정상 ({ok_count}/{total})"
+    elif report.status == "critical":
+        names = [c.name for c in active if c.status == "critical"]
+        return f"🛡️ 안전장치: 🔴 {', '.join(names)} ({ok_count}/{total}) — 즉시 확인 필요"
+    else:
+        names = [c.name for c in active if c.status == "warning"]
+        return f"🛡️ 안전장치: 🟡 {', '.join(names)} ({ok_count}/{total})"
+
+
 @dataclass
 class SafetyReport:
     """안전장치 종합 보고."""

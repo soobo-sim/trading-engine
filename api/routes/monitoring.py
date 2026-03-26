@@ -171,17 +171,8 @@ async def get_monitoring_report(
     # 안전장치 요약 추가
     try:
         safety_report = await state.health_checker.check_safety_only()
-        ok_count = sum(1 for c in safety_report.checks if c.status in ("ok", "n/a"))
-        total = len(safety_report.checks)
-
-        if safety_report.status == "all_ok":
-            summary = f"🛡️ 안전장치: ✅ 전체 정상 ({ok_count}/{total})"
-        elif safety_report.status == "critical":
-            critical_names = [c.name for c in safety_report.checks if c.status == "critical"]
-            summary = f"🛡️ 안전장치: 🔴 {', '.join(critical_names)} ({ok_count}/{total}) — 즉시 확인 필요"
-        else:
-            warn_names = [c.name for c in safety_report.checks if c.status == "warning"]
-            summary = f"🛡️ 안전장치: 🟡 {', '.join(warn_names)} ({ok_count}/{total})"
+        from core.monitoring.health import format_safety_summary
+        summary = format_safety_summary(safety_report)
 
         report["safety"] = {
             "status": safety_report.status,

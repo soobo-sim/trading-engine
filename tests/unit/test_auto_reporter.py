@@ -255,3 +255,43 @@ class TestAutoReporter:
                 await reporter._loop()
 
         assert call_count >= 1  # 예외 발생 후에도 루프가 계속됨
+
+
+class TestFormatSafetySummary:
+    """format_safety_summary n/a 제외 테스트."""
+
+    def _make_report(self, checks, status="all_ok"):
+        from core.monitoring.health import SafetyReport, SafetyCheck
+        sc = [SafetyCheck(id=f"SF-{i+1:02d}", name=c[0], status=c[1], severity="critical", detail="")
+              for i, c in enumerate(checks)]
+        return SafetyReport(status=status, checks=sc, last_checked="2026-03-25T00:00:00Z")
+
+    def test_all_ok_no_na(self):
+        from core.monitoring.health import format_safety_summary
+        r = self._make_report([("WS", "ok"), ("태스크", "ok")], "all_ok")
+        s = format_safety_summary(r)
+        assert "✅" in s
+        assert "(2/2)" in s
+
+    def test_all_ok_with_na(self):
+        from core.monitoring.health import format_safety_summary
+        r = self._make_report([("WS", "ok"), ("태스크", "ok"), ("사만사", "n/a")], "all_ok")
+        s = format_safety_summary(r)
+        assert "✅" in s
+        assert "(2/2)" in s  # n/a excluded from denominator
+
+    def test_warning_with_na(self):
+        from core.monitoring.health import format_safety_summary
+        r = self._make_report([("WS", "ok"), ("잔고", "warning"), ("사만사", "n/a")], "degraded")
+        s = format_safety_summary(r)
+        assert "🟡" in s
+        assert "잔고" in s
+        assert "(1/2)" in s  # 1 ok out of 2 active
+
+    def test_critical(self):
+        from core.monitoring.health import format_safety_summary
+        r = self._make_report([("WS", "critical"), ("태스크", "ok")], "critical")
+        s = format_safety_summary(r)
+        assert "🔴" in s
+        assert "WS" in s
+        assert "(1/2)" in s
