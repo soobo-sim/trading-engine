@@ -39,7 +39,7 @@ async def send_telegram_message(
 ) -> bool:
     """Telegram Bot API로 메시지 전송. 최대 max_retries회 재시도 (exponential backoff)."""
     url = TELEGRAM_API.format(token=bot_token)
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
+    payload = {"chat_id": chat_id, "text": text}
     owns_client = client is None
 
     for attempt in range(max_retries + 1):
