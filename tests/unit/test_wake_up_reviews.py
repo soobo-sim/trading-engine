@@ -226,3 +226,54 @@ async def test_l1_lessons_empty():
     assert result["summary"]["total_reviews"] == 0
     assert result["summary"]["top_causes"] == []
     assert result["recent_lessons"] == []
+
+
+@pytest.mark.asyncio
+async def test_l2_min_repeat_filters_low_count():
+    """min_repeat=3 시 2회 이하 원인은 top_causes에서 제외."""
+    from api.routes.wake_up_reviews import get_lessons
+
+    db = AsyncMock()
+
+    count_result = MagicMock()
+    count_result.scalar_one.return_value = 5
+    agg_result = MagicMock()
+    agg_result.one.return_value = (Decimal("-500"), Decimal("-2000"))
+    # HAVING cnt >= 3 이 적용되어 cnt=2인 ENTRY_TIMING 제외 → REGIME_MISMATCH만
+    cause_row = MagicMock()
+    cause_row.cause_code = "REGIME_MISMATCH"
+    cause_row.cnt = 3
+    cause_result = MagicMock()
+    cause_result.all.return_value = [cause_row]
+    lesson_result = MagicMock()
+    lesson_result.scalars.return_value.all.return_value = []
+
+    db.execute = AsyncMock(side_effect=[count_result, agg_result, cause_result, lesson_result])
+
+    result = await get_lessons(limit=10, min_repeat=3, db=db)
+    causes = result["summary"]["top_causes"]
+    assert len(causes) == 1
+    assert causes[0]["code"] == "REGIME_MISMATCH"
+    assert causes[0]["count"] == 3
+
+
+@pytest.mark.asyncio
+async def test_l3_min_repeat_empty_when_no_match():
+    """min_repeat가 높아서 아무것도 안 걸리면 top_causes = []."""
+    from api.routes.wake_up_reviews import get_lessons
+
+    db = AsyncMock()
+
+    count_result = MagicMock()
+    count_result.scalar_one.return_value = 2
+    agg_result = MagicMock()
+    agg_result.one.return_value = (Decimal("-100"), Decimal("-200"))
+    cause_result = MagicMock()
+    cause_result.all.return_value = []  # HAVING cnt >= 10 → 아무것도 없음
+    lesson_result = MagicMock()
+    lesson_result.scalars.return_value.all.return_value = []
+
+    db.execute = AsyncMock(side_effect=[count_result, agg_result, cause_result, lesson_result])
+
+    result = await get_lessons(limit=10, min_repeat=10, db=db)
+    assert result["summary"]["top_causes"] == []

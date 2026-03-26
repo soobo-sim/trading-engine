@@ -145,9 +145,12 @@ async def get_lessons(
     strategy_id: Optional[int] = Query(None),
     limit: int = Query(10, ge=1, le=100),
     kill_met: Optional[bool] = Query(None),
+    min_repeat: Optional[int] = Query(None, ge=1, description="동일 cause_code N회 이상 반복된 원인만"),
     db: AsyncSession = Depends(get_db),
 ):
-    """교훈 집계 API (Phase 1: top_causes + recent_lessons)."""
+    """교훈 집계 API (Phase 1: top_causes + recent_lessons).
+    min_repeat: top_causes를 N회 이상 반복된 원인만 필터링.
+    """
     conditions = []
     if pair:
         conditions.append(WakeUpReview.pair == pair)
@@ -173,7 +176,7 @@ async def get_lessons(
     avg_loss = round(float(agg[0]), 0) if agg[0] is not None else None
     worst_loss = round(float(agg[1]), 0) if agg[1] is not None else None
 
-    # top_causes
+    # top_causes (min_repeat 필터 포함)
     cause_stmt = (
         select(WakeUpReview.cause_code, sqlfunc.count().label("cnt"))
         .select_from(WakeUpReview)
@@ -182,6 +185,8 @@ async def get_lessons(
     )
     if conditions:
         cause_stmt = cause_stmt.where(*conditions)
+    if min_repeat is not None:
+        cause_stmt = cause_stmt.having(sqlfunc.count() >= min_repeat)
     cause_rows = (await db.execute(cause_stmt)).all()
     top_causes = [
         {
