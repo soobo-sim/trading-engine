@@ -134,9 +134,24 @@ class AutoReporter:
             await asyncio.sleep(self._interval_sec)
 
     async def _run_once(self) -> None:
-        """활성 전략 전체에 대해 보고 생성 → Telegram 전송."""
+        """활성 전략 전체에 대해 보고 생성 → Telegram 전송 + 손실 포지션 감지."""
         state = self._state
         async with self._session_factory() as db:
+            # 손실 포지션 감지 (WAKE_UP_REVIEW_AUTO)
+            try:
+                from core.task.loss_detector import detect_and_notify_losses
+                trend_model = getattr(state.models, "trend_position", None)
+                if trend_model is not None:
+                    sent = await detect_and_notify_losses(
+                        db, trend_model,
+                        prefix=state.prefix,
+                        http_client=self._http_client,
+                    )
+                    if sent:
+                        logger.info(f"Loss detector: {sent}건 webhook 전송")
+            except Exception as e:
+                logger.error(f"Loss detector 실패 (보고는 계속): {e}")
+
             # 활성 전략 조회
             StrategyModel = state.models.strategy
             result = await db.execute(

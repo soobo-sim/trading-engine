@@ -463,6 +463,9 @@ def create_trend_position_model(prefix: str, order_id_length: int = 40):
         created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
         closed_at = Column(DateTime(timezone=True), nullable=True)
 
+        # 정신차리자 보고 자동화 (WAKE_UP_REVIEW_AUTO)
+        loss_webhook_sent = Column(Boolean, nullable=False, server_default="false")
+
         def __repr__(self) -> str:
             return (
                 f"<{self.__class__.__name__}(id={self.id}, pair={self.pair!r}, "
