@@ -531,3 +531,101 @@ def create_cfd_position_model(prefix: str, pair_column: str = "product_code", or
         ),
     }
     return type(cls_name, (Base,), attrs)
+
+
+# ──────────────────────────────────────────
+# WakeUpReview — 정신차리자 리뷰 (Alice/Samantha/Rachel 파이프라인)
+# ──────────────────────────────────────────
+
+CAUSE_CODES = (
+    "ENTRY_TIMING", "EXIT_TIMING", "REGIME_MISMATCH", "PARAM_SUBOPTIMAL",
+    "SIZE_EXCESS", "EXECUTION_GAP", "BLACK_SWAN", "SIGNAL_CONFLICT",
+)
+REVIEW_STATUSES = (
+    "draft", "alice_submitted", "samantha_approved", "samantha_rejected", "rachel_decided",
+)
+SIMULATION_VERDICTS = ("justified", "premature", "lucky_hold", "reentry_opportunity")
+OVERFIT_RISKS = ("low", "medium", "high")
+RACHEL_VERDICTS = ("maintain", "modify", "archive")
+
+
+class WakeUpReview(Base):
+    __tablename__ = "wake_up_reviews"
+    __table_args__ = (
+        CheckConstraint(
+            "cause_code IN ('ENTRY_TIMING','EXIT_TIMING','REGIME_MISMATCH',"
+            "'PARAM_SUBOPTIMAL','SIZE_EXCESS','EXECUTION_GAP','BLACK_SWAN','SIGNAL_CONFLICT')",
+            name="wur_cause_code_check",
+        ),
+        CheckConstraint(
+            "review_status IN ('draft','alice_submitted','samantha_approved',"
+            "'samantha_rejected','rachel_decided')",
+            name="wur_review_status_check",
+        ),
+        CheckConstraint(
+            "simulation_verdict IS NULL OR simulation_verdict IN "
+            "('justified','premature','lucky_hold','reentry_opportunity')",
+            name="wur_simulation_verdict_check",
+        ),
+        CheckConstraint(
+            "overfit_risk IS NULL OR overfit_risk IN ('low','medium','high')",
+            name="wur_overfit_risk_check",
+        ),
+        CheckConstraint(
+            "rachel_verdict IS NULL OR rachel_verdict IN ('maintain','modify','archive')",
+            name="wur_rachel_verdict_check",
+        ),
+        Index("idx_wur_cause", "strategy_id", "pair", "cause_code", "created_at"),
+        Index("idx_wur_position", "position_id"),
+        {"extend_existing": True},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    position_id = Column(
+        Integer, ForeignKey("bf_trend_positions.id", ondelete="SET NULL"), nullable=True
+    )
+    strategy_id = Column(
+        Integer, ForeignKey("bf_strategies.id", ondelete="SET NULL"), nullable=True
+    )
+    pair = Column(String(20), nullable=False)
+    entry_price = Column(Numeric(18, 8), nullable=False)
+    exit_price = Column(Numeric(18, 8), nullable=False)
+    realized_pnl = Column(Numeric(18, 2), nullable=False)
+    cause_code = Column(String(30), nullable=False)
+    review_status = Column(String(30), nullable=False, default="draft")
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    # nullable fields
+    cause_detail = Column(Text, nullable=True)
+    sub_cause = Column(String(50), nullable=True)
+    holding_duration_min = Column(Integer, nullable=True)
+    entry_regime = Column(String(20), nullable=True)
+    actual_regime = Column(String(20), nullable=True)
+    simulation_hold_pnl = Column(Numeric(18, 2), nullable=True)
+    simulation_best_exit_pnl = Column(Numeric(18, 2), nullable=True)
+    simulation_verdict = Column(String(30), nullable=True)
+    capital_at_entry = Column(Numeric(18, 2), nullable=True)
+    position_size_pct = Column(Numeric(8, 4), nullable=True)
+    alice_analysis = Column(Text, nullable=True)
+    samantha_audit = Column(Text, nullable=True)
+    rachel_verdict = Column(String(20), nullable=True)
+    rachel_rationale = Column(Text, nullable=True)
+    lessons_learned = Column(Text, nullable=True)
+    param_changes = Column(JSON, nullable=True)
+    optimistic_ev = Column(Numeric(8, 4), nullable=True)
+    pessimistic_ev = Column(Numeric(8, 4), nullable=True)
+    pessimistic_max_loss = Column(Numeric(18, 2), nullable=True)
+    grid_search_result = Column(JSON, nullable=True)
+    overfit_risk = Column(String(10), nullable=True)
+    kill_condition_met = Column(Boolean, nullable=False, server_default="false")
+    kill_condition_text = Column(String(200), nullable=True)
+    safety_check_ok = Column(Boolean, nullable=True)
+    stop_loss_price = Column(Numeric(18, 8), nullable=True)
+    actual_stop_hit_price = Column(Numeric(18, 8), nullable=True)
+    rejection_count = Column(Integer, nullable=False, server_default="0")
+
+    def __repr__(self) -> str:
+        return (
+            f"<WakeUpReview(id={self.id}, pair={self.pair!r}, "
+            f"cause={self.cause_code!r}, status={self.review_status!r})>"
+        )
