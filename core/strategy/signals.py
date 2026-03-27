@@ -359,6 +359,7 @@ def compute_trend_signal(
         "rsi_series": rsi_series,
         "regime": "trending" if regime_trending else ("ranging" if regime_ranging else "unclear"),
         "exit_signal": exit_signal,
+        "bb_width_pct": bb_width_pct,
     }
 
 

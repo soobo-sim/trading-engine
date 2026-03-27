@@ -438,3 +438,22 @@ class TestEmaSlopeEntryMin:
         if (result["ema_slope_pct"] is not None
                 and 0 < result["ema_slope_pct"] < 0.1):
             assert result["signal"] != "entry_ok"
+
+
+# ── EL-8, EL-9: bb_width_pct 반환 검증 ─────────────────────
+
+class TestBbWidthPctInSignal:
+    def test_el8_bb_width_pct_in_return(self):
+        """EL-8: compute_trend_signal 반환값에 bb_width_pct 존재 + float >= 0."""
+        candles = _make_uptrend_candles(30)
+        result = compute_trend_signal(candles)
+        assert "bb_width_pct" in result, "bb_width_pct가 반환값에 없음"
+        assert isinstance(result["bb_width_pct"], float)
+        assert result["bb_width_pct"] >= 0
+
+    def test_el9_bb_width_pct_not_zero_with_varied_prices(self):
+        """EL-9: 변동 있는 캔들 → bb_width_pct > 0 (entry_bb_width NOT NULL 확인 대리)."""
+        candles = _make_uptrend_candles(30, start=100.0, step=2.0)
+        result = compute_trend_signal(candles)
+        assert result["bb_width_pct"] is not None
+        assert result["bb_width_pct"] >= 0
