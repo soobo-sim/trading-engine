@@ -629,3 +629,56 @@ class WakeUpReview(Base):
             f"<WakeUpReview(id={self.id}, pair={self.pair!r}, "
             f"cause={self.cause_code!r}, status={self.review_status!r})>"
         )
+
+
+# ──────────────────────────────────────────
+# StrategyChange — 전략 변경 이력
+# ──────────────────────────────────────────
+
+SC_CHANGE_TYPES = ("param_change", "style_change", "new_strategy", "archive_only")
+SC_STATUSES = ("active", "killed", "graduated")
+
+
+class StrategyChange(Base):
+    __tablename__ = "strategy_changes"
+    __table_args__ = (
+        CheckConstraint(
+            "change_type IN ('param_change','style_change','new_strategy','archive_only')",
+            name="sc_change_type_check",
+        ),
+        CheckConstraint(
+            "status IN ('active','killed','graduated')",
+            name="sc_status_check",
+        ),
+        Index("idx_sc_pair_status", "pair", "status", "created_at"),
+        Index("idx_sc_new_strategy", "new_strategy_id"),
+        {"extend_existing": True},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    pair = Column(String(20), nullable=False)
+    old_strategy_id = Column(
+        Integer, ForeignKey("bf_strategies.id", ondelete="SET NULL"), nullable=True
+    )
+    new_strategy_id = Column(
+        Integer, ForeignKey("bf_strategies.id", ondelete="RESTRICT"), nullable=False
+    )
+    change_type = Column(String(30), nullable=False)
+    changed_params = Column(JSON, nullable=True)
+    trigger = Column(Text, nullable=True)
+    rationale = Column(Text, nullable=True)
+    alice_opinion = Column(Text, nullable=True)
+    samantha_opinion = Column(Text, nullable=True)
+    rachel_verdict = Column(Text, nullable=True)
+    kill_conditions = Column(JSON, nullable=True)
+    observation_period = Column(String(50), nullable=True)
+    status = Column(String(20), nullable=False, server_default="active")
+    kill_triggered_at = Column(DateTime(timezone=True), nullable=True)
+    outcome_summary = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    def __repr__(self) -> str:
+        return (
+            f"<StrategyChange(id={self.id}, pair={self.pair!r}, "
+            f"type={self.change_type!r}, status={self.status!r})>"
+        )
