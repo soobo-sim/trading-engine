@@ -43,6 +43,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from core.exchange.base import ExchangeAdapter
 from core.exchange.types import OrderType
 from core.task.supervisor import TaskSupervisor
+from core.analysis.box_detector import find_cluster
 
 logger = logging.getLogger(__name__)
 
@@ -729,33 +730,8 @@ class BoxMeanReversionManager:
         min_touches: int,
         mode: str,
     ) -> tuple[Optional[float], int]:
-        """
-        tolerance_pct 이내 가격들을 클러스터로 묶어 최다 빈도 클러스터 반환.
-        mode="high" → 높은 쪽 우선, mode="low" → 낮은 쪽 우선.
-        """
-        if not prices:
-            return None, 0
-
-        tol = tolerance_pct / 100
-        sorted_prices = sorted(prices, reverse=(mode == "high"))
-        clusters: list[list[float]] = []
-
-        for p in sorted_prices:
-            placed = False
-            for cluster in clusters:
-                center = sum(cluster) / len(cluster)
-                if abs(p - center) / center <= tol:
-                    cluster.append(p)
-                    placed = True
-                    break
-            if not placed:
-                clusters.append([p])
-
-        best_cluster = max(clusters, key=len)
-        if len(best_cluster) < min_touches:
-            return None, 0
-
-        return sum(best_cluster) / len(best_cluster), len(best_cluster)
+        """core.analysis.box_detector.find_cluster 위임."""
+        return find_cluster(prices, tolerance_pct, min_touches, mode)
 
     @staticmethod
     def _linear_slope(xs: list[int], ys: list[float]) -> float:
