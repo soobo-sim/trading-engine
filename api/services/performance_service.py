@@ -488,3 +488,196 @@ async def compare_performance(
         "reliability_score": reliability_score,
         "candle_count": len(candles),
     }
+
+
+# ──────────────────────────────────────────────────────────────
+# 전략별 성과 분해
+# ──────────────────────────────────────────────────────────────
+
+def _compute_grade(metrics: dict, trade_count: int) -> str:
+    if trade_count < 10:
+        return "insufficient"
+    ev = metrics.get("expected_value")
+    win_rate = metrics.get("win_rate")
+    ev_positive = ev is not None and ev > 0
+    wr_ok = win_rate is not None and win_rate >= 50.0
+    if ev_positive and wr_ok:
+        return "A"
+    if ev_positive or wr_ok:
+        return "B"
+    return "C"
+
+
+def _compute_metrics_for_strategy(positions: list) -> dict:
+    """strategy_id 단위 성과 메트릭. NULL pnl 제외 + excluded_count 포함."""
+    valid = [p for p in positions if p.realized_pnl_jpy is not None]
+    excluded = len(positions) - len(valid)
+
+    wins = [p for p in valid if float(p.realized_pnl_jpy) > 0]
+    losses = [p for p in valid if float(p.realized_pnl_jpy) <= 0]
+
+    total_pnl = sum(float(p.realized_pnl_jpy) for p in valid)
+    avg_pnl = total_pnl / len(valid) if valid else 0.0
+    max_loss = min((float(p.realized_pnl_jpy) for p in losses), default=None)
+    max_win = max((float(p.realized_pnl_jpy) for p in wins), default=None)
+
+    win_rate = round(len(wins) / len(valid) * 100, 2) if valid else 0.0
+
+    # Sharpe (pnl_jpy 기준)
+    sharpe = None
+    if len(valid) >= 2:
+        pnls = [float(p.realized_pnl_jpy) for p in valid]
+        mean = sum(pnls) / len(pnls)
+        variance = sum((x - mean) ** 2 for x in pnls) / (len(pnls) - 1)
+        std = math.sqrt(variance)
+        if std > 0:
+            sharpe = round(mean / std, 4)
+
+    # avg_holding_hours
+    holding_hours_list = []
+    for p in valid:
+        if p.created_at and p.closed_at:
+            ca, cl = p.created_at, p.closed_at
+            if ca.tzinfo is None:
+                ca = ca.replace(tzinfo=timezone.utc)
+            if cl.tzinfo is None:
+                cl = cl.replace(tzinfo=timezone.utc)
+            holding_hours_list.append((cl - ca).total_seconds() / 3600)
+    avg_holding_hours = round(sum(holding_hours_list) / len(holding_hours_list), 2) if holding_hours_list else None
+
+    # EV (JPY 기준 간이)
+    ev = round(avg_pnl, 2) if valid else None
+
+    return {
+        "total_trades": len(positions),
+        "excluded_null_pnl_count": excluded,
+        "wins": len(wins),
+        "losses": len(losses),
+        "win_rate": win_rate,
+        "total_pnl_jpy": round(total_pnl, 2),
+        "avg_pnl_jpy": round(avg_pnl, 2),
+        "max_single_loss_jpy": round(max_loss, 2) if max_loss is not None else None,
+        "max_single_win_jpy": round(max_win, 2) if max_win is not None else None,
+        "sharpe_ratio": sharpe,
+        "avg_holding_hours": avg_holding_hours,
+        "expected_value": ev,
+    }
+
+
+async def get_performance_by_strategy(
+    pair: str,
+    period: str,
+    status_filter: Optional[str],
+    state: AppState,
+    db: AsyncSession,
+) -> dict:
+    """전략별 성과 비교표."""
+    since = datetime.now(timezone.utc) - timedelta(days=PERIOD_DAYS[period])
+
+    TrendPos = state.models.trend_position
+    StrategyModel = state.models.strategy
+
+    # 전략 목록 조회
+    strategy_conditions = []
+    if status_filter:
+        strategy_conditions.append(StrategyModel.status == status_filter)
+    strat_result = await db.execute(
+        select(StrategyModel).where(*strategy_conditions) if strategy_conditions
+        else select(StrategyModel)
+    )
+    strategies = strat_result.scalars().all()
+
+    # 해당 pair 전략만 (parameters.pair 기준)
+    pair_strategies = []
+    for s in strategies:
+        params = s.parameters or {}
+        s_pair = params.get("pair") or params.get("product_code") or ""
+        if s_pair.upper() == pair.upper():
+            pair_strategies.append(s)
+
+    # 전략별 포지션 조회
+    result_rows = []
+    all_positions_flat = []
+
+    for s in pair_strategies:
+        pos_result = await db.execute(
+            select(TrendPos).where(and_(
+                TrendPos.pair == pair,
+                TrendPos.strategy_id == s.id,
+                TrendPos.status == "closed",
+                TrendPos.closed_at >= since,
+            )).order_by(TrendPos.closed_at)
+        )
+        positions = list(pos_result.scalars().all())
+        all_positions_flat.extend(positions)
+
+        metrics = _compute_metrics_for_strategy(positions)
+        grade = _compute_grade(metrics, len(positions))
+
+        # active_from / active_to (strategy created_at / updated_at)
+        active_from = getattr(s, "created_at", None)
+        active_to = getattr(s, "updated_at", None) if s.status != "active" else None
+
+        result_rows.append({
+            "strategy_id": s.id,
+            "name": s.name,
+            "status": s.status,
+            **metrics,
+            "grade": grade,
+            "active_from": active_from.isoformat() if active_from else None,
+            "active_to": active_to.isoformat() if active_to else None,
+        })
+
+    # totals
+    total_pnl = sum(r["total_pnl_jpy"] for r in result_rows)
+    total_trades = sum(r["total_trades"] for r in result_rows)
+    best = max(result_rows, key=lambda r: r["total_pnl_jpy"], default=None)
+    worst = min(result_rows, key=lambda r: r["total_pnl_jpy"], default=None)
+
+    return {
+        "success": True,
+        "pair": pair,
+        "period": period,
+        "since": since.isoformat(),
+        "strategies": result_rows,
+        "totals": {
+            "total_trades": total_trades,
+            "total_pnl_jpy": round(total_pnl, 2),
+            "best_strategy_id": best["strategy_id"] if best else None,
+            "worst_strategy_id": worst["strategy_id"] if worst else None,
+        },
+    }
+
+
+async def get_performance_by_strategy_id(
+    pair: str,
+    period: str,
+    strategy_id: int,
+    state: AppState,
+    db: AsyncSession,
+) -> dict:
+    """특정 strategy_id 포지션만 집계."""
+    since = datetime.now(timezone.utc) - timedelta(days=PERIOD_DAYS[period])
+    TrendPos = state.models.trend_position
+
+    pos_result = await db.execute(
+        select(TrendPos).where(and_(
+            TrendPos.pair == pair,
+            TrendPos.strategy_id == strategy_id,
+            TrendPos.status == "closed",
+            TrendPos.closed_at >= since,
+        )).order_by(TrendPos.closed_at)
+    )
+    positions = list(pos_result.scalars().all())
+    metrics = _compute_metrics_for_strategy(positions)
+    grade = _compute_grade(metrics, len(positions))
+
+    return {
+        "success": True,
+        "pair": pair,
+        "period": period,
+        "strategy_id": strategy_id,
+        "since": since.isoformat(),
+        **metrics,
+        "grade": grade,
+    }

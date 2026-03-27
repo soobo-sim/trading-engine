@@ -32,6 +32,7 @@ async def get_performance(
     strategy_type: Optional[str] = Query(
         None, description="전략 필터: trend_following|box_mean_reversion (없으면 전체)"
     ),
+    strategy_id: Optional[int] = Query(None, description="특정 strategy_id만 집계"),
     state: AppState = Depends(get_state),
     db: AsyncSession = Depends(get_db),
 ):
@@ -40,7 +41,25 @@ async def get_performance(
         raise HTTPException(400, {"blocked_code": "INVALID_PERIOD", "valid": list(svc.PERIOD_DAYS.keys())})
     if strategy_type and strategy_type not in ("trend_following", "box_mean_reversion"):
         raise HTTPException(400, {"blocked_code": "INVALID_STRATEGY_TYPE"})
+    if strategy_id is not None:
+        return await svc.get_performance_by_strategy_id(pair, period, strategy_id, state, db)
     return await svc.get_performance(pair, period, strategy_type, state, db)
+
+
+@router.get("/api/performance/by-strategy", summary="전략별 성과 비교표")
+async def get_performance_by_strategy(
+    pair: str = Query(..., description="페어 (e.g. BTC_JPY)"),
+    period: str = Query("30d", description="기간: 7d|30d|90d|180d|365d|all"),
+    status: Optional[str] = Query(None, description="전략 status 필터: active|archived (없으면 전체)"),
+    state: AppState = Depends(get_state),
+    db: AsyncSession = Depends(get_db),
+):
+    """전략별 성과 비교표. grade(A/B/C/insufficient) 포함."""
+    if period not in svc.PERIOD_DAYS:
+        raise HTTPException(400, {"blocked_code": "INVALID_PERIOD", "valid": list(svc.PERIOD_DAYS.keys())})
+    if status and status not in ("active", "archived"):
+        raise HTTPException(400, {"blocked_code": "INVALID_STATUS"})
+    return await svc.get_performance_by_strategy(pair, period, status, state, db)
 
 
 # ──────────────────────────────────────────────────────────────
