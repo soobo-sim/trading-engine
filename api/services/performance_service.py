@@ -340,6 +340,7 @@ async def run_backtest_api(
     strategy_type: str = "trend_following",
 ) -> dict:
     """캔들 리플레이 백테스트."""
+    pair = state.normalize_pair(pair)
     candles = await fetch_candles(db, state, pair, timeframe, days)
     if len(candles) < 25:
         return {"error": "INSUFFICIENT_CANDLES", "count": len(candles)}
@@ -368,6 +369,7 @@ async def run_grid_search_api(
     strategy_type: str = "trend_following",
 ) -> dict:
     """파라미터 조합 자동 비교."""
+    pair = state.normalize_pair(pair)
     candles = await fetch_candles(db, state, pair, timeframe, days)
     if len(candles) < 25:
         return {"error": "INSUFFICIENT_CANDLES", "count": len(candles)}
