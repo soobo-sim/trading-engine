@@ -50,6 +50,16 @@ class AppState:
     pair_column: str       # "pair" or "product_code"
     cfd_manager: CfdTrendFollowingManager | None = None  # BF CFD 전용
 
+    def normalize_pair(self, pair: str) -> str:
+        """
+        거래소별 pair 대소문자 정규화.
+        GMO FX: DB가 소문자로 저장 → lower() 반환
+        BF: 대문자 유지 (product_code는 대문자)
+        """
+        if self.pair_column == "pair":   # GMO FX
+            return pair.lower()
+        return pair.upper()              # BF
+
 
 def get_state(request: Request) -> AppState:
     """라우트에서 AppState를 주입받는 의존성."""

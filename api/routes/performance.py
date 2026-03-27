@@ -41,6 +41,7 @@ async def get_performance(
         raise HTTPException(400, {"blocked_code": "INVALID_PERIOD", "valid": list(svc.PERIOD_DAYS.keys())})
     if strategy_type and strategy_type not in ("trend_following", "box_mean_reversion"):
         raise HTTPException(400, {"blocked_code": "INVALID_STRATEGY_TYPE"})
+    pair = state.normalize_pair(pair)
     if strategy_id is not None:
         return await svc.get_performance_by_strategy_id(pair, period, strategy_id, state, db)
     return await svc.get_performance(pair, period, strategy_type, state, db)
@@ -59,6 +60,7 @@ async def get_performance_by_strategy(
         raise HTTPException(400, {"blocked_code": "INVALID_PERIOD", "valid": list(svc.PERIOD_DAYS.keys())})
     if status and status not in ("active", "archived"):
         raise HTTPException(400, {"blocked_code": "INVALID_STATUS"})
+    pair = state.normalize_pair(pair)
     return await svc.get_performance_by_strategy(pair, period, status, state, db)
 
 

@@ -30,6 +30,7 @@ async def get_box_history(
     db: AsyncSession = Depends(get_db),
 ):
     """박스 이력 + 각 박스 포지션 성과 + 추세추종 포지션 별도 집계."""
+    pair = state.normalize_pair(pair)
     return await svc.get_box_history(pair, days, state, db)
 
 
@@ -41,6 +42,7 @@ async def get_trade_stats(
     db: AsyncSession = Depends(get_db),
 ):
     """기간별 거래 통계 (승률, 기대값, 연속 손실 등)."""
+    pair = state.normalize_pair(pair)
     return await svc.get_trade_stats(pair, days, state, db)
 
 
@@ -55,6 +57,7 @@ async def get_market_regime(
     """시장 체제 판단 (횡보/추세)."""
     if timeframe not in ("1h", "4h"):
         raise HTTPException(400, {"blocked_code": "INVALID_TIMEFRAME"})
+    pair = state.normalize_pair(pair)
     return await svc.get_market_regime(pair, timeframe, lookback, state, db)
 
 
@@ -74,6 +77,7 @@ async def get_trend_signal(
     """추세추종 전략 진입/청산 시그널 종합 판단."""
     if timeframe not in ("1h", "4h"):
         raise HTTPException(400, {"blocked_code": "INVALID_TIMEFRAME"})
+    pair = state.normalize_pair(pair)
     return await svc.get_trend_signal(
         pair, timeframe, ema_period, atr_period,
         rsi_entry_low, rsi_entry_high, ema_slope_entry_min,
@@ -92,6 +96,7 @@ async def get_box_detect(
     db: AsyncSession = Depends(get_db),
 ):
     """박스권 독립 감지. 활성 전략 없어도 분석 가능."""
+    pair = state.normalize_pair(pair)
     CandleModel = state.models.candle
     pair_col = getattr(CandleModel, state.pair_column)
 

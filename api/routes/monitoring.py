@@ -29,6 +29,7 @@ async def get_monitoring_status(
     대시보드용 구조화 상태 응답. 전략 상태·진입조건·포지션·시장 데이터를 단일 JSON으로 반환.
     설계: DASHBOARD_MONITORING_API.md
     """
+    pair = state.normalize_pair(pair)
     StrategyModel = state.models.strategy
     result = await db.execute(
         select(StrategyModel).where(StrategyModel.status == "active")
@@ -83,6 +84,7 @@ async def get_monitoring_report(
     서버가 시그널 계산 → 조건 판단 → telegram_text + memory_block 조립.
     사만다는 이 응답을 그대로 출력하면 된다.
     """
+    pair = state.normalize_pair(pair)
     # 1. 활성 전략 중 해당 pair의 전략 찾기
     StrategyModel = state.models.strategy
     result = await db.execute(
