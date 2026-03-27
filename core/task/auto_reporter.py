@@ -152,6 +152,21 @@ class AutoReporter:
             except Exception as e:
                 logger.error(f"Loss detector 실패 (보고는 계속): {e}")
 
+            # Kill 조건 자동 체크
+            try:
+                from core.monitoring.kill_checker import run_kill_checks
+                trend_model = getattr(state.models, "trend_position", None)
+                if trend_model is not None:
+                    killed = await run_kill_checks(
+                        db, trend_model, http_client=self._http_client
+                    )
+                    if killed:
+                        logger.info(f"[KillChecker] {killed}건 Kill 발동")
+                    else:
+                        logger.debug("[KillChecker] Kill 조건 미충족")
+            except Exception as e:
+                logger.error(f"Kill checker 실패 (보고는 계속): {e}")
+
             # 활성 전략 조회
             StrategyModel = state.models.strategy
             result = await db.execute(
