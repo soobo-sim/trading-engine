@@ -18,6 +18,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from core.strategy.signals import compute_trend_signal
+from core.analysis.box_detector import detect_box
 
 
 # ──────────────────────────────────────────────────────────────
@@ -124,6 +125,7 @@ def run_backtest(
     candles: List[Any],
     params: dict,
     config: Optional[BacktestConfig] = None,
+    strategy_type: str = "trend_following",
 ) -> BacktestResult:
     """
     캔들 리플레이 백테스트 실행.
@@ -136,6 +138,10 @@ def run_backtest(
     """
     if config is None:
         config = BacktestConfig()
+
+    # strategy_type 분기
+    if strategy_type == "box_mean_reversion":
+        return _run_box_backtest(candles, params, config)
 
     # params에서 position_size_pct 오버라이드
     position_size = float(params.get("position_size_pct", config.position_size_pct))
@@ -466,6 +472,7 @@ def run_grid_search(
     param_grid: Dict[str, List[Any]],
     config: Optional[BacktestConfig] = None,
     top_n: int = 10,
+    strategy_type: str = "trend_following",
 ) -> GridSearchResult:
     """
     파라미터 그리드 서치.
@@ -490,7 +497,7 @@ def run_grid_search(
 
     for combo in combinations:
         merged_params = {**base_params, **combo}
-        bt_result = run_backtest(candles, merged_params, config)
+        bt_result = run_backtest(candles, merged_params, config, strategy_type)
         summary = {
             "params": combo,
             "total_trades": bt_result.total_trades,
@@ -512,6 +519,187 @@ def run_grid_search(
     if all_results and all_results[0]["sharpe_ratio"] is not None:
         result.best_params = all_results[0]["params"]
         result.best_sharpe = all_results[0]["sharpe_ratio"]
+
+    return result
+
+
+def _run_box_backtest(
+    candles: List[Any],
+    params: dict,
+    config: BacktestConfig,
+) -> BacktestResult:
+    """
+    박스역추세 백테스트.
+    params 키:
+      tolerance_pct   (default 0.5)  — 박스 클러스터 허용 오차
+      min_touches     (default 3)    — 최소 터치 횟수
+      box_window      (default 40)   — 박스 감지 윈도우 캔들 수
+      position_size_pct (default 100)
+      stop_loss_pct   (default 0.5)  — 박스 이탈 시 스탑 (박스 폭 배수)
+      take_profit_pct (default 0.8)  — 반대 벽 도달 비율 (0~1, 1=반대 벽 전부)
+    """
+    tolerance_pct = float(params.get("tolerance_pct", 0.5))
+    min_touches = int(params.get("min_touches", 3))
+    box_window = int(params.get("box_window", 40))
+    position_size = float(params.get("position_size_pct", config.position_size_pct))
+    stop_loss_pct = float(params.get("stop_loss_pct", 0.5))
+    take_profit_pct = float(params.get("take_profit_pct", 0.8))
+
+    min_candles = max(box_window, 10)
+    if len(candles) < min_candles:
+        return BacktestResult(candle_count=len(candles), params_used=params)
+
+    capital = config.initial_capital_jpy
+    trades: List[BacktestTrade] = []
+    current_position: Optional[BacktestTrade] = None
+    stop_loss_price: Optional[float] = None
+    take_profit_price: Optional[float] = None
+    active_box = None  # {"upper": float, "lower": float}
+
+    result = BacktestResult(
+        params_used=params,
+        candle_count=len(candles),
+        period_start=_candle_time_str(candles[0]),
+        period_end=_candle_time_str(candles[-1]),
+    )
+
+    for i in range(min_candles, len(candles)):
+        window = candles[max(0, i - box_window):i]
+        current_candle = candles[i]
+        current_price = float(current_candle.close)
+        current_high = float(current_candle.high)
+        current_low = float(current_candle.low)
+
+        if current_position is not None:
+            # ── 포지션 보유: 스탑로스 / 목표가 체크 ──
+            side = current_position.side
+            stop_hit = False
+            tp_hit = False
+
+            if stop_loss_price is not None:
+                if side == "buy" and current_low <= stop_loss_price:
+                    stop_hit = True
+                elif side == "sell" and current_high >= stop_loss_price:
+                    stop_hit = True
+
+            if take_profit_price is not None:
+                if side == "buy" and current_high >= take_profit_price:
+                    tp_hit = True
+                elif side == "sell" and current_low <= take_profit_price:
+                    tp_hit = True
+
+            if stop_hit or tp_hit:
+                exit_reason = "take_profit" if tp_hit else "stop_loss"
+                if tp_hit:
+                    exit_price = _apply_slippage(
+                        take_profit_price, "sell" if side == "buy" else "buy",
+                        config.slippage_pct,
+                    )
+                else:
+                    exit_price = _apply_slippage(
+                        stop_loss_price, "sell" if side == "buy" else "buy",
+                        config.slippage_pct,
+                    )
+                _close_position(
+                    current_position, exit_price, current_candle,
+                    exit_reason, config.fee_pct, capital,
+                )
+                capital += current_position.pnl_jpy or 0
+                trades.append(current_position)
+                current_position = None
+                stop_loss_price = None
+                take_profit_price = None
+                active_box = None
+
+        else:
+            # ── 포지션 없음: 박스 감지 + 진입 ──
+            highs = [float(c.high) for c in window]
+            lows = [float(c.low) for c in window]
+            box = detect_box(highs, lows, tolerance_pct=tolerance_pct, min_touches=min_touches)
+
+            if not box.box_detected:
+                continue
+
+            upper = box.upper_bound
+            lower = box.lower_bound
+            box_width = upper - lower
+
+            # 하단 근처 → 매수 진입
+            lower_entry_zone = lower * (1 + tolerance_pct / 100)
+            upper_entry_zone = upper * (1 - tolerance_pct / 100)
+
+            side = None
+            if current_price <= lower_entry_zone:
+                side = "buy"
+            elif current_price >= upper_entry_zone:
+                side = "sell"
+
+            if side is None:
+                continue
+
+            entry_price = _apply_slippage(current_price, side, config.slippage_pct)
+            invest_jpy = capital * position_size / 100
+            entry_fee = _apply_fee(invest_jpy, config.fee_pct)
+            invest_after_fee = invest_jpy - entry_fee
+            amount = invest_after_fee / entry_price if entry_price > 0 else 0
+
+            current_position = BacktestTrade(
+                entry_time=_candle_time(current_candle),
+                entry_price=entry_price,
+                side=side,
+                amount=amount,
+            )
+            active_box = {"upper": upper, "lower": lower}
+
+            # 스탑로스: 박스 이탈 기준
+            if side == "buy":
+                stop_loss_price = lower - box_width * stop_loss_pct
+                take_profit_price = lower + (upper - lower) * take_profit_pct
+            else:
+                stop_loss_price = upper + box_width * stop_loss_pct
+                take_profit_price = upper - (upper - lower) * take_profit_pct
+
+    # 미종료 포지션 강제 청산
+    if current_position is not None:
+        last_candle = candles[-1]
+        exit_price = float(last_candle.close)
+        _close_position(
+            current_position, exit_price, last_candle,
+            "backtest_end", config.fee_pct, capital,
+        )
+        capital += current_position.pnl_jpy or 0
+        trades.append(current_position)
+
+    # 결과 집계 (trend_following과 동일 로직)
+    result.trades = trades
+    result.total_trades = len(trades)
+    valid = [t for t in trades if t.pnl_jpy is not None]
+    wins = [t for t in valid if t.pnl_jpy > 0]
+    losses_list = [t for t in valid if t.pnl_jpy <= 0]
+    result.wins = len(wins)
+    result.losses = len(losses_list)
+    result.win_rate = round(len(wins) / len(valid) * 100, 1) if valid else None
+
+    pnl_pcts = [t.pnl_pct for t in valid if t.pnl_pct is not None]
+    result.total_return_pct = round(sum(pnl_pcts), 2) if pnl_pcts else None
+    result.total_pnl_jpy = round(sum(t.pnl_jpy for t in valid if t.pnl_jpy), 2)
+    result.max_drawdown_pct = _compute_max_drawdown_from_trades(pnl_pcts)
+
+    if len(pnl_pcts) >= 2:
+        mean_pct = sum(pnl_pcts) / len(pnl_pcts)
+        variance = sum((x - mean_pct) ** 2 for x in pnl_pcts) / (len(pnl_pcts) - 1)
+        std = math.sqrt(variance)
+        result.sharpe_ratio = round(mean_pct / std, 2) if std > 0 else None
+
+    holding_hours = []
+    for t in valid:
+        if t.entry_time and t.exit_time:
+            diff = (t.exit_time - t.entry_time).total_seconds() / 3600
+            if diff > 0:
+                holding_hours.append(diff)
+    result.avg_holding_hours = (
+        round(sum(holding_hours) / len(holding_hours), 1) if holding_hours else None
+    )
 
     return result
 

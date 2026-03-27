@@ -337,6 +337,7 @@ async def run_backtest_api(
     pair: str, params: dict, days: int, timeframe: str,
     initial_capital_jpy: float, slippage_pct: float, fee_pct: float,
     state: AppState, db: AsyncSession,
+    strategy_type: str = "trend_following",
 ) -> dict:
     """캔들 리플레이 백테스트."""
     candles = await fetch_candles(db, state, pair, timeframe, days)
@@ -348,7 +349,7 @@ async def run_backtest_api(
         slippage_pct=slippage_pct,
         fee_pct=fee_pct,
     )
-    result = run_backtest(candles, params, config)
+    result = run_backtest(candles, params, config, strategy_type)
 
     return {
         "success": True,
@@ -364,6 +365,7 @@ async def run_grid_search_api(
     days: int, timeframe: str, top_n: int,
     initial_capital_jpy: float, slippage_pct: float, fee_pct: float,
     state: AppState, db: AsyncSession,
+    strategy_type: str = "trend_following",
 ) -> dict:
     """파라미터 조합 자동 비교."""
     candles = await fetch_candles(db, state, pair, timeframe, days)
@@ -376,7 +378,7 @@ async def run_grid_search_api(
         fee_pct=fee_pct,
     )
     result = run_grid_search(
-        candles, base_params, param_grid, config, top_n,
+        candles, base_params, param_grid, config, top_n, strategy_type,
     )
 
     return {

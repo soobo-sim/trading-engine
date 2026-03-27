@@ -1,13 +1,13 @@
 """
-Performance API — 성과 메트릭 + 백테스트 vs 실전 괴리 비교.
+Performance API - 성과 메트릭 + 백테스트 vs 실전 괴리 비교.
 
 Phase 1-B: 성과 메트릭 인프라
-  GET /api/performance           — 종합 성과 메트릭 (수익률, 샤프, 드로다운 등)
-  GET /api/performance/compare   — 백테스트 vs 실전 괴리 비교
+  GET /api/performance           - 종합 성과 메트릭 (수익률, 샤프, 드로다운 등)
+  GET /api/performance/compare   - 백테스트 vs 실전 괴리 비교
 
 Phase 1-C: 백테스트
-  POST /api/backtest/run         — 백테스트 실행
-  POST /api/backtest/grid        — 파라미터 그리드 서치
+  POST /api/backtest/run         - 백테스트 실행
+  POST /api/backtest/grid        - 파라미터 그리드 서치
 """
 from typing import Optional
 
@@ -76,6 +76,7 @@ class BacktestRequest(BaseModel):
     initial_capital_jpy: float = Field(100_000.0, ge=1000, description="초기 자본 (JPY)")
     slippage_pct: float = Field(0.05, ge=0, le=1.0, description="슬리피지 (%)")
     fee_pct: float = Field(0.15, ge=0, le=1.0, description="수수료 편도 (%)")
+    strategy_type: str = Field("trend_following", description="전략 타입: trend_following|box_mean_reversion")
 
 
 @router.post("/api/backtest/run", summary="백테스트 실행")
@@ -91,12 +92,12 @@ async def run_backtest_api(
     result = await svc.run_backtest_api(
         body.pair, body.params, body.days, body.timeframe,
         body.initial_capital_jpy, body.slippage_pct, body.fee_pct,
-        state, db,
+        state, db, body.strategy_type,
     )
     if "error" in result:
         raise HTTPException(400, {
             "blocked_code": result["error"],
-            "detail": f"캔들 {result['count']}개 — 최소 25개 필요",
+            "detail": f"캔들 {result['count']}개 - 최소 25개 필요",
         })
     return result
 
@@ -118,6 +119,7 @@ class GridSearchRequest(BaseModel):
     initial_capital_jpy: float = Field(100_000.0, ge=1000)
     slippage_pct: float = Field(0.05, ge=0, le=1.0)
     fee_pct: float = Field(0.15, ge=0, le=1.0)
+    strategy_type: str = Field("trend_following", description="전략 타입: trend_following|box_mean_reversion")
 
 
 @router.post("/api/backtest/grid", summary="파라미터 그리드 서치")
@@ -145,7 +147,7 @@ async def grid_search_api(
         body.pair, body.base_params, body.param_grid,
         body.days, body.timeframe, body.top_n,
         body.initial_capital_jpy, body.slippage_pct, body.fee_pct,
-        state, db,
+        state, db, body.strategy_type,
     )
     if "error" in result:
         raise HTTPException(400, {
