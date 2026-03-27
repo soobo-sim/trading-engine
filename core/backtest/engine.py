@@ -530,20 +530,26 @@ def _run_box_backtest(
 ) -> BacktestResult:
     """
     박스역추세 백테스트.
-    params 키:
-      tolerance_pct   (default 0.5)  — 박스 클러스터 허용 오차
-      min_touches     (default 3)    — 최소 터치 횟수
-      box_window      (default 40)   — 박스 감지 윈도우 캔들 수
-      position_size_pct (default 100)
-      stop_loss_pct   (default 0.5)  — 박스 이탈 시 스탑 (박스 폭 배수)
-      take_profit_pct (default 0.8)  — 반대 벽 도달 비율 (0~1, 1=반대 벽 전부)
+    params 키 (레이첼/앨리스 표준):
+      tolerance_pct         (default 0.3)  — 박스 클러스터 허용 오차 (%)
+      box_min_touches       (default 3)    — 최소 터치 횟수 (구: min_touches)
+      box_lookback_candles  (default 60)   — 박스 감지 윈도우 (구: box_window)
+      near_bound_pct        (default 1.0)  — 박스 경계 진입 허용 오차 (%)
+      stop_loss_pct         (default 1.5)  — 박스 이탈 스탑 (박스 폭 배수)
+      take_profit_pct       (default 1.0)  — 목표 이익 비율 (박스 폭 배수)
+      position_size_pct     (default 100)
     """
-    tolerance_pct = float(params.get("tolerance_pct", 0.5))
-    min_touches = int(params.get("min_touches", 3))
-    box_window = int(params.get("box_window", 40))
+    tolerance_pct = float(params.get("tolerance_pct", 0.3))
+    min_touches = int(
+        params.get("box_min_touches", params.get("min_touches", 3))
+    )
+    box_window = int(
+        params.get("box_lookback_candles", params.get("box_window", 60))
+    )
+    near_bound_pct = float(params.get("near_bound_pct", 1.0))
+    stop_loss_pct = float(params.get("stop_loss_pct", 1.5))
+    take_profit_pct = float(params.get("take_profit_pct", 1.0))
     position_size = float(params.get("position_size_pct", config.position_size_pct))
-    stop_loss_pct = float(params.get("stop_loss_pct", 0.5))
-    take_profit_pct = float(params.get("take_profit_pct", 0.8))
 
     min_candles = max(box_window, 10)
     if len(candles) < min_candles:
@@ -624,9 +630,9 @@ def _run_box_backtest(
             lower = box.lower_bound
             box_width = upper - lower
 
-            # 하단 근처 → 매수 진입
-            lower_entry_zone = lower * (1 + tolerance_pct / 100)
-            upper_entry_zone = upper * (1 - tolerance_pct / 100)
+            # near_bound_pct: 박스 경계 근처 진입 허용 오차
+            lower_entry_zone = lower * (1 + near_bound_pct / 100)
+            upper_entry_zone = upper * (1 - near_bound_pct / 100)
 
             side = None
             if current_price <= lower_entry_zone:
@@ -651,13 +657,13 @@ def _run_box_backtest(
             )
             active_box = {"upper": upper, "lower": lower}
 
-            # 스탑로스: 박스 이탈 기준
+            # 스탑로스/목표가: 박스 폭 배수 기준
             if side == "buy":
                 stop_loss_price = lower - box_width * stop_loss_pct
-                take_profit_price = lower + (upper - lower) * take_profit_pct
+                take_profit_price = lower + box_width * take_profit_pct
             else:
                 stop_loss_price = upper + box_width * stop_loss_pct
-                take_profit_price = upper - (upper - lower) * take_profit_pct
+                take_profit_price = upper - box_width * take_profit_pct
 
     # 미종료 포지션 강제 청산
     if current_position is not None:
