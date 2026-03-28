@@ -304,6 +304,12 @@ async def generate_trend_report(
 
     if alert and alert["level"] == "critical":
         is_test = test_alert_level is not None
-        await _trigger_rachel_analysis(pair, alert, test=is_test)
+        has_position = bool(result_dict.get("raw", {}).get("position"))
+        current_regime = result_dict.get("raw", {}).get("signal", "")
+        await _trigger_rachel_analysis(
+            pair, alert, test=is_test,
+            has_position=has_position,
+            current_regime=current_regime,
+        )
 
     return result_dict

@@ -21,12 +21,91 @@ _last_alert_level: Dict[str, str] = {}
 # 이전 사이클 데이터 캐시 (서버 메모리, 재시작 시 리셋 — 허용)
 _prev_raw_cache: Dict[str, dict] = {}
 
+# ── 포지션 없음 전용 필터 상태 ────────────────────────────────
+# pair → 마지막 발송 시 regime 값
+_last_sent_regime: Dict[str, str] = {}
+# pair → 포지션 없음 상태에서의 마지막 발송 시각 (24h 쿨다운)
+_last_no_pos_alert_time: Dict[str, float] = {}
 
-async def _trigger_rachel_analysis(pair: str, alert: dict, test: bool = False) -> None:
-    """critical alert 시 레이첼에게 긴급 분석 요청."""
+_NO_POS_COOLDOWN_SEC = 86400  # 24시간
+
+# 포지션 없음 상태에서도 항상 보고할 트리거 (시스템 장애 + Kill 관련)
+_ALWAYS_REPORT_TRIGGERS = {
+    "system_error",
+    "api_failure",
+    "db_error",
+    "kill_condition",
+    "kill_consecutive_loss",
+    "kill_win_rate",
+    "kill_drawdown",
+    "kill_regime_transition",
+}
+
+
+def _should_send_no_position(
+    pair: str,
+    alert: dict,
+    current_regime: str,
+) -> bool:
+    """
+    포지션 없음 상태에서 webhook 발송 여부를 판단.
+
+    Rules:
+      - Kill/시스템 장애 트리거 → 항상 보고
+      - regime 전환 (이전 발송 시 ≠ 현재) → 보고
+      - 위 2개 해당 없음 + 24h 쿨다운 내 → 묵음
+    """
+    triggers = set(alert.get("triggers", []))
+
+    # 시스템 장애 / Kill → 항상 보고
+    if triggers & _ALWAYS_REPORT_TRIGGERS:
+        return True
+
+    # regime 전환 → 보고
+    prev_regime = _last_sent_regime.get(pair, "")
+    if prev_regime and prev_regime != current_regime:
+        return True
+    # 최초 발송(prev 없음)이어도 일단 보고
+    if not prev_regime:
+        return True
+
+    # regime 동일 + 24h 쿨다운
+    last_t = _last_no_pos_alert_time.get(pair, 0.0)
+    if time.time() - last_t < _NO_POS_COOLDOWN_SEC:
+        logger.info(
+            f"[AlertFilter] {pair}: 포지션 없음 + regime 동일 + 쿨다운 중 — 묵음 "
+            f"({int(time.time() - last_t)}s / {_NO_POS_COOLDOWN_SEC}s)"
+        )
+        return False
+
+    return True
+
+
+def _record_no_pos_sent(pair: str, current_regime: str) -> None:
+    """포지션 없음 상태에서 webhook 발송 후 상태 갱신."""
+    _last_sent_regime[pair] = current_regime
+    _last_no_pos_alert_time[pair] = time.time()
+
+
+async def _trigger_rachel_analysis(
+    pair: str,
+    alert: dict,
+    test: bool = False,
+    has_position: bool = True,
+    current_regime: str = "",
+) -> None:
+    """critical alert 시 레이첼에게 긴급 분석 요청.
+
+    포지션 없음 시 _should_send_no_position() 필터 적용.
+    """
     if not RACHEL_WEBHOOK_TOKEN:
         logger.warning("RACHEL_WEBHOOK_TOKEN 미설정 — webhook 스킵")
         return
+
+    # ── 포지션 없음 필터 ─────────────────────────────────────
+    if not has_position:
+        if not _should_send_no_position(pair, alert, current_regime):
+            return  # 묵음
 
     now = time.time()
     last = _last_alert_time.get(pair, 0)
@@ -86,6 +165,9 @@ async def _trigger_rachel_analysis(pair: str, alert: dict, test: bool = False) -
             )
             if resp.status_code == 200:
                 logger.info(f"레이첼 긴급 분석 트리거 성공: {pair}")
+                # 포지션 없음 상태 발송 기록 갱신
+                if not has_position:
+                    _record_no_pos_sent(pair, current_regime)
             else:
                 logger.error(f"레이첼 webhook 실패: {resp.status_code} {resp.text}")
     except Exception as e:
