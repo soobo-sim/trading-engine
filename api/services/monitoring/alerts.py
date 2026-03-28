@@ -1,9 +1,11 @@
 """알림 평가 + 레이첼 긴급 분석 연동."""
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import httpx
@@ -21,13 +23,9 @@ _last_alert_level: Dict[str, str] = {}
 # 이전 사이클 데이터 캐시 (서버 메모리, 재시작 시 리셋 — 허용)
 _prev_raw_cache: Dict[str, dict] = {}
 
-# ── 포지션 없음 전용 필터 상태 ────────────────────────────────
-# pair → 마지막 발송 시 regime 값
-_last_sent_regime: Dict[str, str] = {}
-# pair → 포지션 없음 상태에서의 마지막 발송 시각 (24h 쿨다운)
-_last_no_pos_alert_time: Dict[str, float] = {}
-
+# ── 포지션 없음 전용 필터 상태 (파일 영속화) ──────────────────
 _NO_POS_COOLDOWN_SEC = 86400  # 24시간
+_FILTER_CACHE_PATH = Path(__file__).parent / ".cache" / "no_pos_filter.json"
 
 # 포지션 없음 상태에서도 항상 보고할 트리거 (시스템 장애 + Kill 관련)
 _ALWAYS_REPORT_TRIGGERS = {
@@ -41,6 +39,49 @@ _ALWAYS_REPORT_TRIGGERS = {
     "kill_regime_transition",
 }
 
+# ── 버그 1: 파일 기반 영속화 ──────────────────────────────────
+
+def _load_filter_cache() -> dict:
+    """파일에서 필터 상태 로드. 없거나 손상된 경우 빈 dict."""
+    try:
+        if _FILTER_CACHE_PATH.exists():
+            return json.loads(_FILTER_CACHE_PATH.read_text())
+    except Exception as e:
+        logger.warning(f"[AlertFilter] 캐시 파일 로드 실패: {e}")
+    return {}
+
+
+def _save_filter_cache(data: dict) -> None:
+    """필터 상태를 파일에 저장."""
+    try:
+        _FILTER_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _FILTER_CACHE_PATH.write_text(json.dumps(data, ensure_ascii=False))
+    except Exception as e:
+        logger.warning(f"[AlertFilter] 캐시 파일 저장 실패: {e}")
+
+
+def _get_filter_state(pair: str) -> tuple[str, float]:
+    """pair의 (last_regime, last_sent_time) 반환."""
+    data = _load_filter_cache()
+    entry = data.get(pair, {})
+    return entry.get("regime", ""), entry.get("sent_at", 0.0)
+
+
+def _set_filter_state(pair: str, regime: str) -> None:
+    """pair의 필터 상태 갱신 후 파일 저장."""
+    data = _load_filter_cache()
+    data[pair] = {"regime": regime, "sent_at": time.time()}
+    _save_filter_cache(data)
+
+
+# ── 버그 2: regime 정규화 ─────────────────────────────────────
+
+def _normalize_regime(regime) -> str:
+    """None / 빈문자열 → 'unknown'으로 정규화."""
+    if not regime:
+        return "unknown"
+    return str(regime)
+
 
 def _should_send_no_position(
     pair: str,
@@ -52,8 +93,9 @@ def _should_send_no_position(
 
     Rules:
       - Kill/시스템 장애 트리거 → 항상 보고
-      - regime 전환 (이전 발송 시 ≠ 현재) → 보고
-      - 위 2개 해당 없음 + 24h 쿨다운 내 → 묵음
+      - regime 전환 (이전 발송 시 ≠ 현재, unknown 제외) → 보고
+      - 최초 발송 (기록 없음, current_regime이 known인 경우) → 보고
+      - 위 해당 없음 + 24h 쿨다운 내 → 묵음
     """
     triggers = set(alert.get("triggers", []))
 
@@ -61,19 +103,25 @@ def _should_send_no_position(
     if triggers & _ALWAYS_REPORT_TRIGGERS:
         return True
 
-    # regime 전환 → 보고
-    prev_regime = _last_sent_regime.get(pair, "")
-    if prev_regime and prev_regime != current_regime:
-        return True
-    # 최초 발송(prev 없음)이어도 일단 보고
-    if not prev_regime:
-        return True
+    # regime 정규화 (버그 2)
+    norm_regime = _normalize_regime(current_regime)
 
-    # regime 동일 + 24h 쿨다운
-    last_t = _last_no_pos_alert_time.get(pair, 0.0)
+    # 파일에서 이전 상태 로드 (버그 1)
+    prev_regime, last_t = _get_filter_state(pair)
+
+    # regime이 unknown이면 전환 판단 보류 (noise 방지)
+    if norm_regime != "unknown":
+        if prev_regime and prev_regime != norm_regime:
+            # regime 전환 → 보고
+            return True
+        if not prev_regime:
+            # 최초 발송 → 보고
+            return True
+
+    # regime 동일(또는 unknown) + 24h 쿨다운
     if time.time() - last_t < _NO_POS_COOLDOWN_SEC:
         logger.info(
-            f"[AlertFilter] {pair}: 포지션 없음 + regime 동일 + 쿨다운 중 — 묵음 "
+            f"[AlertFilter] {pair}: 포지션 없음 + regime={norm_regime} + 쿨다운 중 — 묵음 "
             f"({int(time.time() - last_t)}s / {_NO_POS_COOLDOWN_SEC}s)"
         )
         return False
@@ -82,9 +130,9 @@ def _should_send_no_position(
 
 
 def _record_no_pos_sent(pair: str, current_regime: str) -> None:
-    """포지션 없음 상태에서 webhook 발송 후 상태 갱신."""
-    _last_sent_regime[pair] = current_regime
-    _last_no_pos_alert_time[pair] = time.time()
+    """포지션 없음 상태에서 webhook 발송 후 상태 갱신 (파일 영속화)."""
+    norm_regime = _normalize_regime(current_regime)
+    _set_filter_state(pair, norm_regime)
 
 
 async def _trigger_rachel_analysis(
