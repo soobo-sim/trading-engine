@@ -38,7 +38,42 @@ class StrategyReject(BaseModel):
     rejection_reason: str = Field(..., min_length=10)
 
 
-# ── 목록 ─────────────────────────────────────────────────────
+# ── GMO FX 안전장치 ──────────────────────────────────────────
+
+GMO_MAX_POSITION_SIZE_PCT = 5.0   # 레버리지 환경 최대 포지션 비율
+GMO_MAX_LEVERAGE = 5.0            # 최대 레버리지
+
+
+def _validate_gmo_safety(params: dict, state: AppState) -> None:
+    """GMO FX(pair_column=pair)에만 적용되는 안전장치 검증."""
+    if state.pair_column != "pair":
+        return  # BF는 제한 없음
+
+    pos_pct = params.get("position_size_pct")
+    if pos_pct is not None:
+        try:
+            if float(pos_pct) > GMO_MAX_POSITION_SIZE_PCT:
+                raise HTTPException(
+                    400,
+                    f"GMO FX position_size_pct 최대 {GMO_MAX_POSITION_SIZE_PCT}% 초과 "
+                    f"(입력: {pos_pct}%). 레버리지 환경 안전장치.",
+                )
+        except (TypeError, ValueError):
+            pass
+
+    leverage = params.get("leverage")
+    if leverage is not None:
+        try:
+            if float(leverage) > GMO_MAX_LEVERAGE:
+                raise HTTPException(
+                    400,
+                    f"GMO FX leverage 최대 {GMO_MAX_LEVERAGE}배 초과 "
+                    f"(입력: {leverage}배). 레버리지 환경 안전장치.",
+                )
+        except (TypeError, ValueError):
+            pass
+
+
 
 @router.get("")
 async def list_strategies(
@@ -98,6 +133,7 @@ async def create_strategy(
     db: AsyncSession = Depends(get_db),
 ):
     """전략 생성 (status=proposed)."""
+    _validate_gmo_safety(body.parameters or {}, state)
     Model = state.models.strategy
     row = Model(
         name=body.name,
@@ -128,6 +164,7 @@ async def activate_strategy(
         raise HTTPException(404, "전략 없음")
     if row.status != "proposed":
         raise HTTPException(400, f"proposed 상태만 활성화 가능 (현재: {row.status})")
+    _validate_gmo_safety(row.parameters or {}, state)
 
     # 동일 pair 기존 active 아카이브
     pair = (row.parameters or {}).get("pair")

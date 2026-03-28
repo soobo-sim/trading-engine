@@ -203,10 +203,14 @@ class AutoReporter:
                 if safety_summary:
                     telegram_text += f"\n{safety_summary}"
 
-                await send_telegram_message(
+                sent = await send_telegram_message(
                     self._bot_token, self._chat_id, telegram_text,
                     client=self._http_client,
                 )
+                if sent:
+                    import time as _time
+                    from core.monitoring.health import _last_report_time
+                    _last_report_time["last"] = _time.time()
                 logger.info(f"자동 보고 전송 완료: {pair}")
 
     async def _generate_report(
