@@ -211,7 +211,7 @@ def compute_adaptive_trailing_mult(
     Returns:
         float: ATR 배수 (trailing_stop_atr_initial 또는 trailing_stop_atr_mature)
     """
-    slope_mature_th: float = float(params.get("ema_slope_weak_threshold", 0.05))
+    slope_mature_th: float = float(params.get("ema_slope_weak_threshold", 0.03))
     rsi_mature_th: float = float(params.get("rsi_overbought", 75))
 
     is_mature = (
@@ -259,7 +259,9 @@ def compute_trend_signal(
     lows = [float(c.low) for c in candles]
     current_price = closes[-1]
 
-    ema_period, atr_period, rsi_period = 20, 14, 14
+    ema_period = int(params.get("ema_period", 20))
+    atr_period = int(params.get("atr_period", 14))
+    rsi_period = int(params.get("rsi_period", 14))
 
     # EMA 및 기울기
     ema = compute_ema(closes, ema_period)
@@ -302,16 +304,20 @@ def compute_trend_signal(
     ema_slope_strong_down = (ema_slope_pct is not None and ema_slope_pct < short_slope_th)
 
     # Regime (BB width + 가격 레인지)
-    bb_period = min(20, len(closes))
+    bb_period = min(int(params.get("bb_period", ema_period)), len(closes))
+    bb_trending_min = float(params.get("bb_width_trending_min", 6.0))
+    range_trending_min = float(params.get("range_pct_trending_min", 10.0))
+    bb_ranging_max = float(params.get("bb_width_ranging_max", 3.0))
+    range_ranging_max = float(params.get("range_pct_ranging_max", 5.0))
     bb_window = closes[-bb_period:]
     sma = sum(bb_window) / bb_period if bb_period > 0 else 0
     std = (sum((c - sma) ** 2 for c in bb_window) / bb_period) ** 0.5 if sma > 0 else 0
     bb_width_pct = (4 * std) / sma * 100 if sma > 0 else 0
     range_pct = (max(highs) - min(lows)) / closes[0] * 100 if closes[0] > 0 else 0
-    regime_trending = bb_width_pct >= 6.0 or range_pct >= 10.0
-    # ranging = BB폭 < 3% AND 가격범위 < 5% → 명확한 횡보, 진입 차단
+    regime_trending = bb_width_pct >= bb_trending_min or range_pct >= range_trending_min
+    # ranging = BB폭 < bb_ranging_max AND 가격범위 < range_ranging_max → 명확한 횡보, 진입 차단
     # unclear = trending/ranging 중간 → 진입 허용 (EMA+RSI 필터가 충분)
-    regime_ranging = bb_width_pct < 3.0 and range_pct < 5.0
+    regime_ranging = bb_width_pct < bb_ranging_max and range_pct < range_ranging_max
 
     # 시그널 결정
     if price_above_ema and ema_slope_positive and rsi_in_range and not regime_ranging:

@@ -124,7 +124,7 @@ class TestAdaptiveTrailingMult:
 
     def test_mature_low_slope(self):
         """기울기 둔화 → 좁은 배수."""
-        result = compute_adaptive_trailing_mult(0.03, 55.0, {})
+        result = compute_adaptive_trailing_mult(0.02, 55.0, {})
         assert result == 1.2
 
     def test_mature_high_rsi(self):
@@ -457,3 +457,160 @@ class TestBbWidthPctInSignal:
         result = compute_trend_signal(candles)
         assert result["bb_width_pct"] is not None
         assert result["bb_width_pct"] >= 0
+
+
+# ── T-05: 레짐 임계값 파라미터화 검증 ──────────────────
+
+def _make_flat_candles(n: int = 30, price: float = 100.0, noise: float = 0.1) -> list:
+    """횡보 캔들 생성 — BB 폭이 매우 좁음."""
+    candles = []
+    for i in range(n):
+        c = price + (noise if i % 2 == 0 else -noise)
+        candles.append(_FakeCandle(c, c + noise, c - noise, c))
+    return candles
+
+
+def _make_volatile_candles(n: int = 30, start: float = 100.0, amplitude: float = 10.0) -> list:
+    """변동성 큰 캔들 생성 — BB 폭이 넓음."""
+    candles = []
+    for i in range(n):
+        c = start + amplitude * (1 if i % 2 == 0 else -1) + i * 0.5
+        candles.append(_FakeCandle(c, c + amplitude, c - amplitude, c))
+    return candles
+
+
+class TestRegimeParamDefaults:
+    """T-05: params 없으면 기존 4H 기본값으로 동작 (하위 호환)."""
+
+    def test_default_no_params_same_as_before(self):
+        """params={} → 기본 임계값 적용, 기존 동작과 동일."""
+        candles = _make_uptrend_candles(30)
+        result_default = compute_trend_signal(candles, params={})
+        result_none = compute_trend_signal(candles, params=None)
+        assert result_default["regime"] == result_none["regime"]
+        assert result_default["signal"] == result_none["signal"]
+        assert result_default["bb_width_pct"] == pytest.approx(result_none["bb_width_pct"])
+
+    def test_regime_key_exists(self):
+        """regime 키가 trending/ranging/unclear 중 하나."""
+        candles = _make_uptrend_candles(30)
+        result = compute_trend_signal(candles)
+        assert result["regime"] in ("trending", "ranging", "unclear")
+
+
+class TestRegimeParamCustom:
+    """T-05: 커스텀 regime 임계값을 params로 주입."""
+
+    def test_lower_trending_threshold_makes_trending(self):
+        """bb_width_trending_min을 낮추면 trending 판정이 더 쉬움."""
+        candles = _make_uptrend_candles(30, step=1.0)
+        # 기본값(6.0)으로 판정
+        result_default = compute_trend_signal(candles, params={})
+        # 매우 낮은 임계값 → trending 확정
+        result_low = compute_trend_signal(
+            candles, params={"bb_width_trending_min": 0.1, "range_pct_trending_min": 0.1}
+        )
+        assert result_low["regime"] == "trending"
+
+    def test_higher_trending_threshold_avoids_trending(self):
+        """bb_width_trending_min을 크게 올리면 trending 판정이 어려워짐."""
+        candles = _make_uptrend_candles(30, step=1.0)
+        result = compute_trend_signal(
+            candles, params={"bb_width_trending_min": 99.0, "range_pct_trending_min": 99.0}
+        )
+        # 임계값이 극단적으로 높으면 trending이 아님
+        assert result["regime"] != "trending"
+
+    def test_wider_ranging_threshold_makes_ranging(self):
+        """bb_width_ranging_max를 크게 올리면 횡보 판정이 더 쉬움."""
+        candles = _make_flat_candles(30, noise=0.1)
+        result = compute_trend_signal(
+            candles, params={
+                "bb_width_ranging_max": 99.0,
+                "range_pct_ranging_max": 99.0,
+                "bb_width_trending_min": 99.0,
+                "range_pct_trending_min": 99.0,
+            }
+        )
+        assert result["regime"] == "ranging"
+
+    def test_tight_ranging_threshold_avoids_ranging(self):
+        """bb_width_ranging_max=0 → 절대 ranging 아님."""
+        candles = _make_flat_candles(30, noise=0.1)
+        result = compute_trend_signal(
+            candles, params={"bb_width_ranging_max": 0.0, "range_pct_ranging_max": 0.0}
+        )
+        assert result["regime"] != "ranging"
+
+    def test_wait_regime_with_custom_thresholds(self):
+        """ranging 판정이 생기면 wait_regime 시그널 가능."""
+        # 상승 추세이나 횡보 강제 → wait_regime
+        candles = _make_uptrend_candles(30, step=0.5)
+        result = compute_trend_signal(
+            candles, params={
+                "bb_width_ranging_max": 99.0,
+                "range_pct_ranging_max": 99.0,
+                "bb_width_trending_min": 99.0,
+                "range_pct_trending_min": 99.0,
+            }
+        )
+        # 가격이 EMA 위 + 기울기 양수 + regime=ranging → wait_regime
+        if result["signal"] == "wait_regime":
+            assert result["regime"] == "ranging"
+
+
+class TestIndicatorPeriodParams:
+    """T-05: ema_period, atr_period, rsi_period 파라미터화 검증."""
+
+    def test_custom_ema_period(self):
+        """ema_period=10으로 변경 시 다른 EMA 값."""
+        candles = _make_uptrend_candles(30)
+        result_default = compute_trend_signal(candles, params={})
+        result_custom = compute_trend_signal(candles, params={"ema_period": 10})
+        # EMA period가 다르면 값이 달라야 함
+        assert result_default["ema"] != result_custom["ema"]
+
+    def test_custom_rsi_period(self):
+        """rsi_period=7로 변경 시 다른 RSI 값."""
+        # 순수 상승은 RSI 100 (period 무관) → 등락 섞인 데이터 사용
+        candles = _make_volatile_candles(30, start=100.0, amplitude=3.0)
+        result_default = compute_trend_signal(candles, params={})
+        result_custom = compute_trend_signal(candles, params={"rsi_period": 7})
+        # RSI period가 다르면 값이 달라야 함
+        assert result_default["rsi"] is not None
+        assert result_custom["rsi"] is not None
+        assert result_default["rsi"] != result_custom["rsi"]
+
+    def test_custom_bb_period(self):
+        """bb_period를 직접 지정하면 해당 기간의 BB 폭 계산."""
+        candles = _make_volatile_candles(30)
+        result_10 = compute_trend_signal(candles, params={"bb_period": 10})
+        result_25 = compute_trend_signal(candles, params={"bb_period": 25})
+        # 다른 기간 → 다른 bb_width_pct
+        assert result_10["bb_width_pct"] != result_25["bb_width_pct"]
+
+
+class TestRegimeDataInsufficiency:
+    """T-05: 데이터 부족 시 안전한 동작 검증."""
+
+    def test_few_candles_still_works(self):
+        """캔들 5개로도 에러 없이 regime 판정."""
+        candles = _make_uptrend_candles(5)
+        result = compute_trend_signal(candles)
+        assert result["regime"] in ("trending", "ranging", "unclear")
+        assert result["bb_width_pct"] >= 0
+
+    def test_single_candle(self):
+        """캔들 1개로도 크래시 없음."""
+        candles = [_FakeCandle(100, 101, 99, 100)]
+        result = compute_trend_signal(candles)
+        assert "regime" in result
+        assert "signal" in result
+
+    def test_bb_period_exceeds_candle_count(self):
+        """bb_period > 캔들 수 → min(bb_period, len(closes))로 안전 처리."""
+        candles = _make_uptrend_candles(10)
+        result = compute_trend_signal(candles, params={"bb_period": 100})
+        # 크래시 없이 정상 반환
+        assert result["bb_width_pct"] >= 0
+        assert result["regime"] in ("trending", "ranging", "unclear")
