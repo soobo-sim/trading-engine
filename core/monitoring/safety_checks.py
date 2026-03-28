@@ -196,8 +196,16 @@ class SafetyChecksMixin:
             )
 
     async def _check_sf06(self) -> "SafetyCheck":
-        """SF-06: 거래소 API 응답 가능 여부."""
+        """SF-06: 거래소 API 응답 가능 여부. API 키 미설정 시 스킵."""
         from .health import SafetyCheck
+
+        # API 키 미설정 시 스킵
+        if hasattr(self._adapter, "has_credentials") and not self._adapter.has_credentials():
+            return SafetyCheck(
+                id="SF-06", name="거래소 API", status="n/a",
+                severity="critical",
+                detail="API key not configured — skip",
+            )
 
         try:
             await self._adapter.get_balance()

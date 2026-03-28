@@ -104,7 +104,9 @@ class BitFlyerAdapter:
         """WebSocket 연결 상태."""
         return self._ws_connected
 
-    # ── 내부 헬퍼 ──────────────────────────────────────────────
+    def has_credentials(self) -> bool:
+        """API 키/시크릿이 설정됐는지 확인."""
+        return bool(self._signer._api_key and self._signer._api_secret)
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:

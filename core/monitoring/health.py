@@ -205,7 +205,12 @@ class HealthChecker(SafetyChecksMixin):
         1% 이상 차이가 있으면 discrepancy로 보고.
         BUG-006의 독립 검증 레이어.
         BUG-016: dust 무시 + 진입 직후 grace period.
+        API 키 미설정 시 스킵.
         """
+        # API 키 미설정 시 잔고 조회 불가 → 스킵
+        if hasattr(self._adapter, "has_credentials") and not self._adapter.has_credentials():
+            return []
+
         try:
             open_positions = await self._get_open_positions()
             if not open_positions:

@@ -123,7 +123,9 @@ class GmoFxAdapter:
     def is_ws_connected(self) -> bool:
         return self._ws_connected
 
-    # ── 내부 헬퍼 ──────────────────────────────────────────────
+    def has_credentials(self) -> bool:
+        """API 키/시크릿이 설정됐는지 확인."""
+        return bool(self._signer._api_key and self._signer._api_secret)
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
@@ -190,6 +192,9 @@ class GmoFxAdapter:
         GMO FX에서 amount는 항상 통화 수량 (JPY 아님).
         예: USD/JPY 1000통화 → amount=1000
         """
+        if not self.has_credentials():
+            raise RuntimeError("GMO FX API 키 미설정 — 주문 실행 불가. 키 설정 후 재시작 필요.")
+
         symbol = self._pair_to_symbol(pair)
 
         if order_type in (OrderType.MARKET_BUY, OrderType.MARKET_SELL):
@@ -426,6 +431,8 @@ class GmoFxAdapter:
         GET /private/v1/account/assets
         GMO FX는 단일 JPY 계좌. availableAmount → 주문 가능 금액.
         """
+        if not self.has_credentials():
+            raise RuntimeError("GMO FX API 키 미설정 — 잔고 조회 불가.")
         client = self._get_client()
         sign_path = "/v1/account/assets"
         headers = self._get_auth_headers("GET", sign_path)
