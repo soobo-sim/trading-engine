@@ -10,6 +10,7 @@ PUT    /api/strategies/{id}/archive  — 아카이브
 PUT    /api/strategies/{id}/reject   — 거부
 """
 import logging
+import os
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -40,8 +41,8 @@ class StrategyReject(BaseModel):
 
 # ── GMO FX 안전장치 ──────────────────────────────────────────
 
-GMO_MAX_POSITION_SIZE_PCT = 50.0  # Phase 0=20%, Phase 1=50%. 레버리지 환경 안전장치
-GMO_MAX_LEVERAGE = 5.0            # 최대 레버리지
+GMO_MAX_POSITION_SIZE_PCT = float(os.environ.get("GMO_MAX_POSITION_SIZE_PCT", "50.0"))
+GMO_MAX_LEVERAGE = float(os.environ.get("GMO_MAX_LEVERAGE", "5.0"))
 
 
 def _validate_gmo_safety(params: dict, state: AppState) -> None:
