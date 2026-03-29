@@ -40,7 +40,7 @@ class StrategyReject(BaseModel):
 
 # ── GMO FX 안전장치 ──────────────────────────────────────────
 
-GMO_MAX_POSITION_SIZE_PCT = 5.0   # 레버리지 환경 최대 포지션 비율
+GMO_MAX_POSITION_SIZE_PCT = 50.0  # Phase 0=20%, Phase 1=50%. 레버리지 환경 안전장치
 GMO_MAX_LEVERAGE = 5.0            # 최대 레버리지
 
 
