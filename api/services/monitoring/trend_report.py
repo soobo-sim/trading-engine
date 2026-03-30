@@ -114,6 +114,7 @@ async def generate_trend_report(
     reset_cooldown: bool = False,
 ) -> dict:
     """trend_following 전략의 모니터링 리포트 생성."""
+    pair = pair.lower()  # DB candle pair는 소문자 — 정규화
     params = strategy.parameters or {}
     now_jst = datetime.now(JST)
     time_str = now_jst.strftime("%H:%M")
