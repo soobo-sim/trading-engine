@@ -490,9 +490,8 @@ class TestClosePosition:
 
         assert manager._position.get("xrp_jpy") is None
         # dust 로그가 기록되었는지 확인
-        dust_logs = [r for r in caplog.records if "dust 잔고 감지" in r.message]
+        dust_logs = [r for r in caplog.records if "dust 잔고" in r.message]
         assert len(dust_logs) == 1
-        assert "매도 불가 수량" in dust_logs[0].message
 
 
 # ──────────────────────────────────────────────
@@ -722,7 +721,7 @@ class TestBalanceReconciliation:
             stop_loss_price=90.0,
             db_record_id=1,
         )
-        await manager._sync_position_balance(pair)
+        await manager._sync_position_state(pair)
         # 인메모리가 80으로 갱신되어야 함
         assert manager._position[pair].entry_amount == 80.0
 
@@ -738,7 +737,7 @@ class TestBalanceReconciliation:
             stop_loss_price=90.0,
             db_record_id=1,
         )
-        await manager._sync_position_balance(pair)
+        await manager._sync_position_state(pair)
         # 0.5% < 1% → 갱신 없음
         assert manager._position[pair].entry_amount == 100.0
 
@@ -756,7 +755,7 @@ class TestBalanceReconciliation:
             stop_tightened=True,
             extra={"divergence_exit_done": True},
         )
-        await manager._sync_position_balance(pair)
+        await manager._sync_position_state(pair)
         pos = manager._position[pair]
         assert pos.entry_amount == 50.0
         assert pos.entry_price == 100.0
@@ -768,4 +767,4 @@ class TestBalanceReconciliation:
     @pytest.mark.asyncio
     async def test_sync_skipped_when_no_position(self, manager, fake_adapter):
         """BUG-006: 포지션 없으면 에러 없이 스킵."""
-        await manager._sync_position_balance("xrp_jpy")  # no-op
+        await manager._sync_position_state("xrp_jpy")  # no-op

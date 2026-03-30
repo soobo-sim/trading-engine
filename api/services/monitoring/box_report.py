@@ -66,6 +66,28 @@ def get_box_position_label(price: float, lower: float, upper: float, tolerance_p
     return "middle"
 
 
+def get_box_entry_blockers(
+    box_data: dict | None,
+    position_label: str,
+    has_position: bool,
+) -> list[str]:
+    """박스 전략 진입까지 남은 조건 목록. 비어있으면 진입 가능."""
+    blockers: list[str] = []
+    if not box_data:
+        blockers.append("박스 미형성 → 형성 대기")
+    elif position_label not in ("near_lower",):
+        zone_labels = {
+            "near_upper": "상한 근접",
+            "middle": "중심부",
+            "outside": "박스 밖",
+        }
+        label = zone_labels.get(position_label, position_label)
+        blockers.append(f"가격 {label} → 하한 진입대 대기")
+    if has_position:
+        blockers.append("포지션 보유 중 → 청산 대기")
+    return blockers
+
+
 def build_box_telegram_text(prefix: str, time_str: str, pair: str, data: dict) -> str:
     lines = [f"[{prefix}] {time_str} | {pair} 📦박스"]
     lines.append(data["health_line"])
@@ -76,6 +98,25 @@ def build_box_telegram_text(prefix: str, time_str: str, pair: str, data: dict) -
         lines.append(f"하단¥{box['lower_bound']:,.2f} {box['bar_chart']} 상단¥{box['upper_bound']:,.2f}")
     else:
         lines.append(f"¥{data['current_price']:,.2f} 📭박스 미형성")
+        fp = data.get("formation_progress")
+        if fp:
+            min_t = fp["min_touches"]
+            remaining = fp["candles_remaining"]
+            tf = data.get("basis_timeframe", "4h")
+            lines.append(
+                f"📊 형성 진행: 상단 {fp['upper_touches']}/{min_t} "
+                f"하단 {fp['lower_touches']}/{min_t} — "
+                f"최소 {remaining}봉({tf}) 후"
+            )
+
+    # 진입 조건 N/3 표시
+    met = data.get("conditions_met", 0)
+    total = data.get("conditions_total", 3)
+    entry_blockers = data.get("entry_blockers", [])
+    if entry_blockers:
+        lines.append(f"🚫 {met}/{total} | {' | '.join(entry_blockers)}")
+    else:
+        lines.append(f"✅ {met}/{total} 진입 조건 충족")
 
     lines.append(f"{data['basis_timeframe']}봉 시작: {data['candle_open_time_jst']} JST")
 
@@ -183,6 +224,7 @@ async def generate_box_report(
 
     box_data = None
     position_label = "no_box"
+    formation_progress = None
     if box_row:
         upper = float(box_row.upper_bound)
         lower = float(box_row.lower_bound)
@@ -199,6 +241,41 @@ async def generate_box_report(
             "status": box_row.status,
             "bar_chart": bar_chart,
         }
+    else:
+        # 박스 미형성 시 진행 상황 계산
+        try:
+            from core.analysis.box_detector import detect_box_progress
+            lookback = int(params.get("lookback_candles", 40))
+            tol = float(params.get("box_tolerance_pct", 0.5))
+            min_t = int(params.get("min_touches", 3))
+            candle_pair_col = getattr(candle_model, pair_column)
+            prog_result = await db.execute(
+                select(candle_model)
+                .where(
+                    and_(
+                        candle_pair_col == pair,
+                        candle_model.timeframe == basis_tf,
+                        candle_model.is_complete == True,
+                    )
+                )
+                .order_by(candle_model.open_time.desc())
+                .limit(lookback)
+            )
+            prog_candles = list(reversed(prog_result.scalars().all()))
+            if prog_candles:
+                highs = [max(float(c.open), float(c.close)) for c in prog_candles]
+                lows = [min(float(c.open), float(c.close)) for c in prog_candles]
+                progress = detect_box_progress(highs, lows, tol, min_t)
+                formation_progress = {
+                    "upper_touches": progress.upper_touches,
+                    "lower_touches": progress.lower_touches,
+                    "min_touches": progress.min_touches,
+                    "candles_remaining": progress.candles_remaining,
+                    "upper_center": progress.upper_center,
+                    "lower_center": progress.lower_center,
+                }
+        except Exception as e:
+            logger.warning(f"[BoxReport] 형성 진행 계산 실패: {e}")
 
     # 4. 오픈 포지션 조회 (DB)
     pos_pair_col = getattr(box_position_model, pair_column)
@@ -281,13 +358,23 @@ async def generate_box_report(
         if candle_1h_close and candle_1h_close > 0 else 0.0
     )
 
-    # 7. 텍스트 조립
+    # 7. 진입 조건 판정 + 텍스트 조립
+    has_position = position_data is not None
+    entry_blockers = get_box_entry_blockers(box_data, position_label, has_position)
+    # 3 conditions: box active, zone=near_lower, no_position
+    conditions_total = 3
+    conditions_met = conditions_total - len(entry_blockers)
+
     report_data = {
         "current_price": current_price,
         "health_line": health_line,
         "box": box_data,
         "position_label": position_label,
         "position": position_data,
+        "entry_blockers": entry_blockers,
+        "conditions_met": conditions_met,
+        "conditions_total": conditions_total,
+        "formation_progress": formation_progress,
         "jpy_available": jpy_available,
         "coin_available": coin_available,
         "basis_timeframe": basis_tf,
@@ -317,6 +404,10 @@ async def generate_box_report(
             "box": box_data,
             "position_label": position_label,
             "position": position_data,
+            "formation_progress": formation_progress,
+            "entry_blockers": entry_blockers,
+            "conditions_met": conditions_met,
+            "conditions_total": conditions_total,
             "jpy_available": round(jpy_available, 0),
             "coin_available": round(coin_available, 6),
             "candle_change_pct": round(candle_change_pct, 2),

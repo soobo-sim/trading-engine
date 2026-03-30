@@ -510,7 +510,7 @@ class TestTrendBugFixes:
         # 실잔고를 80으로 설정 → 20% 괴리 → 갱신되어야 함
         fake_adapter.set_balance("xrp", 80.0)
 
-        await trend_mgr._sync_position_balance("xrp_jpy")
+        await trend_mgr._sync_position_state("xrp_jpy")
 
         pos = trend_mgr.get_position("xrp_jpy")
         assert pos.entry_amount == 80.0  # 실잔고로 동기화됨

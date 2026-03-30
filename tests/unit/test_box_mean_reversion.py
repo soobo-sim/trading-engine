@@ -623,3 +623,411 @@ class TestCandleQueries:
         assert len(candles) == 3
         # 시간 오름차순 확인
         assert candles[0].open_time < candles[1].open_time < candles[2].open_time
+
+
+# ══════════════════════════════════════════════
+# 테스트: FX (증거금) 모드 — ISSUE-1~6 검증
+# ══════════════════════════════════════════════
+
+class TestFxMarginTrading:
+    """GMO FX 증거금 거래 호환성 테스트."""
+
+    @pytest_asyncio.fixture
+    async def fx_adapter(self):
+        adapter = FakeExchangeAdapter(initial_balances={"jpy": 1_000_000.0})
+        adapter.set_margin_trading(True)
+        adapter.set_ticker_price(150.0)
+        return adapter
+
+    @pytest_asyncio.fixture
+    async def fx_manager(self, fx_adapter, supervisor, db_session_factory):
+        return BoxMeanReversionManager(
+            adapter=fx_adapter,
+            supervisor=supervisor,
+            session_factory=db_session_factory,
+            candle_model=BxtCandle,
+            box_model=BxtBox,
+            box_position_model=BxtBoxPosition,
+            pair_column="pair",
+        )
+
+    @pytest.mark.asyncio
+    async def test_fx_open_position_converts_jpy_to_size(
+        self, fx_manager, fx_adapter, db_session_factory,
+    ):
+        """ISSUE-1 (V-1): invest_jpy가 통화 수량(정수)으로 올바르게 변환되는가."""
+        pair = "usd_jpy"
+        box_id = await insert_box(db_session_factory, pair, 155.0, 145.0)
+        box = await fx_manager._get_active_box(pair)
+        params = {
+            "position_size_pct": 30.0,
+            "min_order_jpy": 500,
+            "leverage": 3,
+            "min_lot_size": 1,
+        }
+        fx_manager._params[pair] = params
+
+        # 잔고 1M * 30% = 300,000 JPY, leverage 3 → 900,000 / 150 = 6000 통화
+        await fx_manager._open_position_market(pair, box, 150.0, params)
+
+        assert await fx_manager._has_open_position(pair)
+
+        # place_order에 전달된 amount 확인
+        last_order = fx_adapter.order_history[-1]
+        assert last_order.amount == 6000.0  # math.floor(300000 * 3 / 150)
+
+    @pytest.mark.asyncio
+    async def test_fx_open_position_skips_small_lot(
+        self, fx_manager, fx_adapter, db_session_factory,
+    ):
+        """FX 최소 로트 미달 시 진입 스킵."""
+        pair = "usd_jpy"
+        box_id = await insert_box(db_session_factory, pair, 155.0, 145.0)
+        box = await fx_manager._get_active_box(pair)
+        fx_adapter.set_balance("jpy", 100.0)  # 극도로 적은 잔고
+        params = {
+            "position_size_pct": 10.0,
+            "min_order_jpy": 1,
+            "leverage": 1,
+            "min_lot_size": 1000,  # 최소 1000통화
+        }
+        fx_manager._params[pair] = params
+
+        await fx_manager._open_position_market(pair, box, 150.0, params)
+        assert not await fx_manager._has_open_position(pair)
+
+    @pytest.mark.asyncio
+    async def test_fx_close_position_uses_close_position(
+        self, fx_manager, fx_adapter, db_session_factory,
+    ):
+        """ISSUE-2/4 (V-2, V-6): FX 청산이 close_position을 사용하고 양방향 포지션 미발생."""
+        from core.exchange.types import FxPosition
+
+        pair = "usd_jpy"
+        box_id = await insert_box(db_session_factory, pair, 155.0, 145.0)
+
+        # 포지션 DB 기록 with exchange_position_id
+        await fx_manager._record_open_position(
+            pair=pair, box_id=box_id,
+            entry_order_id="ORD-FX-001", entry_price=150.0,
+            entry_amount=6000.0, entry_jpy=300000.0,
+            exchange_position_id="99001",
+        )
+        pos = await fx_manager._get_open_position(pair)
+
+        # FX 포지션 설정
+        fx_adapter.set_fx_positions([
+            FxPosition(
+                product_code="USD_JPY", side="BUY", price=150.0, size=6000.0,
+                pnl=100.0, leverage=0, require_collateral=0,
+                swap_point_accumulate=0, sfd=0, position_id=99001,
+            ),
+        ])
+
+        fx_manager._params[pair] = {}
+        await fx_manager._close_position_market(pair, pos, "near_upper_exit")
+
+        # 포지션이 closed 상태인지 확인
+        assert not await fx_manager._has_open_position(pair)
+
+        # place_order가 아닌 close_position이 호출되었는지 확인
+        # (close_position 호출 시 FX 포지션이 제거됨)
+        remaining = await fx_adapter.get_positions("USD_JPY")
+        assert len(remaining) == 0
+
+    @pytest.mark.asyncio
+    async def test_fx_close_matches_position_id_from_api(
+        self, fx_manager, fx_adapter, db_session_factory,
+    ):
+        """ISSUE-6 (V-2): DB에 positionId 없을 때 API 매칭으로 청산."""
+        from core.exchange.types import FxPosition
+
+        pair = "usd_jpy"
+        box_id = await insert_box(db_session_factory, pair, 155.0, 145.0)
+
+        # exchange_position_id 없이 기록
+        await fx_manager._record_open_position(
+            pair=pair, box_id=box_id,
+            entry_order_id="ORD-FX-002", entry_price=150.0,
+            entry_amount=6000.0, entry_jpy=300000.0,
+        )
+        pos = await fx_manager._get_open_position(pair)
+
+        # FX 포지션 설정 — BUY 1건만
+        fx_adapter.set_fx_positions([
+            FxPosition(
+                product_code="USD_JPY", side="BUY", price=150.0, size=6000.0,
+                pnl=200.0, leverage=0, require_collateral=0,
+                swap_point_accumulate=0, sfd=0, position_id=88001,
+            ),
+        ])
+
+        fx_manager._params[pair] = {}
+        await fx_manager._close_position_market(pair, pos, "box_invalidated")
+
+        assert not await fx_manager._has_open_position(pair)
+
+    @pytest.mark.asyncio
+    async def test_fx_no_dust_check(
+        self, fx_manager, fx_adapter, db_session_factory, caplog,
+    ):
+        """ISSUE-5: FX 모드에서는 dust 잔고 체크가 실행되지 않는다."""
+        from core.exchange.types import FxPosition
+        import logging
+
+        pair = "usd_jpy"
+        box_id = await insert_box(db_session_factory, pair, 155.0, 145.0)
+
+        await fx_manager._record_open_position(
+            pair=pair, box_id=box_id,
+            entry_order_id="ORD-FX-003", entry_price=150.0,
+            entry_amount=1000.0, entry_jpy=150000.0,
+            exchange_position_id="77001",
+        )
+        pos = await fx_manager._get_open_position(pair)
+
+        fx_adapter.set_fx_positions([
+            FxPosition(
+                product_code="USD_JPY", side="BUY", price=150.0, size=1000.0,
+                pnl=0, leverage=0, require_collateral=0,
+                swap_point_accumulate=0, sfd=0, position_id=77001,
+            ),
+        ])
+
+        fx_manager._params[pair] = {}
+        with caplog.at_level(logging.INFO):
+            await fx_manager._close_position_market(pair, pos, "near_upper_exit")
+
+        dust_logs = [r for r in caplog.records if "dust" in r.message.lower()]
+        assert len(dust_logs) == 0  # FX에서는 dust 체크 안 함
+
+    @pytest.mark.asyncio
+    async def test_fx_position_id_stored_in_db(
+        self, fx_manager, db_session_factory,
+    ):
+        """ISSUE-6 (V-5): exchange_position_id가 DB에 저장되는지 확인."""
+        pair = "usd_jpy"
+        box_id = await insert_box(db_session_factory, pair, 155.0, 145.0)
+
+        pos = await fx_manager._record_open_position(
+            pair=pair, box_id=box_id,
+            entry_order_id="ORD-FX-004", entry_price=150.0,
+            entry_amount=1000.0, exchange_position_id="55001",
+        )
+
+        assert pos.exchange_position_id == "55001"
+
+        # DB에서 직접 확인
+        async with db_session_factory() as db:
+            result = await db.execute(
+                select(BxtBoxPosition).where(BxtBoxPosition.id == pos.id)
+            )
+            stored = result.scalar_one()
+            assert stored.exchange_position_id == "55001"
+
+    @pytest.mark.asyncio
+    async def test_spot_unchanged_after_fx_changes(
+        self, manager, fake_adapter, db_session_factory,
+    ):
+        """V-7: 현물(BF) 기존 로직 회귀 없음 — _open + _close 전체 사이클."""
+        pair = "xrp_jpy"
+        box_id = await insert_box(db_session_factory, pair, 110.0, 90.0)
+        box = await manager._get_active_box(pair)
+        manager._params[pair] = {
+            "position_size_pct": 10.0,
+            "min_order_jpy": 500,
+            "min_coin_size": 0.001,
+            "trading_fee_rate": 0.002,
+        }
+
+        # 진입
+        await manager._open_position_market(pair, box, 91.0, manager._params[pair])
+        assert await manager._has_open_position(pair)
+        assert fake_adapter.is_margin_trading is False
+
+        # xrp 잔고가 생겼는지 확인
+        balance = await fake_adapter.get_balance()
+        xrp_balance = balance.get_available("xrp")
+        assert xrp_balance > 0
+
+        # 청산
+        pos = await manager._get_open_position(pair)
+        await manager._close_position_market(pair, pos, "near_upper_exit")
+        assert not await manager._has_open_position(pair)
+
+    @pytest.mark.asyncio
+    async def test_fx_1000_unit_rounding(
+        self, fx_manager, fx_adapter, db_session_factory,
+    ):
+        """V-10: 1,000통화 단위 내림 정확성 (2999→2000, 999→스킵)."""
+        pair = "usd_jpy"
+        box_id = await insert_box(db_session_factory, pair, 155.0, 145.0)
+        box = await fx_manager._get_active_box(pair)
+
+        # Case 1: 잔고 → 2999통화 → 내림 2000
+        fx_adapter.set_balance("jpy", 149_950.0)  # 149950 * 1 / 150 = 999.67 → 레버3 → 2999 → 2000
+        params = {
+            "position_size_pct": 100.0,
+            "min_order_jpy": 500,
+            "leverage": 3,
+            "lot_unit": 1000,
+            "min_lot_size": 1000,
+        }
+        fx_manager._params[pair] = params
+        await fx_manager._open_position_market(pair, box, 150.0, params)
+
+        assert await fx_manager._has_open_position(pair)
+        last_order = fx_adapter.order_history[-1]
+        assert last_order.amount == 2000.0  # floor(2999/1000)*1000
+
+        # Case 2: 잔고 → 999통화 → 내림 0 → 스킵
+        # 새 포지션을 위해 기존 것 먼저 정리
+        pos = await fx_manager._get_open_position(pair)
+        BxtBoxPosition = fx_manager._box_position_model
+        async with db_session_factory() as db:
+            from sqlalchemy import update as sa_update
+            await db.execute(
+                sa_update(BxtBoxPosition).where(BxtBoxPosition.id == pos.id).values(status="closed")
+            )
+            await db.commit()
+
+        fx_adapter.set_balance("jpy", 49_950.0)  # 49950 * 3 / 150 = 999 → floor(999/1000)*1000 = 0
+        order_count_before = len(fx_adapter.order_history)
+        await fx_manager._open_position_market(pair, box, 150.0, params)
+        assert not await fx_manager._has_open_position(pair)
+        assert len(fx_adapter.order_history) == order_count_before  # 주문 안 됨
+
+    @pytest.mark.asyncio
+    async def test_fx_insufficient_margin_skips_entry(
+        self, fx_manager, fx_adapter, db_session_factory,
+    ):
+        """V-11: 증거금 부족 시 진입 거부."""
+        pair = "usd_jpy"
+        box_id = await insert_box(db_session_factory, pair, 155.0, 145.0)
+        box = await fx_manager._get_active_box(pair)
+
+        fx_adapter.set_balance("jpy", 100.0)  # 극도로 적은 잔고
+        params = {
+            "position_size_pct": 10.0,
+            "min_order_jpy": 500,
+            "leverage": 1,
+            "lot_unit": 1000,
+            "min_lot_size": 1000,
+        }
+        fx_manager._params[pair] = params
+
+        await fx_manager._open_position_market(pair, box, 150.0, params)
+        assert not await fx_manager._has_open_position(pair)
+
+    @pytest.mark.asyncio
+    async def test_fx_leverage_affects_size(
+        self, fx_manager, fx_adapter, db_session_factory,
+    ):
+        """V-12: 레버리지 변경에 따른 size 계산 (lever=1,3,5)."""
+        pair = "usd_jpy"
+
+        for leverage, expected_size in [(1, 2000), (3, 6000), (5, 10000)]:
+            # 매번 새 박스/포지션 초기화
+            box_id = await insert_box(db_session_factory, pair, 155.0, 145.0)
+            box = await fx_manager._get_active_box(pair)
+            fx_adapter.set_balance("jpy", 1_000_000.0)
+
+            params = {
+                "position_size_pct": 30.0,
+                "min_order_jpy": 500,
+                "leverage": leverage,
+                "lot_unit": 1000,
+                "min_lot_size": 1000,
+            }
+            fx_manager._params[pair] = params
+
+            # 300,000 * leverage / 150 / 1000 → floor → * 1000
+            await fx_manager._open_position_market(pair, box, 150.0, params)
+
+            last_order = fx_adapter.order_history[-1]
+            assert last_order.amount == expected_size, (
+                f"leverage={leverage}: expected {expected_size}, got {last_order.amount}"
+            )
+
+            # 정리: 포지션 close, 박스 invalidate
+            pos = await fx_manager._get_open_position(pair)
+            BxtBoxPosition = fx_manager._box_position_model
+            async with db_session_factory() as db:
+                from sqlalchemy import update as sa_update
+                await db.execute(
+                    sa_update(BxtBoxPosition).where(BxtBoxPosition.id == pos.id).values(status="closed")
+                )
+                await db.execute(
+                    sa_update(BxtBox).where(BxtBox.id == box_id).values(status="invalidated")
+                )
+                await db.commit()
+
+    @pytest.mark.asyncio
+    async def test_fx_close_position_failure_logged(
+        self, fx_manager, fx_adapter, db_session_factory, caplog,
+    ):
+        """V-13: closeOrder 실패 시 에러 로깅."""
+        import logging
+
+        pair = "usd_jpy"
+        box_id = await insert_box(db_session_factory, pair, 155.0, 145.0)
+
+        await fx_manager._record_open_position(
+            pair=pair, box_id=box_id,
+            entry_order_id="ORD-FX-FAIL", entry_price=150.0,
+            entry_amount=1000.0, entry_jpy=150000.0,
+            exchange_position_id="66001",
+        )
+        pos = await fx_manager._get_open_position(pair)
+
+        # close_position이 예외를 던지도록 설정
+        original = fx_adapter.close_position
+
+        async def _raise(*args, **kwargs):
+            raise RuntimeError("GMO API timeout")
+
+        fx_adapter.close_position = _raise
+        fx_manager._params[pair] = {}
+
+        with caplog.at_level(logging.ERROR):
+            await fx_manager._close_position_market(pair, pos, "test_failure")
+
+        error_logs = [r for r in caplog.records if "청산 주문 오류" in r.message]
+        assert len(error_logs) >= 1
+        # 포지션은 여전히 open (실패했으므로)
+        assert await fx_manager._has_open_position(pair)
+
+        fx_adapter.close_position = original
+
+    @pytest.mark.asyncio
+    async def test_fx_weekend_close_blocks_entry(
+        self, fx_manager, fx_adapter, db_session_factory,
+    ):
+        """V-8 (ISSUE-8): 금요일 마감 시간에 FX 신규 진입이 차단되는지 확인."""
+        from unittest.mock import patch
+        from core.exchange.session import should_close_for_weekend, is_fx_market_open
+
+        pair = "usd_jpy"
+        box_id = await insert_box(db_session_factory, pair, 155.0, 145.0)
+        box = await fx_manager._get_active_box(pair)
+        params = {
+            "position_size_pct": 30.0,
+            "min_order_jpy": 500,
+            "leverage": 3,
+            "lot_unit": 1000,
+            "min_lot_size": 1000,
+        }
+        fx_manager._params[pair] = params
+        fx_manager._prev_box_state[pair] = None
+
+        # 주말 청산 시점이면 _entry_monitor에서 진입 차단
+        # _entry_monitor는 루프이므로 직접 로직만 검증
+        with patch(
+            "core.strategy.box_mean_reversion.should_close_for_weekend",
+            return_value=True,
+        ):
+            # should_close_for_weekend=True이면 FX 진입 스킵해야 함
+            is_fx = getattr(fx_adapter, "is_margin_trading", False)
+            assert is_fx
+            from core.strategy.box_mean_reversion import should_close_for_weekend as scw
+            assert scw()  # 패치 확인

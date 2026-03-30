@@ -41,6 +41,7 @@ from sqlalchemy import and_, desc, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from core.exchange.base import ExchangeAdapter
+from core.exchange.session import is_fx_market_open, should_close_for_weekend, minutes_until_market_close
 from core.exchange.types import OrderType
 from core.task.supervisor import TaskSupervisor
 from core.analysis.box_detector import find_cluster
@@ -98,22 +99,21 @@ class BoxMeanReversionManager:
         self._prev_box_state[pair] = None
 
         # 기존 태스크 정리
-        await self._supervisor.stop_tasks(pair)
+        await self._supervisor.stop_group(pair)
 
-        self._supervisor.register(
+        await self._supervisor.register(
             f"box_monitor:{pair}",
             lambda p=pair: self._box_monitor(p),
         )
-        self._supervisor.register(
+        await self._supervisor.register(
             f"box_entry:{pair}",
             lambda p=pair: self._entry_monitor(p),
         )
-        await self._supervisor.start_all()
         logger.info(f"[BoxMgr] {pair}: 박스 인프라 태스크 2개 시작")
 
     async def stop(self, pair: str) -> None:
         """pair에 대한 태스크 종료."""
-        await self._supervisor.stop_tasks(pair)
+        await self._supervisor.stop_group(pair)
         self._params.pop(pair, None)
         self._last_seen_open_time.pop(pair, None)
         self._prev_box_state.pop(pair, None)
@@ -135,6 +135,22 @@ class BoxMeanReversionManager:
 
             params = self._params.get(pair, {})
             basis_tf = params.get("basis_timeframe", "4h")
+
+            # ── 주말 자동 청산 (FX 전용) ───────────────────
+            is_fx = getattr(self._adapter, "is_margin_trading", False)
+            if is_fx and should_close_for_weekend():
+                pos = await self._get_open_position(pair)
+                if pos:
+                    mins = minutes_until_market_close()
+                    logger.warning(
+                        f"[BoxMgr] {pair}: 주말 마감 임박 (잔여 {mins}분) → 자동 청산"
+                    )
+                    await self._close_position_market(pair, pos, "weekend_close")
+                continue  # 주말에는 캔들/박스 감지 불필요
+
+            # ── FX 시장 휴장 시 스킵 ──────────────────────
+            if is_fx and not is_fx_market_open():
+                continue
 
             try:
                 open_time = await self._get_latest_candle_open_time(pair, basis_tf)
@@ -196,6 +212,12 @@ class BoxMeanReversionManager:
                 box_state = await self._is_price_in_box(pair, price)
                 params = self._params.get(pair, {})
                 prev_state = self._prev_box_state.get(pair)
+
+                # ── FX: 주말/휴장 시 진입 차단 ─────────────
+                is_fx = getattr(self._adapter, "is_margin_trading", False)
+                if is_fx and (should_close_for_weekend() or not is_fx_market_open()):
+                    self._prev_box_state[pair] = box_state
+                    continue
 
                 # ── 진입: near_lower로 새로 진입했을 때 ──
                 if (
@@ -265,7 +287,11 @@ class BoxMeanReversionManager:
             return None
 
         # 최소 박스 폭: tolerance×2 + fee×2
-        fee_rate_pct = float(params.get("fee_rate_pct", 0.15))
+        # 어댑터가 fee_rate_pct를 제공하면 우선 사용 (GMO FX 트라이얼 자동 전환)
+        if hasattr(self._adapter, "fee_rate_pct"):
+            fee_rate_pct = float(self._adapter.fee_rate_pct)
+        else:
+            fee_rate_pct = float(params.get("fee_rate_pct", 0.15))
         width_pct = (upper - lower) / lower * 100
         min_width_pct = tolerance_pct * 2 + fee_rate_pct * 2
         if params.get("box_min_width_pct"):
@@ -426,24 +452,57 @@ class BoxMeanReversionManager:
                 logger.warning(f"[BoxMgr] {pair}: 현재가 0, 진입 스킵")
                 return
 
-            # MARKET_BUY: amount=JPY (adapter가 내부적으로 코인 수량 변환)
-            order = await self._adapter.place_order(
-                OrderType.MARKET_BUY, pair, invest_jpy,
-            )
+            is_margin = getattr(self._adapter, "is_margin_trading", False)
 
-            exec_price = order.price or price
-            exec_amount = order.amount
-            if exec_amount == 0 and exec_price > 0:
-                exec_amount = invest_jpy / exec_price
+            if is_margin:
+                # FX: invest_jpy를 통화 수량으로 변환 (1,000통화 단위 내림)
+                leverage = float(params.get("leverage", 1))
+                lot_unit = int(params.get("lot_unit", 1000))
+                size_raw = invest_jpy * leverage / price
+                order_size = math.floor(size_raw / lot_unit) * lot_unit
+                min_lot = int(params.get("min_lot_size", 1000))
+                if order_size < min_lot:
+                    logger.info(
+                        f"[BoxMgr] {pair}: FX 수량({order_size}) < 최소 로트({min_lot}), 진입 스킵"
+                    )
+                    return
+                order = await self._adapter.place_order(
+                    OrderType.MARKET_BUY, pair, float(order_size),
+                )
+                exec_price = order.price or price
+                exec_amount = order.amount or float(order_size)
 
-            await self._record_open_position(
-                pair=pair,
-                box_id=box.id,
-                entry_order_id=order.order_id,
-                entry_price=exec_price,
-                entry_amount=exec_amount,
-                entry_jpy=invest_jpy,
-            )
+                # positionId 확보: get_positions()로 직후 조회
+                exchange_position_id = await self._find_exchange_position_id(pair)
+
+                await self._record_open_position(
+                    pair=pair,
+                    box_id=box.id,
+                    entry_order_id=order.order_id,
+                    entry_price=exec_price,
+                    entry_amount=exec_amount,
+                    entry_jpy=invest_jpy,
+                    exchange_position_id=exchange_position_id,
+                )
+            else:
+                # 현물: amount=JPY (adapter가 내부적으로 코인 수량 변환)
+                order = await self._adapter.place_order(
+                    OrderType.MARKET_BUY, pair, invest_jpy,
+                )
+                exec_price = order.price or price
+                exec_amount = order.amount
+                if exec_amount == 0 and exec_price > 0:
+                    exec_amount = invest_jpy / exec_price
+
+                await self._record_open_position(
+                    pair=pair,
+                    box_id=box.id,
+                    entry_order_id=order.order_id,
+                    entry_price=exec_price,
+                    entry_amount=exec_amount,
+                    entry_jpy=invest_jpy,
+                )
+
             logger.info(
                 f"[BoxMgr] {pair}: 자동 진입 완료 "
                 f"order_id={order.order_id} price={exec_price} "
@@ -455,66 +514,135 @@ class BoxMeanReversionManager:
     async def _close_position_market(
         self, pair: str, pos: Any, reason: str,
     ) -> None:
-        """market_sell 자동 청산 + DB 포지션 기록."""
+        """자동 청산. 현물은 MARKET_SELL, FX는 closeOrder(positionId)."""
         try:
-            balance = await self._adapter.get_balance()
-            currency = pair.split("_")[0].lower()
-            coin_available = balance.get_available(currency)
+            is_margin = getattr(self._adapter, "is_margin_trading", False)
 
-            min_size = float(self._params.get(pair, {}).get("min_coin_size", 0.001))
-            if coin_available < min_size:
-                logger.warning(
-                    f"[BoxMgr] {pair}: 청산 시도했지만 {currency} 잔고 부족 "
-                    f"({coin_available} < {min_size})"
+            if is_margin:
+                await self._close_position_market_fx(pair, pos, reason)
+            else:
+                await self._close_position_market_spot(pair, pos, reason)
+        except Exception as e:
+            logger.error(f"[BoxMgr] {pair}: 청산 주문 오류 — {e}", exc_info=True)
+
+    async def _close_position_market_spot(
+        self, pair: str, pos: Any, reason: str,
+    ) -> None:
+        """현물 청산: 코인 잔고 MARKET_SELL."""
+        balance = await self._adapter.get_balance()
+        currency = pair.split("_")[0].lower()
+        coin_available = balance.get_available(currency)
+
+        min_size = float(self._params.get(pair, {}).get("min_coin_size", 0.001))
+        if coin_available < min_size:
+            logger.warning(
+                f"[BoxMgr] {pair}: 청산 시도했지만 {currency} 잔고 부족 "
+                f"({coin_available} < {min_size})"
+            )
+            return
+
+        # 수수료 차감 (BUG-004 교훈)
+        fee_rate = float(self._params.get(pair, {}).get("trading_fee_rate", 0.002))
+        sell_amount = math.floor(coin_available / (1 + fee_rate) * 1e8) / 1e8
+
+        order = await self._adapter.place_order(
+            OrderType.MARKET_SELL, pair, sell_amount,
+        )
+
+        exec_price = order.price or 0.0
+        # BUG-008: market_sell 응답에 체결가 없을 수 있음 → ticker 현재가로 대체
+        if exec_price == 0:
+            try:
+                ticker = await self._adapter.get_ticker(pair)
+                exec_price = ticker.last
+                logger.warning(f"[BoxMgr] {pair}: 체결가 미반환, ticker last={exec_price}로 대체")
+            except Exception as te:
+                logger.warning(f"[BoxMgr] {pair}: ticker 조회도 실패 — {te}")
+        exec_amount = order.amount or sell_amount
+
+        await self._record_close_position(
+            pair=pair,
+            exit_order_id=order.order_id,
+            exit_price=exec_price,
+            exit_amount=exec_amount,
+            exit_reason=reason,
+        )
+        logger.info(
+            f"[BoxMgr] {pair}: 자동 청산 완료 "
+            f"reason={reason} order_id={order.order_id} "
+            f"price={exec_price}"
+        )
+
+        # BUG-009: 청산 후 dust 잔고 감지 로깅 (현물 전용)
+        try:
+            balance_after = await self._adapter.get_balance()
+            currency_lower = pair.split("_")[0].lower()
+            dust = balance_after.get_available(currency_lower)
+            if 0 < dust < min_size:
+                logger.info(
+                    f"[BoxMgr] {pair}: 청산 후 dust 잔고 감지 "
+                    f"({currency_lower} {dust:.8f} < min_size {min_size}) — 매도 불가 수량, 다음 진입 시 포함됨"
+                )
+        except Exception as de:
+            logger.debug(f"[BoxMgr] {pair}: dust 확인 실패 — {de}")
+
+    async def _close_position_market_fx(
+        self, pair: str, pos: Any, reason: str,
+    ) -> None:
+        """FX 청산: closeOrder(positionId)로 건옥 결제."""
+        symbol = pair.upper()
+
+        # 1. positionId 확보: DB 저장값 우선, 없으면 API 조회 매칭
+        exchange_pid = getattr(pos, "exchange_position_id", None)
+        close_size = int(float(pos.entry_amount))
+
+        if exchange_pid:
+            position_id = int(exchange_pid)
+        else:
+            # DB에 positionId 없으면 get_positions()로 매칭 시도
+            position_id = await self._match_fx_position_id(
+                pair, float(pos.entry_price), close_size,
+            )
+            if position_id is None:
+                logger.error(
+                    f"[BoxMgr] {pair}: FX 청산 실패 — positionId 매칭 불가 "
+                    f"(entry_price={pos.entry_price}, amount={pos.entry_amount})"
                 )
                 return
 
-            # 수수료 차감 (BUG-004 교훈)
-            fee_rate = float(self._params.get(pair, {}).get("trading_fee_rate", 0.002))
-            sell_amount = math.floor(coin_available / (1 + fee_rate) * 1e8) / 1e8
+        # 2. close_side: 매수 포지션 청산 → SELL
+        close_side = "SELL" if pos.side == "buy" else "BUY"
 
-            order = await self._adapter.place_order(
-                OrderType.MARKET_SELL, pair, sell_amount,
-            )
+        order = await self._adapter.close_position(
+            symbol=symbol,
+            side=close_side,
+            position_id=position_id,
+            size=close_size,
+        )
 
-            exec_price = order.price or 0.0
-            # BUG-008: market_sell 응답에 체결가 없을 수 있음 → ticker 현재가로 대체
-            if exec_price == 0:
-                try:
-                    ticker = await self._adapter.get_ticker(pair)
-                    exec_price = ticker.last
-                    logger.warning(f"[BoxMgr] {pair}: 체결가 미반환, ticker last={exec_price}로 대체")
-                except Exception as te:
-                    logger.warning(f"[BoxMgr] {pair}: ticker 조회도 실패 — {te}")
-            exec_amount = order.amount or sell_amount
-
-            await self._record_close_position(
-                pair=pair,
-                exit_order_id=order.order_id,
-                exit_price=exec_price,
-                exit_amount=exec_amount,
-                exit_reason=reason,
-            )
-            logger.info(
-                f"[BoxMgr] {pair}: 자동 청산 완료 "
-                f"reason={reason} order_id={order.order_id} "
-                f"price={exec_price}"
-            )
-
-            # BUG-009: 청산 후 dust 잔고 감지 로깅
+        # 3. 체결가 확보
+        exec_price = order.price or 0.0
+        if exec_price == 0:
             try:
-                balance_after = await self._adapter.get_balance()
-                currency_lower = pair.split("_")[0].lower()
-                dust = balance_after.get_available(currency_lower)
-                if 0 < dust < min_size:
-                    logger.info(
-                        f"[BoxMgr] {pair}: 청산 후 dust 잔고 감지 "
-                        f"({currency_lower} {dust:.8f} < min_size {min_size}) — 매도 불가 수량, 다음 진입 시 포함됨"
-                    )
-            except Exception as de:
-                logger.debug(f"[BoxMgr] {pair}: dust 확인 실패 — {de}")
-        except Exception as e:
-            logger.error(f"[BoxMgr] {pair}: 청산 주문 오류 — {e}", exc_info=True)
+                ticker = await self._adapter.get_ticker(pair)
+                exec_price = ticker.last
+                logger.warning(f"[BoxMgr] {pair}: FX 체결가 미반환, ticker={exec_price}로 대체")
+            except Exception as te:
+                logger.warning(f"[BoxMgr] {pair}: ticker 조회 실패 — {te}")
+        exec_amount = order.amount or float(close_size)
+
+        await self._record_close_position(
+            pair=pair,
+            exit_order_id=order.order_id,
+            exit_price=exec_price,
+            exit_amount=exec_amount,
+            exit_reason=reason,
+        )
+        logger.info(
+            f"[BoxMgr] {pair}: FX 청산 완료 "
+            f"reason={reason} positionId={position_id} "
+            f"order_id={order.order_id} price={exec_price}"
+        )
 
     # ──────────────────────────────────────────
     # DB: 포지션 기록
@@ -528,6 +656,7 @@ class BoxMeanReversionManager:
         entry_price: float,
         entry_amount: float,
         entry_jpy: Optional[float] = None,
+        exchange_position_id: Optional[str] = None,
     ) -> Any:
         """진입 주문 직후 포지션 기록. open 이미 존재 시 경고 → 기존 반환."""
         existing = await self._get_open_position(pair)
@@ -547,6 +676,8 @@ class BoxMeanReversionManager:
         pos.entry_price = Decimal(str(entry_price))
         pos.entry_amount = Decimal(str(entry_amount))
         pos.entry_jpy = Decimal(str(entry_jpy)) if entry_jpy is not None else None
+        if exchange_position_id is not None:
+            pos.exchange_position_id = str(exchange_position_id)
         pos.status = "open"
         pos.created_at = datetime.now(timezone.utc)
 
@@ -661,6 +792,42 @@ class BoxMeanReversionManager:
     async def _has_open_position(self, pair: str) -> bool:
         """open 포지션 존재 여부."""
         return (await self._get_open_position(pair)) is not None
+
+    # ──────────────────────────────────────────
+    # FX: positionId 헬퍼
+    # ──────────────────────────────────────────
+
+    async def _find_exchange_position_id(self, pair: str) -> Optional[str]:
+        """진입 직후 get_positions()로 최신 positionId를 반환."""
+        try:
+            positions = await self._adapter.get_positions(pair.upper())
+            if positions:
+                # 가장 최근 포지션 (진입 직후이므로 마지막이 해당)
+                latest = max(positions, key=lambda p: p.open_date or datetime.min)
+                if latest.position_id is not None:
+                    return str(latest.position_id)
+        except Exception as e:
+            logger.warning(f"[BoxMgr] {pair}: positionId 조회 실패 — {e}")
+        return None
+
+    async def _match_fx_position_id(
+        self, pair: str, entry_price: float, size: int,
+    ) -> Optional[int]:
+        """get_positions()에서 진입가/수량으로 매칭하여 positionId 반환."""
+        try:
+            positions = await self._adapter.get_positions(pair.upper())
+            for p in positions:
+                if p.side == "BUY" and int(p.size) == size:
+                    # 진입가 근사 매칭 (0.1% 이내)
+                    if entry_price > 0 and abs(p.price - entry_price) / entry_price < 0.001:
+                        return p.position_id
+            # 정확한 매칭 실패 시, BUY 포지션 중 가장 근접한 것
+            buy_positions = [p for p in positions if p.side == "BUY"]
+            if len(buy_positions) == 1 and buy_positions[0].position_id is not None:
+                return buy_positions[0].position_id
+        except Exception as e:
+            logger.warning(f"[BoxMgr] {pair}: FX 포지션 매칭 실패 — {e}")
+        return None
 
     # ──────────────────────────────────────────
     # DB: 캔들 조회

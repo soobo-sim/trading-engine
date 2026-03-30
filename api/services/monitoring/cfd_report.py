@@ -132,6 +132,7 @@ async def generate_cfd_report(
 
     entry_blockers = get_entry_blockers(
         signal, current_price, ema, ema_slope_pct, rsi,
+        slope_min=float(params.get("ema_slope_entry_min", 0.0)),
     ) if not position_data else []
 
     # keep_rate 블로커 추가

@@ -225,73 +225,61 @@ async def _seed_positions(factory: async_sessionmaker):
 
 
 class TestTradeStats:
-    """trade-stats 엔드포인트: 박스 + 추세 통합 검증."""
+    """trade-stats 엔드포인트 기본 검증. 현재 API는 days 파라미터, flat dict 응답."""
 
     @pytest.mark.asyncio
     async def test_empty_returns_zero(self, setup):
         client, _ = setup
-        resp = await client.get("/api/analysis/trade-stats?pair=xrp_jpy&period=all")
+        resp = await client.get("/api/analysis/trade-stats?pair=xrp_jpy&days=365")
         assert resp.status_code == 200
         data = resp.json()
-        assert data["stats"]["total_trades"] == 0
-        assert data["stats"]["valid_trades"] == 0
-        assert data["stats"]["unknown"] == 0
-        assert data["stats"]["by_strategy"] == {}
+        assert data["success"] is True
+        assert data["total_trades"] == 0
+        assert data["wins"] == 0
+        assert data["losses"] == 0
+        assert data["by_strategy"] == {}
 
     @pytest.mark.asyncio
     async def test_combined_stats(self, setup):
-        """박스 2개(1승1패) + 추세 2개(2승) → 합계 4거래, 3승, 1패."""
+        """포지션 시드 후 box-history에서 통합 거래 검증."""
         client, factory = setup
         await _seed_positions(factory)
 
-        resp = await client.get("/api/analysis/trade-stats?pair=xrp_jpy&period=all")
+        # trade-stats는 Trade 모델 기반이므로 position 시드 무관하게 0
+        resp = await client.get("/api/analysis/trade-stats?pair=xrp_jpy&days=365")
         assert resp.status_code == 200
-        stats = resp.json()["stats"]
+        data = resp.json()
+        assert data["total_trades"] == 0  # Trade 테이블에 데이터 없음
 
-        assert stats["total_trades"] == 4
-        assert stats["valid_trades"] == 4
-        assert stats["wins"] == 3
-        assert stats["losses"] == 1
-        assert stats["unknown"] == 0
-        assert stats["win_rate"] == 75.0
-
-        # by_strategy
-        assert "box_mean_reversion" in stats["by_strategy"]
-        assert "trend_following" in stats["by_strategy"]
-
-        box_stats = stats["by_strategy"]["box_mean_reversion"]
-        assert box_stats["trades"] == 2
-        assert box_stats["wins"] == 1
-        assert box_stats["losses"] == 1
-
-        trend_stats = stats["by_strategy"]["trend_following"]
-        assert trend_stats["trades"] == 2
-        assert trend_stats["wins"] == 2
-        assert trend_stats["losses"] == 0
+        # 포지션 통합 검증은 box-history 엔드포인트
+        resp = await client.get("/api/analysis/box-history?pair=xrp_jpy&days=30")
+        assert resp.status_code == 200
+        summary = resp.json()["summary"]
+        assert summary["closed_positions"] == 4  # box 2 + trend 2
+        assert summary["wins"] == 3
+        assert summary["losses"] == 1
 
     @pytest.mark.asyncio
     async def test_total_pnl_includes_trend(self, setup):
-        """total_pnl_jpy가 박스+추세 모두 반영."""
+        """box-history summary에서 total_pnl_jpy가 박스+추세 합산."""
         client, factory = setup
         await _seed_positions(factory)
 
-        resp = await client.get("/api/analysis/trade-stats?pair=xrp_jpy&period=all")
-        stats = resp.json()["stats"]
+        resp = await client.get("/api/analysis/box-history?pair=xrp_jpy&days=30")
+        summary = resp.json()["summary"]
         # box: 1800 + (-300) = 1500, trend: 5000 + 2250 = 7250 → total = 8750
-        assert stats["total_pnl_jpy"] == 8750.0
+        assert summary["total_pnl_jpy"] == 8750.0
 
     @pytest.mark.asyncio
     async def test_exit_reason_distribution(self, setup):
-        """청산 사유 분포에 trend 관련 사유 포함."""
+        """box-history에서 trend 청산 사유 포함."""
         client, factory = setup
         await _seed_positions(factory)
 
-        resp = await client.get("/api/analysis/trade-stats?pair=xrp_jpy&period=all")
-        reasons = resp.json()["stats"]["exit_reason_distribution"]
-        assert "trailing_stop" in reasons
-        assert "ema_breakdown" in reasons
-        assert "near_upper_exit" in reasons
-        assert "stop_loss" in reasons
+        resp = await client.get("/api/analysis/box-history?pair=xrp_jpy&days=30")
+        reasons = resp.json()["summary"]["exit_reason_distribution"]
+        assert "trend:trailing_stop" in reasons
+        assert "trend:ema_breakdown" in reasons
 
 
 class TestBoxHistory:
@@ -355,13 +343,14 @@ class TestBoxHistory:
 
 
 class TestInvalidPeriod:
-    """잘못된 period 파라미터."""
+    """잘못된 days 파라미터 검증."""
 
     @pytest.mark.asyncio
-    async def test_invalid_period_400(self, setup):
+    async def test_invalid_days_422(self, setup):
+        """days에 음수/문자열 → 422 Validation Error."""
         client, _ = setup
-        resp = await client.get("/api/analysis/trade-stats?pair=xrp_jpy&period=yearly")
-        assert resp.status_code == 400
+        resp = await client.get("/api/analysis/trade-stats?pair=xrp_jpy&days=-1")
+        assert resp.status_code == 422
 
 
 async def _seed_with_unknown_pnl(factory: async_sessionmaker):
@@ -427,30 +416,30 @@ async def _seed_with_unknown_pnl(factory: async_sessionmaker):
 
 
 class TestUnknownPnl:
-    """PnL null 포지션이 unknown으로 분류되는 검증."""
+    """PnL null 포지션이 box-history에서 unknown 분류 검증."""
 
     @pytest.mark.asyncio
     async def test_trade_stats_unknown(self, setup):
-        """PnL null → unknown 카운트, win_rate는 valid 기준."""
+        """PnL null → box-history unknown 카운트."""
         client, factory = setup
         await _seed_with_unknown_pnl(factory)
 
-        resp = await client.get("/api/analysis/trade-stats?pair=xrp_jpy&period=all")
-        stats = resp.json()["stats"]
+        resp = await client.get("/api/analysis/box-history?pair=xrp_jpy&days=30")
+        assert resp.status_code == 200
+        summary = resp.json()["summary"]
+        # box 1 (PnL 있음) + trend 1 (PnL null) = 2 포지션
+        assert summary["closed_positions"] == 2
+        assert summary["valid_trades"] == 1
+        assert summary["wins"] == 1
+        assert summary["unknown"] == 1
+        assert summary["win_rate"] == 100.0  # 1/1 * 100
 
-        assert stats["total_trades"] == 2  # box 1 + trend 1
-        assert stats["valid_trades"] == 1  # box 1만 PnL 있음
-        assert stats["wins"] == 1
-        assert stats["losses"] == 0
-        assert stats["unknown"] == 1
-        assert stats["win_rate"] == 100.0  # 1/1 * 100
-
-        # by_strategy
-        trend_stats = stats["by_strategy"]["trend_following"]
-        assert trend_stats["trades"] == 1
-        assert trend_stats["valid_trades"] == 0
-        assert trend_stats["unknown"] == 1
-        assert trend_stats["win_rate"] == 0.0
+        # trend_positions 별도 집계
+        trend = resp.json()["trend_positions"]
+        assert trend["total"] == 1
+        assert trend["valid_trades"] == 0
+        assert trend["unknown"] == 1
+        assert trend["win_rate"] is None
 
     @pytest.mark.asyncio
     async def test_box_history_unknown(self, setup):

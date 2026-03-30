@@ -247,10 +247,11 @@ async def lifespan(app: FastAPI):
         for strategy in active_strategies:
             params = strategy.parameters or {}
             # CK: "pair" 키 (소문자 "xrp_jpy"), BF: "product_code" 키 (대문자 "BTC_JPY")
-            # DB 쿼리에서 캔들 필터링 시 원본 case를 유지해야 함
+            # DB 캔들 pair 컬럼과 대소문자가 일치해야 한다
             pair = params.get("pair") or params.get("product_code") or None
             if not pair:
                 continue
+            pair = state.normalize_pair(pair)
             style = params.get("trading_style")
             if style == "box_mean_reversion":
                 await box_manager.start(pair, params)

@@ -61,6 +61,7 @@ async def fake_adapter():
         initial_balances={"jpy": 1_000_000.0, "btc": 0.0},
         ticker_price=15_000_000.0,
     )
+    adapter.set_margin_trading(True)  # CFD는 증거금 거래
     await adapter.connect()
     yield adapter
     await adapter.close()

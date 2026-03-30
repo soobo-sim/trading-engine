@@ -248,3 +248,57 @@ def test_gmo_no_error_on_success(gmo_adapter: GmoFxAdapter) -> None:
     data = {"status": 0, "data": []}
     # 예외 없이 통과
     gmo_adapter._raise_for_exchange_error(mock_response, data)
+
+
+# ──────────────────────────────────────────────────────────────
+# GmoFxAdapter — get_balance 파싱
+# ──────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_gmo_get_balance_list_response(gmo_adapter: GmoFxAdapter) -> None:
+    """data가 리스트(문서 표준)일 때 정상 파싱."""
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "status": 0,
+        "data": [{"equity": "500000", "availableAmount": "300000"}],
+    }
+    mock_client = AsyncMock()
+    mock_client.get = AsyncMock(return_value=mock_resp)
+    gmo_adapter._client = mock_client
+
+    balance = await gmo_adapter.get_balance()
+    assert balance.get_available("jpy") == 300000.0
+    assert balance.currencies["jpy"].amount == 500000.0
+
+
+@pytest.mark.asyncio
+async def test_gmo_get_balance_dict_response(gmo_adapter: GmoFxAdapter) -> None:
+    """data가 딕셔너리(주말 휴장 등 실제 관찰 케이스)일 때 정상 파싱."""
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "status": 0,
+        "data": {"equity": "120000", "availableAmount": "80000"},
+    }
+    mock_client = AsyncMock()
+    mock_client.get = AsyncMock(return_value=mock_resp)
+    gmo_adapter._client = mock_client
+
+    balance = await gmo_adapter.get_balance()
+    assert balance.get_available("jpy") == 80000.0
+    assert balance.currencies["jpy"].amount == 120000.0
+
+
+@pytest.mark.asyncio
+async def test_gmo_get_balance_empty_response(gmo_adapter: GmoFxAdapter) -> None:
+    """data가 빈 리스트일 때 0원 반환."""
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {"status": 0, "data": []}
+    mock_client = AsyncMock()
+    mock_client.get = AsyncMock(return_value=mock_resp)
+    gmo_adapter._client = mock_client
+
+    balance = await gmo_adapter.get_balance()
+    assert balance.get_available("jpy") == 0.0

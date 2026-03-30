@@ -22,6 +22,7 @@ import os
 from datetime import datetime, timezone
 from typing import Any, Callable, Coroutine, Optional
 from urllib.parse import urlencode
+from zoneinfo import ZoneInfo
 
 import httpx
 import websockets
@@ -54,6 +55,11 @@ logger = logging.getLogger(__name__)
 
 # POST 1회/초 제한 준수용
 _POST_INTERVAL = 1.1  # 초
+
+# GMO FX API 트라이얼: 2026-04-30 05:59 JST까지 수수료 0%
+_JST = ZoneInfo("Asia/Tokyo")
+GMOFX_TRIAL_EXPIRY = datetime(2026, 4, 30, 5, 59, 0, tzinfo=_JST)
+GMOFX_POST_TRIAL_FEE_PCT = 0.04  # 트라이얼 후 수수료 (편도 %)
 
 
 class GmoFxAdapter:
@@ -101,6 +107,19 @@ class GmoFxAdapter:
                 "leverage_max": 25,
             },
         )
+
+    @property
+    def is_margin_trading(self) -> bool:
+        """증거금 거래 여부. GMO FX는 항상 True."""
+        return True
+
+    @property
+    def fee_rate_pct(self) -> float:
+        """현재 적용 수수료 (편도 %). 트라이얼 기간이면 0."""
+        now = datetime.now(_JST)
+        if now < GMOFX_TRIAL_EXPIRY:
+            return 0.0
+        return GMOFX_POST_TRIAL_FEE_PCT
 
     # ── 연결 관리 ───────────────────────────────────────────────
 
@@ -446,8 +465,14 @@ class GmoFxAdapter:
         except httpx.HTTPError as e:
             raise ConnectionError(f"GMO FX HTTP 오류: {e}") from e
 
-        assets = data.get("data", [{}])
-        asset = assets[0] if assets else {}
+        raw = data.get("data", [{}])
+        # API 문서상 list 반환이지만, dict로 오는 경우(주말 휴장 등) 방어
+        if isinstance(raw, dict):
+            asset = raw
+        elif isinstance(raw, list):
+            asset = raw[0] if raw else {}
+        else:
+            asset = {}
         equity = float(asset.get("equity", 0))
         available = float(asset.get("availableAmount", 0))
 
@@ -567,6 +592,8 @@ class GmoFxAdapter:
                 except (ValueError, AttributeError):
                     pass
 
+            raw_pid = item.get("positionId")
+            pid = int(raw_pid) if raw_pid is not None else None
             positions.append(FxPosition(
                 product_code=item.get("symbol", symbol),
                 side=item.get("side", "BUY"),
@@ -578,6 +605,7 @@ class GmoFxAdapter:
                 swap_point_accumulate=float(item.get("totalSwap", 0)),
                 sfd=0,
                 open_date=open_date,
+                position_id=pid,
             ))
         return positions
 

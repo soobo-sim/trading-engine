@@ -118,3 +118,55 @@ def detect_box(
         lower_touch_count=lower_count,
         width_pct=round(width_pct, 4),
     )
+
+
+# ──────────────────────────────────────────
+# Formation progress (partial detection)
+# ──────────────────────────────────────────
+
+@dataclass
+class BoxFormationProgress:
+    """박스 미형성 시 진행 상황."""
+    upper_touches: int
+    lower_touches: int
+    min_touches: int
+    upper_center: Optional[float] = None
+    lower_center: Optional[float] = None
+    candles_remaining: int = 0  # 최소 필요 캔들 수 추정
+
+
+def detect_box_progress(
+    highs: list[float],
+    lows: list[float],
+    tolerance_pct: float = 0.5,
+    min_touches: int = 3,
+) -> BoxFormationProgress:
+    """
+    박스 형성 진행 상황 계산. min_touches=1로 클러스터를 찾아
+    현재 터치 카운트를 반환한다.
+    """
+    if not highs or not lows:
+        return BoxFormationProgress(
+            upper_touches=0, lower_touches=0, min_touches=min_touches,
+        )
+
+    # min_touches=1로 raw 클러스터 추출
+    upper_center, upper_count = find_cluster(highs, tolerance_pct, 1, mode="high")
+    lower_center, lower_count = find_cluster(lows, tolerance_pct, 1, mode="low")
+
+    upper_count = upper_count if upper_center else 0
+    lower_count = lower_count if lower_center else 0
+
+    # 남은 캔들 추정: 양쪽 모두 min_touches 이상이어야 형성
+    upper_needed = max(min_touches - upper_count, 0)
+    lower_needed = max(min_touches - lower_count, 0)
+    candles_remaining = max(upper_needed, lower_needed)
+
+    return BoxFormationProgress(
+        upper_touches=upper_count,
+        lower_touches=lower_count,
+        min_touches=min_touches,
+        upper_center=round(upper_center, 6) if upper_center else None,
+        lower_center=round(lower_center, 6) if lower_center else None,
+        candles_remaining=candles_remaining,
+    )

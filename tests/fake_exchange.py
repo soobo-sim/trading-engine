@@ -40,6 +40,7 @@ class FakeExchangeAdapter:
         self._exchange_name = exchange_name
         self._ticker_price = ticker_price
         self._ws_connected = False
+        self._is_margin_trading = False
 
         # 잔고 초기화
         balances = initial_balances or {"jpy": 1_000_000.0, "xrp": 0.0, "btc": 0.0}
@@ -67,6 +68,11 @@ class FakeExchangeAdapter:
     @property
     def exchange_name(self) -> str:
         return self._exchange_name
+
+    @property
+    def is_margin_trading(self) -> bool:
+        """테스트용: 기본 현물. set_margin_trading()으로 변경 가능."""
+        return self._is_margin_trading
 
     @property
     def constraints(self) -> ExchangeConstraints:
@@ -97,9 +103,8 @@ class FakeExchangeAdapter:
         else:
             base, quote = parts[0].lower(), parts[1].lower()  # 현물: xrp_jpy → xrp, jpy
 
-        # MARKET_BUY: amount = JPY 금액 → 코인 수량 변환 (현물만. CFD는 코인 수량 직접)
-        is_fx = pair.upper().startswith("FX_")
-        if order_type == OrderType.MARKET_BUY and not is_fx:
+        # MARKET_BUY: amount = JPY 금액 → 코인 수량 변환 (현물만. FX/CFD는 코인 수량 직접)
+        if order_type == OrderType.MARKET_BUY and not self._is_margin_trading:
             jpy_amount = amount
             coin_amount = jpy_amount / exec_price
             self._balances[quote] = self._balances.get(quote, 0.0) - jpy_amount
@@ -231,3 +236,32 @@ class FakeExchangeAdapter:
     def set_fx_positions(self, positions: list[FxPosition]) -> None:
         """테스트에서 FX 포지션 직접 설정."""
         self._fx_positions = positions
+
+    def set_margin_trading(self, enabled: bool) -> None:
+        """테스트에서 증거금 거래 모드 전환."""
+        self._is_margin_trading = enabled
+
+    async def close_position(
+        self, symbol: str, side: str, position_id: int, size: int,
+        execution_type: str = "MARKET",
+    ) -> Order:
+        """FX 건옥 결제 시뮬레이션."""
+        self._order_counter += 1
+        order_id = f"FAKE-CLOSE-{self._order_counter:06d}"
+
+        # 시뮬레이션: 해당 포지션 제거
+        self._fx_positions = [
+            p for p in self._fx_positions
+            if not (getattr(p, "position_id", None) == position_id)
+        ]
+
+        return Order(
+            order_id=order_id,
+            pair=symbol.lower(),
+            order_type=OrderType.SELL if side.upper() == "SELL" else OrderType.BUY,
+            side=OrderSide.SELL if side.upper() == "SELL" else OrderSide.BUY,
+            price=self._ticker_price,
+            amount=float(size),
+            status=OrderStatus.COMPLETED,
+            created_at=datetime.now(timezone.utc),
+        )

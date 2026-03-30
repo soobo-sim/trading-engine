@@ -156,3 +156,51 @@ def test_bt07_deterministic():
     r2 = run_backtest(candles, params, config, "box_mean_reversion")
     assert r1.total_trades == r2.total_trades
     assert r1.total_pnl_jpy == r2.total_pnl_jpy
+
+
+# ── BT-08: box_tolerance_pct 신 키명이 엔진에서 인식됨 (BUG-021 회귀) ──
+
+def test_bt08_new_key_box_tolerance_pct_recognized():
+    """BUG-021 원인 2 회귀: box_tolerance_pct 키로 전달해도 파라미터가 반영됨.
+
+    버그 상태에서는 box_tolerance_pct 키를 무시하고 기본값 0.3 으로 처리했기 때문에
+    tight(0.2)과 loose(0.8) 결과가 동일했음.
+    """
+    candles = _box_candles(n=200)
+    config = BacktestConfig()
+
+    r_tight = run_backtest(candles, {"box_tolerance_pct": 0.2}, config, "box_mean_reversion")
+    r_loose = run_backtest(candles, {"box_tolerance_pct": 0.8}, config, "box_mean_reversion")
+
+    # 버그가 재발하면 두 값이 동일해짐 (기본값 0.3으로 처리)
+    assert r_tight.total_trades != r_loose.total_trades, (
+        "box_tolerance_pct 키가 무시되고 있음 — BUG-021 재발"
+    )
+
+
+# ── BT-09: box_tolerance_pct 신 키명으로 그리드서치 다양성 확인 (BUG-021 회귀) ──
+
+def test_bt09_grid_search_new_key_names_vary():
+    """BUG-021 원인 2 회귀 (그리드서치 경로): box_tolerance_pct 를 param_grid 키로
+    사용해도 조합별 결과가 달라짐.
+
+    버그 상태에서는 모든 조합이 동일 total_trades 를 반환했음.
+    """
+    candles = _box_candles(n=200)
+    config = BacktestConfig()
+    param_grid = {
+        "box_tolerance_pct": [0.2, 0.5, 0.9],
+        "box_min_touches": [2, 4],
+    }
+
+    result = run_grid_search(
+        candles, {}, param_grid, config, top_n=10,
+        strategy_type="box_mean_reversion",
+    )
+
+    assert result.total_combinations == 6
+    trade_counts = [r["total_trades"] for r in result.results]
+    unique_counts = set(trade_counts)
+    assert len(unique_counts) > 1, (
+        f"모든 조합이 동일한 trade_count({unique_counts}) — box_tolerance_pct/box_min_touches 키가 무시되고 있음"
+    )

@@ -21,13 +21,19 @@ logger = logging.getLogger(__name__)
 class SafetyChecksMixin:
     """SF-01 ~ SF-10 안전장치 체크 + Telegram 직접 경고."""
 
+    # 포지션 type별 태스크명 매핑
+    _TASK_MAP = {
+        "trend": {"sf01": "trend_stoploss", "sf02": "trend_candle"},
+        "box":   {"sf01": "box_entry",      "sf02": "box_monitor"},
+    }
+
     def _check_sf01_sf02(
         self,
         task_health: dict[str, dict],
         positions: list[dict],
         has_positions: bool,
     ) -> list["SafetyCheck"]:
-        """SF-01: 스탑로스 태스크, SF-02: 캔들 모니터 태스크."""
+        """SF-01: 스탑로스/진입 감시 태스크, SF-02: 캔들/박스 모니터 태스크."""
         from .health import SafetyCheck
 
         checks: list[SafetyCheck] = []
@@ -43,31 +49,36 @@ class SafetyChecksMixin:
             ))
             return checks
 
-        pairs_seen: set[str] = set()
+        # pair+type 조합별로 체크 (같은 pair에 trend/box 동시 가능)
+        seen: set[tuple[str, str]] = set()
         for pos in positions:
             pair = pos["pair"]
-            if pair in pairs_seen:
+            pos_type = pos.get("type", "trend")
+            key = (pair, pos_type)
+            if key in seen:
                 continue
-            pairs_seen.add(pair)
+            seen.add(key)
 
-            # SF-01: trend_stoploss:{pair}
-            sl_task_name = f"trend_stoploss:{pair}"
-            sl_info = task_health.get(sl_task_name)
-            if sl_info is None:
+            task_names = self._TASK_MAP.get(pos_type, self._TASK_MAP["trend"])
+
+            # SF-01
+            sf01_task = f"{task_names['sf01']}:{pair}"
+            sf01_info = task_health.get(sf01_task)
+            if sf01_info is None:
                 checks.append(SafetyCheck(
                     id="SF-01", name="스탑로스 감시", status="critical",
-                    severity="critical", detail=f"{sl_task_name} 미등록", pair=pair,
+                    severity="critical", detail=f"{sf01_task} 미등록", pair=pair,
                 ))
-            elif not sl_info.get("alive", False):
-                restarts = sl_info.get("restarts", 0)
+            elif not sf01_info.get("alive", False):
+                restarts = sf01_info.get("restarts", 0)
                 checks.append(SafetyCheck(
                     id="SF-01", name="스탑로스 감시", status="critical",
                     severity="critical",
-                    detail=f"{sl_task_name} 죽음, restarts={restarts}",
+                    detail=f"{sf01_task} 죽음, restarts={restarts}",
                     pair=pair,
                 ))
             else:
-                restarts = sl_info.get("restarts", 0)
+                restarts = sf01_info.get("restarts", 0)
                 checks.append(SafetyCheck(
                     id="SF-01", name="스탑로스 감시", status="ok",
                     severity="critical",
@@ -75,24 +86,24 @@ class SafetyChecksMixin:
                     pair=pair,
                 ))
 
-            # SF-02: trend_candle:{pair}
-            candle_task_name = f"trend_candle:{pair}"
-            candle_info = task_health.get(candle_task_name)
-            if candle_info is None:
+            # SF-02
+            sf02_task = f"{task_names['sf02']}:{pair}"
+            sf02_info = task_health.get(sf02_task)
+            if sf02_info is None:
                 checks.append(SafetyCheck(
                     id="SF-02", name="캔들 모니터", status="critical",
-                    severity="critical", detail=f"{candle_task_name} 미등록", pair=pair,
+                    severity="critical", detail=f"{sf02_task} 미등록", pair=pair,
                 ))
-            elif not candle_info.get("alive", False):
-                restarts = candle_info.get("restarts", 0)
+            elif not sf02_info.get("alive", False):
+                restarts = sf02_info.get("restarts", 0)
                 checks.append(SafetyCheck(
                     id="SF-02", name="캔들 모니터", status="critical",
                     severity="critical",
-                    detail=f"{candle_task_name} 죽음, restarts={restarts}",
+                    detail=f"{sf02_task} 죽음, restarts={restarts}",
                     pair=pair,
                 ))
             else:
-                restarts = candle_info.get("restarts", 0)
+                restarts = sf02_info.get("restarts", 0)
                 checks.append(SafetyCheck(
                     id="SF-02", name="캔들 모니터", status="ok",
                     severity="critical",
@@ -103,8 +114,16 @@ class SafetyChecksMixin:
         return checks
 
     def _check_sf03(self, ws_connected: bool) -> "SafetyCheck":
-        """SF-03: WebSocket 연결."""
+        """SF-03: WebSocket 연결. API 키 미설정 시 스킵."""
         from .health import SafetyCheck
+
+        # API 키 미설정 시 스킵
+        if hasattr(self._adapter, "has_credentials") and not self._adapter.has_credentials():
+            return SafetyCheck(
+                id="SF-03", name="WebSocket", status="n/a",
+                severity="critical",
+                detail="API key not configured — skip",
+            )
 
         if ws_connected:
             return SafetyCheck(
@@ -369,8 +388,23 @@ class SafetyChecksMixin:
     _telegram_alert_cooldown: dict[str, float] = {}
     TELEGRAM_ALERT_COOLDOWN_SEC = 900  # 15분
 
+    # 거래소 표시명 매핑
+    _EXCHANGE_DISPLAY = {"BITFLYER": "BF", "GMOFX": "GMO FX"}
+
+    def _get_exchange_display_name(self) -> str:
+        """EXCHANGE 환경변수 → 표시명."""
+        raw = os.getenv("EXCHANGE", "unknown").upper()
+        return self._EXCHANGE_DISPLAY.get(raw, raw)
+
     async def _send_safety_telegram_alert(self, checks: list["SafetyCheck"]) -> None:
-        """안전장치 critical 시 서버가 직접 Telegram으로 경고 전송."""
+        """안전장치 critical/warning 시 서버가 직접 Telegram으로 경고 전송.
+
+        개선사항:
+        - 거래소명 + 장애 건수 표시
+        - severity별 이모지 분리 (🔴 critical, ⚠️ warning)
+        - 항목별 페어 + 상세 원인
+        - 조치 힌트 제공
+        """
         bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
         chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
         if not bot_token or not chat_id:
@@ -383,15 +417,37 @@ class SafetyChecksMixin:
             logger.info(f"[Safety] Telegram 경고 쿨다운 중 ({int(now - last_sent)}s ago)")
             return
 
+        # critical + warning 분리 (n/a, ok 제외)
         critical_checks = [c for c in checks if c.status == "critical"]
-        if not critical_checks:
+        warning_checks = [c for c in checks if c.status == "warning"]
+
+        if not critical_checks and not warning_checks:
             return
 
-        lines = ["🔴🔴🔴 [시스템 경고] 안전장치 장애!"]
+        exchange = self._get_exchange_display_name()
+        total_issues = len(critical_checks) + len(warning_checks)
+
+        # 헤더: severity에 따라 이모지 결정
+        if critical_checks:
+            header = f"🔴 [{exchange}] 안전장치 경고 ({total_issues}건)"
+        else:
+            header = f"⚠️ [{exchange}] 안전장치 주의 ({total_issues}건)"
+
+        lines = [header, ""]
+
         for c in critical_checks:
             pair_str = f" ({c.pair})" if c.pair else ""
-            lines.append(f"{c.id} {c.name}{pair_str} — {c.detail}")
-        lines.append("즉시 확인 필요!")
+            lines.append(f"🔴 {c.id} {c.name}{pair_str} — {c.detail}")
+
+        for c in warning_checks:
+            pair_str = f" ({c.pair})" if c.pair else ""
+            lines.append(f"⚠️ {c.id} {c.name}{pair_str} — {c.detail}")
+
+        # 조치 힌트
+        hints = self._build_action_hints(critical_checks + warning_checks)
+        if hints:
+            lines.append("")
+            lines.append(f"💡 조치: {'; '.join(hints)}")
 
         text = "\n".join(lines)
 
@@ -410,3 +466,22 @@ class SafetyChecksMixin:
                     logger.error(f"[Safety] Telegram 전송 실패: {resp.status_code} {resp.text}")
         except Exception as e:
             logger.error(f"[Safety] Telegram 전송 오류: {e}")
+
+    @staticmethod
+    def _build_action_hints(failed_checks: list["SafetyCheck"]) -> list[str]:
+        """실패한 체크 목록 → 조치 힌트 문자열 목록."""
+        hints: list[str] = []
+        ids = {c.id for c in failed_checks}
+
+        if "SF-01" in ids or "SF-02" in ids:
+            hints.append("태스크 재시작 또는 컨테이너 재기동 필요")
+        if "SF-03" in ids:
+            hints.append("WebSocket 연결 확인 (네트워크/API 키)")
+        if "SF-04" in ids or "SF-09" in ids:
+            hints.append("스탑로스 가격 즉시 설정 필요")
+        if "SF-06" in ids:
+            hints.append("거래소 API 상태 확인")
+        if "SF-07" in ids:
+            hints.append("잔고-포지션 불일치 확인")
+
+        return hints

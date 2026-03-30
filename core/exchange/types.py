@@ -162,17 +162,18 @@ class Collateral:
 
 @dataclass(frozen=True)
 class FxPosition:
-    """BitFlyer FX 건옥 (getpositions 응답 1건)."""
+    """FX/CFD 건옥 (getpositions 응답 1건)."""
     product_code: str
     side: str                       # "BUY" or "SELL"
     price: float                    # 건값 (진입가)
-    size: float                     # 수량 (BTC)
+    size: float                     # 수량 (BTC or 통화수량)
     pnl: float                      # 평가 P&L (JPY)
     leverage: float
     require_collateral: float
     swap_point_accumulate: float
     sfd: float
     open_date: Optional[datetime] = None
+    position_id: Optional[int] = None   # GMO FX positionId (closeOrder에 필수)
 
 
 # ──────────────────────────────────────────

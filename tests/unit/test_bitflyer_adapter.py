@@ -145,9 +145,9 @@ async def test_place_order_market_buy_converts_jpy_to_coin(adapter: BitFlyerAdap
     assert sent_body["size"] == 100.0  # JPY → coin 변환됨
     assert "price" not in sent_body
 
-    # Order DTO에는 원래 JPY 금액이 유지됨
+    # BUG-016: MARKET_BUY는 코인 수량(actual_amount)을 반환한다.
     assert order.order_type == OrderType.MARKET_BUY
-    assert order.amount == 10000.0
+    assert order.amount == 100.0  # 10000 JPY / 100 ltp = 100 XRP
     await adapter.close()
 
 

@@ -396,6 +396,7 @@ def create_box_position_model(prefix: str, pair_column: str = "pair", order_id_l
         "entry_price": Column(Numeric(18, 8), nullable=False),
         "entry_amount": Column(Numeric(18, 8), nullable=False),
         "entry_jpy": Column(Numeric(18, 2), nullable=True),
+        "exchange_position_id": Column(String(40), nullable=True),  # GMO FX positionId (closeOrder용)
         "exit_order_id": Column(String(order_id_length), nullable=True),
         "exit_price": Column(Numeric(18, 8), nullable=True),
         "exit_amount": Column(Numeric(18, 8), nullable=True),

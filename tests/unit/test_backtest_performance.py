@@ -18,10 +18,14 @@ from core.backtest.engine import (
     _generate_combinations,
 )
 from api.routes.performance import (
-    _compute_metrics,
+    BacktestRequest,
+    GridSearchRequest,
+)
+from api.services.performance_service import (
+    compute_metrics as _compute_metrics,
+    empty_metrics as _empty_metrics,
     _compute_max_drawdown,
     _compute_monthly,
-    _empty_metrics,
 )
 
 
@@ -92,6 +96,26 @@ def _make_sideways_candles(n: int = 60, center: float = 100.0) -> list:
             open=price - 0.2,
             high=price + 0.5,
             low=price - 0.5,
+            close=price,
+            volume=100.0,
+            open_time=t + timedelta(hours=4 * i),
+        ))
+    return candles
+
+
+def _make_box_candles(n: int = 200, upper: float = 110.0, lower: float = 90.0) -> list:
+    """박스권을 오가는 캔들 생성 (박스 역추세 테스트용)."""
+    import math
+    candles = []
+    t = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    oscillations = 6
+    for i in range(n):
+        ratio = math.sin(i / n * oscillations * math.pi) * 0.5 + 0.5
+        price = lower + (upper - lower) * ratio
+        candles.append(FakeCandle(
+            open=price,
+            high=price * 1.002,
+            low=price * 0.998,
             close=price,
             volume=100.0,
             open_time=t + timedelta(hours=4 * i),
@@ -363,6 +387,27 @@ class TestRunGridSearch:
         result = run_grid_search(candles, self._default_params(), {})
         assert result.total_combinations == 1
 
+    def test_grid_search_box_mean_reversion(self):
+        """BUG-021 원인 1+2 회귀: strategy_type='box_mean_reversion' + box_tolerance_pct 신 키명.
+
+        버그 상태에서는:
+        1. strategy_type 파라미터가 무시되어 trend_following 으로 실행됨 (원인 1)
+        2. box_tolerance_pct 키가 무시되어 모든 조합이 동일 결과 (원인 2)
+        """
+        candles = _make_box_candles(200)
+        grid = {"box_tolerance_pct": [0.2, 0.5, 0.9]}
+        result = run_grid_search(
+            candles, {}, grid, top_n=10,
+            strategy_type="box_mean_reversion",
+        )
+        assert result.total_combinations == 3
+        trade_counts = [r["total_trades"] for r in result.results]
+        unique_counts = set(trade_counts)
+        assert len(unique_counts) > 1, (
+            f"모든 조합이 동일 trade_count({unique_counts}) — "
+            "strategy_type 또는 box_tolerance_pct 키가 무시되고 있음"
+        )
+
 
 # ── 성과 메트릭 계산 (performance.py) ───────────────────────
 
@@ -501,3 +546,30 @@ class TestEmptyMetrics:
         assert result["total_trades"] == 0
         assert result["monthly"] == []
         assert result["sharpe_ratio"] is None
+
+
+class TestAPISchema:
+    """BacktestRequest / GridSearchRequest 스키마 필드명 회귀 (BUG-021 원인 1)."""
+
+    def test_backtest_request_uses_trading_style_field(self):
+        """BUG-021 회귀: 필드명이 trading_style 임을 명시적으로 검증.
+
+        strategy_type 으로 보내면 Pydantic 이 무시하여 기본값(trend_following)이 적용됨.
+        """
+        req = BacktestRequest(pair="usd_jpy", params={}, trading_style="box_mean_reversion")
+        assert req.trading_style == "box_mean_reversion"
+
+    def test_backtest_request_wrong_key_ignored(self):
+        """strategy_type 으로 보내면 무시되어 기본값 trend_following 적용."""
+        req = BacktestRequest(pair="usd_jpy", params={}, **{"strategy_type": "box_mean_reversion"})
+        assert req.trading_style == "trend_following"  # 기본값
+
+    def test_grid_request_uses_trading_style_field(self):
+        """GridSearchRequest 도 동일하게 trading_style 필드 사용."""
+        req = GridSearchRequest(pair="usd_jpy", base_params={}, param_grid={}, trading_style="box_mean_reversion")
+        assert req.trading_style == "box_mean_reversion"
+
+    def test_grid_request_wrong_key_ignored(self):
+        """strategy_type 으로 보내면 무시되어 기본값 trend_following 적용."""
+        req = GridSearchRequest(pair="usd_jpy", base_params={}, param_grid={}, **{"strategy_type": "box_mean_reversion"})
+        assert req.trading_style == "trend_following"  # 기본값

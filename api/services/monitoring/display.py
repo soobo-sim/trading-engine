@@ -89,11 +89,12 @@ def get_entry_blockers(
     rsi: Optional[float],
     rsi_min: float = 40.0,
     rsi_max: float = 65.0,
+    slope_min: float = 0.0,
 ) -> List[str]:
     """진입까지 남은 조건 목록. 비어있으면 진입 가능."""
     blockers: List[str] = []
-    if ema_slope_pct is not None and ema_slope_pct < 0:
-        blockers.append(f"EMA slope {ema_slope_pct:+.2f}% → 양수 전환 필요")
+    if ema_slope_pct is not None and ema_slope_pct < slope_min:
+        blockers.append(f"EMA slope {ema_slope_pct:+.2f}% → ≥{slope_min:+.2f}% 필요")
     if ema is not None and current_price < ema:
         gap_pct = (ema - current_price) / ema * 100
         blockers.append(f"가격 < EMA20 (¥{current_price:,.0f} vs ¥{ema:,.0f}, 갭 {gap_pct:.1f}%)")
@@ -101,4 +102,6 @@ def get_entry_blockers(
         blockers.append(f"RSI {rsi:.1f} → {rsi_min:.0f} 이상 필요 (breakdown)")
     if rsi is not None and rsi > rsi_max:
         blockers.append(f"RSI {rsi:.1f} → {rsi_max:.0f} 이하 필요 (과열)")
+    if signal == "wait_regime":
+        blockers.append("횡보 레짐 (BB폭 협소) → 추세 형성 대기")
     return blockers

@@ -158,7 +158,7 @@ class TestGetEntryBlockers:
             rsi=25.0,
         )
         assert len(blockers) == 3
-        assert any("양수 전환" in b for b in blockers)
+        assert any("slope" in b.lower() for b in blockers)
         assert any("갭" in b for b in blockers)
         assert any("breakdown" in b for b in blockers)
 
@@ -193,6 +193,122 @@ class TestGetEntryBlockers:
         )
         assert blockers == []
 
+    def test_wait_regime_is_blocked(self):
+        """wait_regime 시그널이면 횡보 레짐 blocker가 추가되어야 한다."""
+        blockers = get_entry_blockers(
+            signal="wait_regime",
+            current_price=105.0,
+            ema=100.0,
+            ema_slope_pct=0.15,
+            rsi=50.0,
+        )
+        assert len(blockers) == 1
+        assert "횡보 레짐" in blockers[0]
+        assert "BB폭" in blockers[0]
+
+    def test_entry_ok_signal_no_regime_blocker(self):
+        """entry_ok 시그널이면 레짐 blocker 없어야 한다."""
+        blockers = get_entry_blockers(
+            signal="entry_ok",
+            current_price=105.0,
+            ema=100.0,
+            ema_slope_pct=0.15,
+            rsi=50.0,
+        )
+        assert not any("레짐" in b for b in blockers)
+
+    def test_custom_rsi_min_honored(self):
+        """전략별 RSI 하한(entry_rsi_min=45)이 반영되어야 한다."""
+        blockers = get_entry_blockers(
+            signal="entry_ok",
+            current_price=105.0,
+            ema=100.0,
+            ema_slope_pct=0.15,
+            rsi=43.0,
+            rsi_min=45.0,
+        )
+        assert len(blockers) == 1
+        assert "43.0" in blockers[0]
+        assert "45" in blockers[0]
+
+    def test_custom_rsi_max_honored(self):
+        """GMO FX 전략 RSI 상한(entry_rsi_max=60)이 반영되어야 한다."""
+        blockers = get_entry_blockers(
+            signal="wait_dip",
+            current_price=105.0,
+            ema=100.0,
+            ema_slope_pct=0.15,
+            rsi=62.0,
+            rsi_max=60.0,
+        )
+        assert len(blockers) == 1
+        assert "62.0" in blockers[0]
+        assert "60" in blockers[0]
+        assert "과열" in blockers[0]
+
+    def test_default_rsi_65_no_block_at_63(self):
+        """기본 rsi_max=65일 때 RSI 63은 block 없음."""
+        blockers = get_entry_blockers(
+            signal="entry_ok",
+            current_price=105.0,
+            ema=100.0,
+            ema_slope_pct=0.15,
+            rsi=63.0,
+        )
+        assert blockers == []
+
+    def test_custom_rsi_max_60_blocks_at_63(self):
+        """rsi_max=60일 때 RSI 63은 block되어야 한다."""
+        blockers = get_entry_blockers(
+            signal="entry_ok",
+            current_price=105.0,
+            ema=100.0,
+            ema_slope_pct=0.15,
+            rsi=63.0,
+            rsi_max=60.0,
+        )
+        assert len(blockers) == 1
+        assert "63.0" in blockers[0]
+
+    def test_wait_regime_combined_with_other_blockers(self):
+        """wait_regime + RSI 과열 두 blocker 동시에."""
+        blockers = get_entry_blockers(
+            signal="wait_regime",
+            current_price=105.0,
+            ema=100.0,
+            ema_slope_pct=0.15,
+            rsi=70.0,
+        )
+        assert len(blockers) == 2
+        assert any("레짐" in b for b in blockers)
+        assert any("과열" in b for b in blockers)
+
+    def test_slope_min_custom(self):
+        """전략별 slope_min이 반영되어야 한다."""
+        blockers = get_entry_blockers(
+            signal="entry_ok",
+            current_price=105.0,
+            ema=100.0,
+            ema_slope_pct=0.05,
+            rsi=50.0,
+            slope_min=0.1,
+        )
+        assert len(blockers) == 1
+        assert "slope" in blockers[0].lower()
+        assert "0.10" in blockers[0]
+
+    def test_slope_min_negative_allowed(self):
+        """slope_min=-0.05일 때 slope -0.03은 통과."""
+        blockers = get_entry_blockers(
+            signal="entry_ok",
+            current_price=105.0,
+            ema=100.0,
+            ema_slope_pct=-0.03,
+            rsi=50.0,
+            slope_min=-0.05,
+        )
+        assert blockers == []
+
 
 # ── 텔레그램 텍스트 조립 테스트 ──────────────────────────
 
@@ -206,14 +322,16 @@ class TestBuildTelegramText:
             "rsi_state": "RSI 과매도(31.5)",
             "volatility_state": "변동성 높음",
             "position": None,
-            "entry_blockers": ["EMA slope -0.14% → 양수 전환 필요"],
+            "entry_blockers": ["EMA slope -0.14% → ≥+0.00% 필요"],
+            "conditions_met": 4,
+            "conditions_total": 5,
             "jpy_available": 19468,
         }
         text = build_telegram_text("CK", "21:01", "xrp_jpy", data)
         assert "[CK] 21:01" in text
         assert "📉추세추종" in text
         assert "🔻 하락" in text
-        assert "🚫" in text
+        assert "🚫 4/5" in text
         assert "대기중" in text
 
     def test_no_position_entry_ready(self):
@@ -226,10 +344,12 @@ class TestBuildTelegramText:
             "volatility_state": "변동성 보통",
             "position": None,
             "entry_blockers": [],
+            "conditions_met": 5,
+            "conditions_total": 5,
             "jpy_available": 50000,
         }
         text = build_telegram_text("CK", "15:00", "xrp_jpy", data)
-        assert "✅ 진입 조건 충족" in text
+        assert "✅ 5/5 진입 조건 충족" in text
 
     def test_with_position(self):
         data = {

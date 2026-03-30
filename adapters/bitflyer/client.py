@@ -74,6 +74,11 @@ class BitFlyerAdapter:
         return "bitflyer"
 
     @property
+    def is_margin_trading(self) -> bool:
+        """증거금 거래 여부. BitFlyer 현물은 False."""
+        return False
+
+    @property
     def constraints(self) -> ExchangeConstraints:
         return ExchangeConstraints(
             min_order_sizes={"xrp": 0.1, "btc": 0.001},

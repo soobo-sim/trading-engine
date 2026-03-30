@@ -278,7 +278,7 @@ class TestFormatSafetySummary:
         r = self._make_report([("WS", "ok"), ("태스크", "ok"), ("사만사", "n/a")], "all_ok")
         s = format_safety_summary(r)
         assert "✅" in s
-        assert "(2/2)" in s  # n/a excluded from denominator
+        assert "(3/3)" in s  # n/a 포함 전체 카운트 (대시보드 UI 일치)
 
     def test_warning_with_na(self):
         from core.monitoring.health import format_safety_summary
@@ -286,7 +286,7 @@ class TestFormatSafetySummary:
         s = format_safety_summary(r)
         assert "🟡" in s
         assert "잔고" in s
-        assert "(1/2)" in s  # 1 ok out of 2 active
+        assert "(2/3)" in s  # n/a 포함 전체 카운트 (대시보드 UI 일치)
 
     def test_critical(self):
         from core.monitoring.health import format_safety_summary

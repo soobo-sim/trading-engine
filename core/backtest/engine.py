@@ -539,7 +539,7 @@ def _run_box_backtest(
       take_profit_pct       (default 1.0)  — 목표 이익 비율 (박스 폭 배수)
       position_size_pct     (default 100)
     """
-    tolerance_pct = float(params.get("tolerance_pct", 0.3))
+    tolerance_pct = float(params.get("box_tolerance_pct", params.get("tolerance_pct", 0.3)))
     min_touches = int(
         params.get("box_min_touches", params.get("min_touches", 3))
     )

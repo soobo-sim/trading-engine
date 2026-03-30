@@ -48,6 +48,8 @@ def build_telegram_text(prefix: str, time_str: str, pair: str, data: dict) -> st
     else:
         lines.append(f"¥{data['current_price']:,.0f} → {data['market_summary']}")
         lines.append(f"{data['ema_state']} {data['rsi_state']} {data['volatility_state']}")
+        met = data.get("conditions_met", 0)
+        total = data.get("conditions_total", 5)
         if data["entry_blockers"]:
             short_parts = []
             for b in data["entry_blockers"]:
@@ -56,9 +58,9 @@ def build_telegram_text(prefix: str, time_str: str, pair: str, data: dict) -> st
                     short_parts.append(f"{parts[0].strip()}→{parts[1].strip()}")
                 else:
                     short_parts.append(b)
-            lines.append(f"🚫 {' | '.join(short_parts)}")
+            lines.append(f"🚫 {met}/{total} | {' | '.join(short_parts)}")
         else:
-            lines.append("✅ 진입 조건 충족")
+            lines.append(f"✅ {met}/{total} 진입 조건 충족")
         lines.append(f"JPY ¥{data['jpy_available']:,.0f} | 대기중")
 
     return "\n".join(lines)
@@ -220,9 +222,15 @@ async def generate_trend_report(
 
     entry_blockers = get_entry_blockers(
         signal, current_price, ema, ema_slope_pct, rsi,
+        rsi_min=float(params.get("entry_rsi_min", 40.0)),
+        rsi_max=float(params.get("entry_rsi_max", 65.0)),
+        slope_min=float(params.get("ema_slope_entry_min", 0.0)),
     ) if not position_data else []
 
     entry_conditions_met = len(entry_blockers) == 0 and not position_data
+    # 5 conditions: price>EMA, slope≥min, RSI range, regime, no_position
+    conditions_total = 5
+    conditions_met = conditions_total - len(entry_blockers) if not position_data else conditions_total
     market_summary = get_market_summary(ema_slope_pct, rsi, signal) if not position_data else None
 
     # 7. 텍스트 조립용 데이터
@@ -237,6 +245,8 @@ async def generate_trend_report(
         "position_summary": position_summary,
         "position": position_data,
         "entry_blockers": entry_blockers,
+        "conditions_met": conditions_met,
+        "conditions_total": conditions_total,
         "jpy_available": jpy_available,
         "coin_available": coin_available,
         "ema20": ema,

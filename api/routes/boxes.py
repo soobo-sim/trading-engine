@@ -23,6 +23,7 @@ async def get_active_box(
     db: AsyncSession = Depends(get_db),
 ):
     """활성 박스 조회."""
+    pair = state.normalize_pair(pair)
     BoxModel = state.models.box
     pair_col = getattr(BoxModel, state.pair_column)
     stmt = (
@@ -46,6 +47,7 @@ async def get_box_history(
     db: AsyncSession = Depends(get_db),
 ):
     """박스 이력 (active + invalidated)."""
+    pair = state.normalize_pair(pair)
     BoxModel = state.models.box
     pair_col = getattr(BoxModel, state.pair_column)
     stmt = (
@@ -66,6 +68,7 @@ async def get_price_position(
     db: AsyncSession = Depends(get_db),
 ):
     """현재가의 박스 내 위치 (near_lower/near_upper/middle/outside/no_box)."""
+    pair = state.normalize_pair(pair)
     ticker = await state.adapter.get_ticker(pair)
     price = ticker.last
 
@@ -80,7 +83,56 @@ async def get_price_position(
     box = result.scalar_one_or_none()
 
     if not box:
-        return {"pair": pair, "price": price, "position": "no_box"}
+        # 박스 미형성 시 형성 진행 상황 계산
+        progress_data = None
+        try:
+            from core.analysis.box_detector import detect_box_progress
+            from sqlalchemy import and_
+
+            # 활성 전략에서 파라미터 가져오기
+            StratModel = state.models.strategy
+            strat_result = await db.execute(
+                select(StratModel).where(StratModel.status == "active")
+            )
+            strat = strat_result.scalar_one_or_none()
+            params = (strat.parameters or {}) if strat else {}
+
+            lookback = int(params.get("lookback_candles", 40))
+            tol = float(params.get("box_tolerance_pct", 0.5))
+            min_t = int(params.get("min_touches", 3))
+            basis_tf = params.get("basis_timeframe", "4h")
+            CandleModel = state.models.candle
+            candle_pair_col = getattr(CandleModel, state.pair_column)
+            candle_result = await db.execute(
+                select(CandleModel)
+                .where(
+                    and_(
+                        candle_pair_col == pair,
+                        CandleModel.timeframe == basis_tf,
+                        CandleModel.is_complete == True,
+                    )
+                )
+                .order_by(CandleModel.open_time.desc())
+                .limit(lookback)
+            )
+            candles = list(reversed(candle_result.scalars().all()))
+            if candles:
+                highs = [max(float(c.open), float(c.close)) for c in candles]
+                lows = [min(float(c.open), float(c.close)) for c in candles]
+                progress = detect_box_progress(highs, lows, tol, min_t)
+                progress_data = {
+                    "upper_touches": progress.upper_touches,
+                    "lower_touches": progress.lower_touches,
+                    "min_touches": progress.min_touches,
+                    "candles_remaining": progress.candles_remaining,
+                    "upper_center": progress.upper_center,
+                    "lower_center": progress.lower_center,
+                    "basis_timeframe": basis_tf,
+                }
+        except Exception:
+            pass
+
+        return {"pair": pair, "price": price, "position": "no_box", "formation_progress": progress_data}
 
     upper = float(box.upper_bound)
     lower = float(box.lower_bound)
@@ -111,6 +163,7 @@ async def get_active_position(
     db: AsyncSession = Depends(get_db),
 ):
     """활성 포지션 조회 (trend_following 또는 box_mean_reversion)."""
+    pair = state.normalize_pair(pair)
     # 활성 전략의 trading_style 확인
     StrategyModel = state.models.strategy
     stmt = select(StrategyModel).where(StrategyModel.status == "active")
@@ -119,7 +172,8 @@ async def get_active_position(
 
     trading_style = None
     for s in active_strategies:
-        if (s.parameters or {}).get("pair") == pair:
+        s_pair = state.normalize_pair((s.parameters or {}).get("pair", ""))
+        if s_pair == pair:
             trading_style = (s.parameters or {}).get("trading_style")
             break
 
@@ -153,6 +207,7 @@ async def get_position_history(
     db: AsyncSession = Depends(get_db),
 ):
     """포지션 이력 (closed)."""
+    pair = state.normalize_pair(pair)
     # 활성 전략의 trading_style 확인
     StrategyModel = state.models.strategy
     stmt = select(StrategyModel).where(StrategyModel.status == "active")
@@ -161,7 +216,8 @@ async def get_position_history(
 
     trading_style = None
     for s in active_strategies:
-        if (s.parameters or {}).get("pair") == pair:
+        s_pair = state.normalize_pair((s.parameters or {}).get("pair", ""))
+        if s_pair == pair:
             trading_style = (s.parameters or {}).get("trading_style")
             break
 

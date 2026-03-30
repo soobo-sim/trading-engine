@@ -8,6 +8,7 @@ Phase 1-B: 성과 메트릭 인프라
 Phase 1-C: 백테스트
   POST /api/backtest/run         - 백테스트 실행
   POST /api/backtest/grid        - 파라미터 그리드 서치
+  POST /api/backtest/walk-forward - Rolling WF 검증 (BUG-021)
 """
 from typing import Optional
 
@@ -76,7 +77,7 @@ class BacktestRequest(BaseModel):
     initial_capital_jpy: float = Field(100_000.0, ge=1000, description="초기 자본 (JPY)")
     slippage_pct: float = Field(0.05, ge=0, le=1.0, description="슬리피지 (%)")
     fee_pct: float = Field(0.15, ge=0, le=1.0, description="수수료 편도 (%)")
-    strategy_type: str = Field("trend_following", description="전략 타입: trend_following|box_mean_reversion")
+    trading_style: str = Field("trend_following", description="전략 타입: trend_following|box_mean_reversion")
 
 
 @router.post("/api/backtest/run", summary="백테스트 실행")
@@ -92,7 +93,7 @@ async def run_backtest_api(
     result = await svc.run_backtest_api(
         body.pair, body.params, body.days, body.timeframe,
         body.initial_capital_jpy, body.slippage_pct, body.fee_pct,
-        state, db, body.strategy_type,
+        state, db, body.trading_style,
     )
     if "error" in result:
         raise HTTPException(400, {
@@ -119,7 +120,7 @@ class GridSearchRequest(BaseModel):
     initial_capital_jpy: float = Field(100_000.0, ge=1000)
     slippage_pct: float = Field(0.05, ge=0, le=1.0)
     fee_pct: float = Field(0.15, ge=0, le=1.0)
-    strategy_type: str = Field("trend_following", description="전략 타입: trend_following|box_mean_reversion")
+    trading_style: str = Field("trend_following", description="전략 타입: trend_following|box_mean_reversion")
 
 
 @router.post("/api/backtest/grid", summary="파라미터 그리드 서치")
@@ -147,7 +148,7 @@ async def grid_search_api(
         body.pair, body.base_params, body.param_grid,
         body.days, body.timeframe, body.top_n,
         body.initial_capital_jpy, body.slippage_pct, body.fee_pct,
-        state, db, body.strategy_type,
+        state, db, body.trading_style,
     )
     if "error" in result:
         raise HTTPException(400, {
@@ -155,6 +156,93 @@ async def grid_search_api(
             "detail": f"캔들 {result['count']}개",
         })
     return result
+
+
+# ──────────────────────────────────────────────────────────────
+# POST /api/backtest/walk-forward  (BUG-021)
+# ──────────────────────────────────────────────────────────────
+
+class WalkForwardRequest(BaseModel):
+    pair: str = Field(..., description="페어 (e.g. GBP_JPY)")
+    parameters: dict = Field(..., description="전략 파라미터")
+    strategy_type: str = Field("trend_following", description="전략 타입")
+    timeframe: str = Field("4h", description="캔들 타임프레임: 1h | 4h")
+    train_days: int = Field(240, ge=30, le=720, description="IS 기간(일)")
+    valid_days: int = Field(60, ge=14, le=365, description="OOS 기간(일)")
+    step_days: int = Field(30, ge=7, le=180, description="슬라이드 간격(일)")
+    min_windows: int = Field(3, ge=1, le=20, description="최소 윈도우 수")
+    initial_capital_jpy: float = Field(100_000.0, ge=1000)
+    slippage_pct: float = Field(0.05, ge=0, le=1.0)
+    fee_pct: float = Field(0.0, ge=0, le=1.0)
+
+
+@router.post("/api/backtest/walk-forward", summary="Rolling Walk-Forward 검증")
+async def walk_forward_api(
+    body: WalkForwardRequest,
+    state: AppState = Depends(get_state),
+    db: AsyncSession = Depends(get_db),
+):
+    """Rolling Walk-Forward 검증. box_mean_reversion + trend_following 모두 지원."""
+    from core.backtest.walk_forward import run_walk_forward
+
+    if body.timeframe not in ("1h", "4h"):
+        raise HTTPException(400, {"blocked_code": "INVALID_TIMEFRAME"})
+
+    pair = state.normalize_pair(body.pair)
+
+    # 전체 캔들 조회 (train*N + valid 확보를 위해 최대치)
+    total_days_needed = body.train_days + body.valid_days + body.step_days * 10
+    candles = await svc.fetch_candles(db, state, pair, body.timeframe, total_days_needed)
+    if len(candles) < 25:
+        raise HTTPException(400, {
+            "blocked_code": "INSUFFICIENT_CANDLES",
+            "detail": f"캔들 {len(candles)}개 — 최소 25개 필요",
+        })
+
+    wf = run_walk_forward(
+        candles=candles,
+        params=body.parameters,
+        strategy_type=body.strategy_type,
+        train_days=body.train_days,
+        valid_days=body.valid_days,
+        step_days=body.step_days,
+        min_windows=body.min_windows,
+        initial_capital_jpy=body.initial_capital_jpy,
+        slippage_pct=body.slippage_pct,
+        fee_pct=body.fee_pct,
+    )
+
+    return {
+        "pair": pair,
+        "strategy_type": body.strategy_type,
+        "timeframe": body.timeframe,
+        "params": body.parameters,
+        "pass": wf.pass_fail,
+        "fail_reason": wf.fail_reason or None,
+        "summary": {
+            "total_windows": wf.total_windows,
+            "positive_windows": wf.positive_windows,
+            "total_trades": wf.total_trades,
+            "total_return_pct": wf.total_return_pct,
+            "avg_sharpe": wf.avg_sharpe,
+            "max_mdd": wf.max_mdd,
+        },
+        "windows": [
+            {
+                "index": w.index,
+                "is_period": f"{w.is_start}~{w.is_end}",
+                "oos_period": f"{w.oos_start}~{w.oos_end}",
+                "is_trades": w.is_trades,
+                "is_sharpe": w.is_sharpe,
+                "oos_trades": w.oos_trades,
+                "oos_win_rate": w.oos_win_rate,
+                "oos_return_pct": w.oos_return_pct,
+                "oos_sharpe": w.oos_sharpe,
+                "oos_mdd": w.oos_mdd,
+            }
+            for w in wf.windows
+        ],
+    }
 
 
 # ──────────────────────────────────────────────────────────────

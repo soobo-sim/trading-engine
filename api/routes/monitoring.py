@@ -41,7 +41,7 @@ async def get_monitoring_status(
     for s in active_strategies:
         params = s.parameters or {}
         s_pair = params.get("pair") or params.get("product_code")
-        if s_pair == pair:
+        if s_pair and s_pair.lower() == pair.lower():
             strategy = s
             trading_style = params.get("trading_style")
             break
@@ -97,7 +97,7 @@ async def get_monitoring_report(
     for s in active_strategies:
         params = s.parameters or {}
         s_pair = params.get("pair") or params.get("product_code")
-        if s_pair == pair:
+        if s_pair and s_pair.lower() == pair.lower():
             strategy = s
             trading_style = params.get("trading_style")
             break
