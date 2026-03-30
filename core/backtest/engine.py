@@ -630,6 +630,13 @@ def _run_box_backtest(
             lower = box.lower_bound
             box_width = upper - lower
 
+            # ── min_width 체크 (실전 BoxManager와 동일 로직) ──
+            if lower > 0:
+                width_pct = box_width / lower * 100
+                min_width_pct = tolerance_pct * 2 + config.fee_pct * 2
+                if width_pct < min_width_pct:
+                    continue
+
             # near_bound_pct: 박스 경계 근처 진입 허용 오차
             lower_entry_zone = lower * (1 + near_bound_pct / 100)
             upper_entry_zone = upper * (1 - near_bound_pct / 100)
