@@ -506,7 +506,7 @@ class GmoFxAdapter:
         if not items:
             raise ExchangeError(f"GMO FX ticker 데이터 없음: {symbol}")
 
-        item = items[0] if isinstance(items, list) else items
+        item = next((i for i in items if i.get("symbol") == symbol), items[0]) if isinstance(items, list) else items
         ask = float(item.get("ask", 0))
         bid = float(item.get("bid", 0))
         mid = (ask + bid) / 2 if ask > 0 and bid > 0 else 0
