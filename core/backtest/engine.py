@@ -19,6 +19,8 @@ from typing import Any, Dict, List, Optional
 
 from core.strategy.signals import compute_trend_signal
 from core.analysis.box_detector import detect_box
+from core.strategy.box_signals import classify_price_in_box, check_box_invalidation, linear_slope
+from core.exchange.session import should_close_for_weekend, is_fx_market_open
 
 
 # ──────────────────────────────────────────────────────────────
@@ -512,7 +514,7 @@ def _run_box_backtest(
         # ── D-5: FX 주말 청산 시뮬레이션 ──
         if is_fx and current_position is not None:
             candle_time = _candle_time(current_candle)
-            if _is_weekend_close_time(candle_time):
+            if should_close_for_weekend(candle_time):
                 exit_price = _apply_slippage(
                     current_price, "sell" if current_position.side == "buy" else "buy",
                     config.slippage_pct,
@@ -531,14 +533,19 @@ def _run_box_backtest(
         # ── D-5: FX 주말 진입 차단 ──
         if is_fx:
             candle_time = _candle_time(current_candle)
-            if _is_weekend_close_time(candle_time) or _is_market_closed(candle_time):
+            if should_close_for_weekend(candle_time) or not is_fx_market_open(candle_time):
                 continue
 
         # ── D-3: 4H 종가 박스 무효화 체크 (포지션 유무 무관) ──
         if active_box is not None:
-            invalidation_reason = _check_box_invalidation(
-                current_candle, active_box, tolerance_pct,
-                candles[max(0, i - box_window):i + 1],
+            recent = candles[max(0, i - box_window):i + 1]
+            invalidation_reason = check_box_invalidation(
+                close=current_price,
+                candle_highs=[float(c.high) for c in recent],
+                candle_lows=[float(c.low) for c in recent],
+                upper=active_box["upper"],
+                lower=active_box["lower"],
+                tolerance_pct=tolerance_pct,
             )
             if invalidation_reason:
                 if current_position is not None:
@@ -560,8 +567,8 @@ def _run_box_backtest(
 
         if current_position is not None:
             # ── D-2: near_upper 도달 시 청산 (실전 _entry_monitor와 동일) ──
-            box_state = _classify_price_in_box(
-                current_price, active_box, near_bound_pct,
+            box_state = classify_price_in_box(
+                current_price, active_box["upper"], active_box["lower"], near_bound_pct,
             )
             if box_state == "near_upper" and prev_box_state != "near_upper":
                 exit_price = _apply_slippage(
@@ -611,8 +618,8 @@ def _run_box_backtest(
                 active_box = {"upper": upper, "lower": lower}
 
             # D-1: 진입 판정 — 실전 _is_price_in_box와 동일한 양방향 밴드
-            box_state = _classify_price_in_box(
-                current_price, active_box, near_bound_pct,
+            box_state = classify_price_in_box(
+                current_price, active_box["upper"], active_box["lower"], near_bound_pct,
             )
 
             if (
@@ -680,33 +687,23 @@ def _run_box_backtest(
     return result
 
 
+
 # ──────────────────────────────────────────────────────────────
-# 박스 백테스트 헬퍼 (실전 BoxMeanReversionManager 로직 재현)
+# 하위 호환: 기존 테스트에서 직접 import하는 경우 대비
 # ──────────────────────────────────────────────────────────────
+
+# classify_price_in_box, check_box_invalidation, linear_slope →
+# core.strategy.box_signals에서 import (정본). 아래는 하위 호환 래퍼.
 
 def _classify_price_in_box(
     price: float,
     box: Optional[dict],
     near_bound_pct: float,
 ) -> Optional[str]:
-    """
-    실전 _is_price_in_box와 동일한 가격 분류.
-    "near_lower" | "near_upper" | "middle" | "outside" | None
-    """
+    """하위 호환 래퍼. 신규 코드는 box_signals.classify_price_in_box 사용."""
     if box is None:
         return None
-    upper = box["upper"]
-    lower = box["lower"]
-    near_pct = near_bound_pct / 100
-
-    if lower * (1 - near_pct) <= price <= lower * (1 + near_pct):
-        return "near_lower"
-    elif upper * (1 - near_pct) <= price <= upper * (1 + near_pct):
-        return "near_upper"
-    elif lower * (1 + near_pct) < price < upper * (1 - near_pct):
-        return "middle"
-    else:
-        return "outside"
+    return classify_price_in_box(price, box["upper"], box["lower"], near_bound_pct)
 
 
 def _check_box_invalidation(
@@ -715,79 +712,27 @@ def _check_box_invalidation(
     tolerance_pct: float,
     recent_candles: List[Any],
 ) -> Optional[str]:
-    """
-    실전 _validate_active_box + _check_converging_triangle 재현.
-
-    D-3: 4H 종가가 tolerance 밖이면 무효화
-    D-4: 수렴 삼각형 감지 시 무효화
-    """
-    close = float(current_candle.close)
-    upper = box["upper"]
-    lower = box["lower"]
-    tol = tolerance_pct / 100
-
-    # D-3: 종가 이탈
-    if close < lower * (1 - tol):
-        return "4h_close_below_lower"
-    if close > upper * (1 + tol):
-        return "4h_close_above_upper"
-
-    # D-4: 수렴 삼각형
-    lookback = min(len(recent_candles), 20)
-    if lookback >= 8:
-        highs = [float(c.high) for c in recent_candles[-lookback:]]
-        lows = [float(c.low) for c in recent_candles[-lookback:]]
-        xs = list(range(lookback))
-        high_slope = _linear_slope(xs, highs)
-        low_slope = _linear_slope(xs, lows)
-        if high_slope < -1e-6 and low_slope > 1e-6:
-            return "converging_triangle"
-
-    return None
+    """하위 호환 래퍼. 신규 코드는 box_signals.check_box_invalidation 사용."""
+    return check_box_invalidation(
+        close=float(current_candle.close),
+        candle_highs=[float(c.high) for c in recent_candles],
+        candle_lows=[float(c.low) for c in recent_candles],
+        upper=box["upper"],
+        lower=box["lower"],
+        tolerance_pct=tolerance_pct,
+    )
 
 
 def _linear_slope(xs: List[int], ys: List[float]) -> float:
-    """간이 선형 회귀 기울기. 실전 BoxMeanReversionManager._linear_slope와 동일."""
-    n = len(xs)
-    if n < 2:
-        return 0.0
-    sum_x = sum(xs)
-    sum_y = sum(ys)
-    sum_xy = sum(x * y for x, y in zip(xs, ys))
-    sum_x2 = sum(x * x for x in xs)
-    denom = n * sum_x2 - sum_x ** 2
-    if denom == 0:
-        return 0.0
-    return (n * sum_xy - sum_x * sum_y) / denom
+    """하위 호환 래퍼. 신규 코드는 box_signals.linear_slope 사용."""
+    return linear_slope(xs, ys)
 
 
 def _is_weekend_close_time(dt: datetime) -> bool:
-    """
-    D-5: 주말 청산 시점 판정 (실전 should_close_for_weekend 재현).
-    토요일·일요일만 True. 월요일 07:00 이전은 시장 휴장이지만
-    청산 트리거가 아님 (실전: is_fx_market_open이 별도 차단).
-    """
-    from zoneinfo import ZoneInfo
-    jst = dt.astimezone(ZoneInfo("Asia/Tokyo")) if dt.tzinfo else dt
-    weekday = jst.weekday()
-
-    if weekday == 5:  # 토요일
-        return True
-    if weekday == 6:  # 일요일
-        return True
-    return False
+    """하위 호환 래퍼. 신규 코드는 session.should_close_for_weekend 사용."""
+    return should_close_for_weekend(dt)
 
 
 def _is_market_closed(dt: datetime) -> bool:
-    """FX 시장 휴장 판정 (실전 is_fx_market_open 반전)."""
-    from zoneinfo import ZoneInfo
-    jst = dt.astimezone(ZoneInfo("Asia/Tokyo")) if dt.tzinfo else dt
-    weekday = jst.weekday()
-
-    if weekday == 6:  # 일요일
-        return True
-    if weekday == 5 and jst.hour >= 7:  # 토요일 07:00 이후
-        return True
-    if weekday == 0 and jst.hour < 7:  # 월요일 07:00 이전
-        return True
-    return False
+    """하위 호환 래퍼. 신규 코드는 session.is_fx_market_open 사용."""
+    return not is_fx_market_open(dt)

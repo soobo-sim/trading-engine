@@ -115,53 +115,13 @@ async def get_monitoring_report(
             detail={"error": "test_alert_level must be 'warning' or 'critical'"},
         )
 
-    # 2. trading_style에 따라 분기
-    if trading_style == "trend_following":
-        report = await generate_trend_report(
-            pair=pair,
-            prefix=state.prefix,
-            pair_column=state.pair_column,
-            strategy=strategy,
-            adapter=state.adapter,
-            trend_manager=state.trend_manager,
-            candle_model=state.models.candle,
-            db=db,
-            test_alert_level=test_alert_level,
-            reset_cooldown=reset_cooldown,
-        )
-    elif trading_style == "box_mean_reversion":
-        report = await generate_box_report(
-            pair=pair,
-            prefix=state.prefix,
-            pair_column=state.pair_column,
-            strategy=strategy,
-            adapter=state.adapter,
-            health_checker=state.health_checker,
-            box_model=state.models.box,
-            box_position_model=state.models.box_position,
-            candle_model=state.models.candle,
-            db=db,
-            test_alert_level=test_alert_level,
-            reset_cooldown=reset_cooldown,
-        )
-    elif trading_style == "cfd_trend_following":
-        report = await generate_cfd_report(
-            pair=pair,
-            prefix=state.prefix,
-            pair_column=state.pair_column,
-            strategy=strategy,
-            adapter=state.adapter,
-            cfd_manager=state.cfd_manager,
-            candle_model=state.models.candle,
-            db=db,
-            test_alert_level=test_alert_level,
-            reset_cooldown=reset_cooldown,
-        )
-    else:
-        raise HTTPException(
-            status_code=400,
-            detail={"error": f"trading_style={trading_style}은 아직 미지원"},
-        )
+    # 2. trading_style에 따라 분기 → 레지스트리 기반 디스패치
+    report = await _dispatch_report(
+        trading_style, pair=pair, strategy=strategy,
+        state=state, db=db,
+        test_alert_level=test_alert_level,
+        reset_cooldown=reset_cooldown,
+    )
 
     if not report.get("success"):
         raise HTTPException(status_code=503, detail=report)
@@ -186,3 +146,45 @@ async def get_monitoring_report(
         report["safety"] = {"status": "unknown", "summary": "🛡️ 안전장치: ❓ 체크 실패"}
 
     return report
+
+
+# ── 내부 디스패치 ────────────────────────────────────────────
+
+async def _dispatch_report(
+    trading_style: str | None, *, pair: str, strategy, state: AppState,
+    db, test_alert_level, reset_cooldown,
+) -> dict:
+    """trading_style → 리포트 생성 함수 디스패치."""
+    handlers = {
+        "trend_following": lambda: generate_trend_report(
+            pair=pair, prefix=state.prefix, pair_column=state.pair_column,
+            strategy=strategy, adapter=state.adapter,
+            trend_manager=state.trend_manager,
+            candle_model=state.models.candle, db=db,
+            test_alert_level=test_alert_level, reset_cooldown=reset_cooldown,
+        ),
+        "box_mean_reversion": lambda: generate_box_report(
+            pair=pair, prefix=state.prefix, pair_column=state.pair_column,
+            strategy=strategy, adapter=state.adapter,
+            health_checker=state.health_checker,
+            box_model=state.models.box,
+            box_position_model=state.models.box_position,
+            candle_model=state.models.candle, db=db,
+            test_alert_level=test_alert_level, reset_cooldown=reset_cooldown,
+        ),
+        "cfd_trend_following": lambda: generate_cfd_report(
+            pair=pair, prefix=state.prefix, pair_column=state.pair_column,
+            strategy=strategy, adapter=state.adapter,
+            cfd_manager=state.cfd_manager,
+            candle_model=state.models.candle, db=db,
+            test_alert_level=test_alert_level, reset_cooldown=reset_cooldown,
+        ),
+    }
+
+    handler = handlers.get(trading_style)
+    if handler is None:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": f"trading_style={trading_style}은 아직 미지원"},
+        )
+    return await handler()

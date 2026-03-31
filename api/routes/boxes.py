@@ -177,7 +177,9 @@ async def get_active_position(
             trading_style = (s.parameters or {}).get("trading_style")
             break
 
-    if trading_style == "trend_following":
+    # 트렌드 계열은 TrendPosition, 박스는 BoxPosition 조회
+    _TREND_STYLES = {"trend_following", "cfd_trend_following"}
+    if trading_style in _TREND_STYLES:
         return await _get_trend_position(pair, state, db)
     else:
         return await _get_box_position(pair, state, db)
@@ -221,7 +223,8 @@ async def get_position_history(
             trading_style = (s.parameters or {}).get("trading_style")
             break
 
-    if trading_style == "trend_following":
+    _TREND_STYLES = {"trend_following", "cfd_trend_following"}
+    if trading_style in _TREND_STYLES:
         TrendPos = state.models.trend_position
         stmt = (
             select(TrendPos)

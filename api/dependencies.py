@@ -16,6 +16,7 @@ from core.exchange.base import ExchangeAdapter
 from core.monitoring.health import HealthChecker
 from core.strategy.box_mean_reversion import BoxMeanReversionManager
 from core.strategy.cfd_trend_following import CfdTrendFollowingManager
+from core.strategy.registry import StrategyRegistry
 from core.strategy.trend_following import TrendFollowingManager
 from core.task.supervisor import TaskSupervisor
 
@@ -49,6 +50,7 @@ class AppState:
     prefix: str           # "ck" or "bf"
     pair_column: str       # "pair" or "product_code"
     cfd_manager: CfdTrendFollowingManager | None = None  # BF CFD 전용
+    strategy_registry: StrategyRegistry | None = None
 
     def normalize_pair(self, pair: str) -> str:
         """

@@ -85,6 +85,7 @@ from core.monitoring.health import HealthChecker
 from core.strategy.box_mean_reversion import BoxMeanReversionManager
 from core.strategy.cfd_trend_following import CfdTrendFollowingManager
 from core.strategy.trend_following import TrendFollowingManager
+from core.strategy.registry import StrategyRegistry
 from core.task.auto_reporter import create_auto_reporter
 from core.task.supervisor import TaskSupervisor
 
@@ -182,7 +183,7 @@ async def lifespan(app: FastAPI):
     # 4. Supervisor
     supervisor = TaskSupervisor()
 
-    # 5. Strategy Managers
+    # 5. Strategy Managers + Registry
     trend_manager = TrendFollowingManager(
         adapter=adapter,
         supervisor=supervisor,
@@ -209,6 +210,11 @@ async def lifespan(app: FastAPI):
         pair_column=pair_column,
     )
 
+    strategy_registry = StrategyRegistry()
+    strategy_registry.register("trend_following", trend_manager)
+    strategy_registry.register("box_mean_reversion", box_manager)
+    strategy_registry.register("cfd_trend_following", cfd_manager)
+
     # 6. Health Checker
     health_checker = HealthChecker(
         adapter=adapter,
@@ -233,6 +239,7 @@ async def lifespan(app: FastAPI):
         models=models,
         prefix=prefix,
         pair_column=pair_column,
+        strategy_registry=strategy_registry,
     )
     app.state.app_state = state
 
@@ -253,15 +260,9 @@ async def lifespan(app: FastAPI):
                 continue
             pair = state.normalize_pair(pair)
             style = params.get("trading_style")
-            if style == "box_mean_reversion":
-                await box_manager.start(pair, params)
-                logger.info(f"BoxMeanReversionManager 기동: pair={pair}")
-            elif style == "trend_following":
-                await trend_manager.start(pair, {**params, "strategy_id": strategy.id})
-                logger.info(f"TrendFollowingManager 기동: pair={pair}")
-            elif style == "cfd_trend_following":
-                await cfd_manager.start(pair, {**params, "strategy_id": strategy.id})
-                logger.info(f"CfdTrendFollowingManager 기동: pair={pair}")
+            start_params = {**params, "strategy_id": strategy.id}
+            if not await strategy_registry.start_strategy(style, pair, start_params):
+                logger.warning(f"미등록 전략 스타일: {style} (pair={pair})")
     except Exception as e:
         logger.warning(f"활성 전략 자동 기동 실패 (DB 없으면 정상): {e}")
 
