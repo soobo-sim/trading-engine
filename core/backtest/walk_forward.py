@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, List, Optional
 
 from core.backtest.engine import BacktestConfig, BacktestResult, run_backtest
@@ -30,14 +30,14 @@ class WFWindow:
     """단일 WF 윈도우 결과."""
     index: int
     # IS (in-sample) 기간
-    is_start: str
-    is_end: str
+    is_start: date
+    is_end: date
     is_trades: int
     is_sharpe: Optional[float]
     is_return_pct: Optional[float]
     # OOS (out-of-sample) 기간
-    oos_start: str
-    oos_end: str
+    oos_start: date
+    oos_end: date
     oos_trades: int
     oos_win_rate: Optional[float]
     oos_return_pct: Optional[float]
@@ -87,8 +87,8 @@ def _slice_candles(candles: List[Any], start_dt: datetime, end_dt: datetime) -> 
     return [c for c in candles if start_dt <= _candle_time(c) < end_dt]
 
 
-def _fmt(dt: datetime) -> str:
-    return dt.strftime("%Y-%m-%d")
+def _to_date(dt: datetime) -> date:
+    return dt.date() if isinstance(dt, datetime) else dt
 
 
 def _safe_sharpe(result: BacktestResult) -> Optional[float]:
@@ -176,13 +176,13 @@ def run_walk_forward(
 
         win = WFWindow(
             index=window_idx,
-            is_start=_fmt(is_start_dt),
-            is_end=_fmt(is_end_dt),
+            is_start=_to_date(is_start_dt),
+            is_end=_to_date(is_end_dt),
             is_trades=is_result.total_trades or 0,
             is_sharpe=_safe_sharpe(is_result),
             is_return_pct=_safe_return(is_result),
-            oos_start=_fmt(oos_start_dt),
-            oos_end=_fmt(oos_end_dt),
+            oos_start=_to_date(oos_start_dt),
+            oos_end=_to_date(oos_end_dt),
             oos_trades=oos_result.total_trades or 0,
             oos_win_rate=oos_result.win_rate,
             oos_return_pct=_safe_return(oos_result),

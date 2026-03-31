@@ -549,27 +549,24 @@ class TestEmptyMetrics:
 
 
 class TestAPISchema:
-    """BacktestRequest / GridSearchRequest 스키마 필드명 회귀 (BUG-021 원인 1)."""
+    """BacktestRequest / GridSearchRequest 스키마 필드명 회귀 (BUG-021 → BUG-024B 수정)."""
 
-    def test_backtest_request_uses_trading_style_field(self):
-        """BUG-021 회귀: 필드명이 trading_style 임을 명시적으로 검증.
+    def test_backtest_request_uses_strategy_type_field(self):
+        """BUG-024B: 필드명이 strategy_type 으로 통일됨을 검증."""
+        req = BacktestRequest(pair="usd_jpy", params={}, strategy_type="box_mean_reversion")
+        assert req.strategy_type == "box_mean_reversion"
 
-        strategy_type 으로 보내면 Pydantic 이 무시하여 기본값(trend_following)이 적용됨.
-        """
-        req = BacktestRequest(pair="usd_jpy", params={}, trading_style="box_mean_reversion")
-        assert req.trading_style == "box_mean_reversion"
+    def test_backtest_request_default_strategy_type(self):
+        """strategy_type 미지정 시 기본값 trend_following."""
+        req = BacktestRequest(pair="usd_jpy", params={})
+        assert req.strategy_type == "trend_following"
 
-    def test_backtest_request_wrong_key_ignored(self):
-        """strategy_type 으로 보내면 무시되어 기본값 trend_following 적용."""
-        req = BacktestRequest(pair="usd_jpy", params={}, **{"strategy_type": "box_mean_reversion"})
-        assert req.trading_style == "trend_following"  # 기본값
+    def test_grid_request_uses_strategy_type_field(self):
+        """GridSearchRequest 도 동일하게 strategy_type 필드 사용."""
+        req = GridSearchRequest(pair="usd_jpy", base_params={}, param_grid={}, strategy_type="box_mean_reversion")
+        assert req.strategy_type == "box_mean_reversion"
 
-    def test_grid_request_uses_trading_style_field(self):
-        """GridSearchRequest 도 동일하게 trading_style 필드 사용."""
-        req = GridSearchRequest(pair="usd_jpy", base_params={}, param_grid={}, trading_style="box_mean_reversion")
-        assert req.trading_style == "box_mean_reversion"
-
-    def test_grid_request_wrong_key_ignored(self):
-        """strategy_type 으로 보내면 무시되어 기본값 trend_following 적용."""
-        req = GridSearchRequest(pair="usd_jpy", base_params={}, param_grid={}, **{"strategy_type": "box_mean_reversion"})
-        assert req.trading_style == "trend_following"  # 기본값
+    def test_grid_request_default_strategy_type(self):
+        """strategy_type 미지정 시 기본값 trend_following."""
+        req = GridSearchRequest(pair="usd_jpy", base_params={}, param_grid={})
+        assert req.strategy_type == "trend_following"

@@ -77,7 +77,7 @@ class BacktestRequest(BaseModel):
     initial_capital_jpy: float = Field(100_000.0, ge=1000, description="초기 자본 (JPY)")
     slippage_pct: float = Field(0.05, ge=0, le=1.0, description="슬리피지 (%)")
     fee_pct: float = Field(0.15, ge=0, le=1.0, description="수수료 편도 (%)")
-    trading_style: str = Field("trend_following", description="전략 타입: trend_following|box_mean_reversion")
+    strategy_type: str = Field("trend_following", description="전략 타입: trend_following|box_mean_reversion")
 
 
 @router.post("/api/backtest/run", summary="백테스트 실행")
@@ -93,7 +93,7 @@ async def run_backtest_api(
     result = await svc.run_backtest_api(
         body.pair, body.params, body.days, body.timeframe,
         body.initial_capital_jpy, body.slippage_pct, body.fee_pct,
-        state, db, body.trading_style,
+        state, db, body.strategy_type,
     )
     if "error" in result:
         raise HTTPException(400, {
@@ -120,7 +120,7 @@ class GridSearchRequest(BaseModel):
     initial_capital_jpy: float = Field(100_000.0, ge=1000)
     slippage_pct: float = Field(0.05, ge=0, le=1.0)
     fee_pct: float = Field(0.15, ge=0, le=1.0)
-    trading_style: str = Field("trend_following", description="전략 타입: trend_following|box_mean_reversion")
+    strategy_type: str = Field("trend_following", description="전략 타입: trend_following|box_mean_reversion")
 
 
 @router.post("/api/backtest/grid", summary="파라미터 그리드 서치")
@@ -148,7 +148,7 @@ async def grid_search_api(
         body.pair, body.base_params, body.param_grid,
         body.days, body.timeframe, body.top_n,
         body.initial_capital_jpy, body.slippage_pct, body.fee_pct,
-        state, db, body.trading_style,
+        state, db, body.strategy_type,
     )
     if "error" in result:
         raise HTTPException(400, {

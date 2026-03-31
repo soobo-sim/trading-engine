@@ -187,21 +187,23 @@ class TestClusterDetection:
         assert slope == pytest.approx(-1.0)
 
     def test_candle_high_low(self):
-        """몸통 고점/저점 계산."""
+        """꼬리 포함 고점/저점 — candle.high / candle.low 사용."""
 
         class FakeCandle:
-            def __init__(self, o, c):
+            def __init__(self, o, h, l, c):
                 self.open = Decimal(str(o))
+                self.high = Decimal(str(h))
+                self.low = Decimal(str(l))
                 self.close = Decimal(str(c))
 
-        c = FakeCandle(100.0, 105.0)
-        assert BoxMeanReversionManager._candle_high(c) == 105.0
-        assert BoxMeanReversionManager._candle_low(c) == 100.0
+        c = FakeCandle(100.0, 110.0, 95.0, 105.0)
+        assert BoxMeanReversionManager._candle_high(c) == 110.0
+        assert BoxMeanReversionManager._candle_low(c) == 95.0
 
         # 음봉
-        c2 = FakeCandle(105.0, 100.0)
-        assert BoxMeanReversionManager._candle_high(c2) == 105.0
-        assert BoxMeanReversionManager._candle_low(c2) == 100.0
+        c2 = FakeCandle(105.0, 112.0, 98.0, 100.0)
+        assert BoxMeanReversionManager._candle_high(c2) == 112.0
+        assert BoxMeanReversionManager._candle_low(c2) == 98.0
 
 
 # ══════════════════════════════════════════════
@@ -325,17 +327,19 @@ class TestBoxValidation:
 
     @pytest.mark.asyncio
     async def test_converging_triangle_detection(self, manager, db_session_factory):
-        """고점 하락 + 저점 상승 → 수렴 삼각형 감지."""
+        """고점(high) 하락 + 저점(low) 상승 → 수렴 삼각형 감지."""
         pair = "xrp_jpy"
         await insert_box(db_session_factory, pair, 110.0, 90.0, tolerance_pct=1.0)
 
-        # 몸통 고점(max(open,close)) 하락 + 몸통 저점(min(open,close)) 상승
+        # candle.high 하락 + candle.low 상승 → 수렴 삼각형
+        # 마지막 캔들의 close는 박스 내부(90~110)에 있어야 close 검사 통과
         ohlc = []
         for i in range(10):
-            body_high = 108 - 2 * i   # 108→90 (하락)
-            body_low = 80 + 2 * i     # 80→98 (상승)
-            # open=body_low, close=body_high → candle_high=body_high, candle_low=body_low
-            ohlc.append((float(body_low), 120.0, 70.0, float(body_high)))
+            h = 108 - 1.5 * i   # 108→94.5 (high 하락)
+            l = 82 + 1.5 * i    # 82→95.5 (low 상승)
+            o = l + 1
+            c = h - 1           # close: 106→92.5 (박스 내부 유지)
+            ohlc.append((o, h, l, c))
         await insert_candles(db_session_factory, pair, "4h", ohlc)
 
         params = {"basis_timeframe": "4h", "box_lookback_candles": 10}
@@ -351,18 +355,20 @@ class TestPriceInBox:
 
     @pytest.mark.asyncio
     async def test_near_lower(self, manager, db_session_factory):
-        """가격이 하단 근처 → near_lower."""
+        """가격이 하단 근처(near_bound_pct=0.3% 이내) → near_lower."""
         pair = "xrp_jpy"
         await insert_box(db_session_factory, pair, 110.0, 90.0, tolerance_pct=1.0)
-        result = await manager._is_price_in_box(pair, 90.5)
+        # lower=90, near_pct=0.003 → 범위: 89.73~90.27
+        result = await manager._is_price_in_box(pair, 90.1)
         assert result == "near_lower"
 
     @pytest.mark.asyncio
     async def test_near_upper(self, manager, db_session_factory):
-        """가격이 상단 근처 → near_upper."""
+        """가격이 상단 근처(near_bound_pct=0.3% 이내) → near_upper."""
         pair = "xrp_jpy"
         await insert_box(db_session_factory, pair, 110.0, 90.0, tolerance_pct=1.0)
-        result = await manager._is_price_in_box(pair, 109.5)
+        # upper=110, near_pct=0.003 → 범위: 109.67~110.33
+        result = await manager._is_price_in_box(pair, 109.9)
         assert result == "near_upper"
 
     @pytest.mark.asyncio
