@@ -97,7 +97,18 @@ def build_box_telegram_text(prefix: str, time_str: str, pair: str, data: dict) -
         lines.append(f"¥{data['current_price']:,.2f} {data['position_label']} (폭 {box['box_width_pct']:.1f}%)")
         lines.append(f"하단¥{box['lower_bound']:,.2f} {box['bar_chart']} 상단¥{box['upper_bound']:,.2f}")
     else:
-        lines.append(f"¥{data['current_price']:,.2f} 📭박스 미형성")
+        # 다음 박스 예상 시각
+        est = data.get("next_box_estimate_at")
+        if est:
+            try:
+                from datetime import datetime as _dt
+                est_dt = _dt.fromisoformat(est)
+                est_str = est_dt.strftime("%-m/%-d %H:%M")
+                lines.append(f"¥{data['current_price']:,.2f} 📭박스 없음 | 다음 형성 예상: {est_str}")
+            except Exception:
+                lines.append(f"¥{data['current_price']:,.2f} 📭박스 미형성")
+        else:
+            lines.append(f"¥{data['current_price']:,.2f} 📭박스 없음 (감지 대기 중)")
         fp = data.get("formation_progress")
         if fp:
             min_t = fp["min_touches"]
@@ -253,6 +264,7 @@ async def generate_box_report(
     box_data = None
     position_label = "no_box"
     formation_progress = None
+    next_box_estimate_at = None
     if box_row:
         upper = float(box_row.upper_bound)
         lower = float(box_row.lower_bound)
@@ -323,7 +335,43 @@ async def generate_box_report(
         except Exception as e:
             logger.warning(f"[BoxReport] 형성 진행 계산 실패: {e}")
 
-    # 4. 오픈 포지션 조회 (DB)
+        # 다음 박스 형성 예상 시각 계산
+        # next = last_invalidated_at + lookback × tf_hours
+        # 이력 없으면 서버 시작 시각(now - lookback×tf 기준) 사용
+        next_box_estimate_at = None
+        try:
+            tf_hours = int(basis_tf.replace("h", "")) if basis_tf.endswith("h") else 4
+            lookback = int(params.get("box_lookback_candles", 40))
+            window_hours = lookback * tf_hours
+
+            last_inv_result = await db.execute(
+                select(box_model)
+                .where(and_(pair_col == pair, box_model.status == "invalidated"))
+                .order_by(desc(box_model.invalidated_at))
+                .limit(1)
+            )
+            last_inv = last_inv_result.scalar_one_or_none()
+
+            from datetime import timezone as _tz
+            if last_inv and last_inv.invalidated_at:
+                inv_at = last_inv.invalidated_at
+                if inv_at.tzinfo is None:
+                    inv_at = inv_at.replace(tzinfo=_tz.utc)
+                candidate = inv_at + timedelta(hours=window_hours)
+            else:
+                # 이력 없음 → 서버 기준 lookback만큼 전부터 카운트
+                candidate = now_jst - timedelta(hours=window_hours) + timedelta(hours=window_hours)
+                # 이미 충분한 시간이 지났으면 "대기 중"으로 표시
+                candidate = now_jst  # 즉시 가능 상태
+
+            # 이미 지났으면 None (충분한 캔들 있음 — 미충족은 조건 문제)
+            if candidate <= now_jst:
+                next_box_estimate_at = None  # "감지 대기 중 (조건 미충족)"
+            else:
+                next_box_estimate_at = candidate.astimezone(JST).isoformat()
+        except Exception as e:
+            logger.warning(f"[BoxReport] next_box_estimate 계산 실패: {e}")
+
     pos_pair_col = getattr(box_position_model, pair_column)
     result = await db.execute(
         select(box_position_model)
@@ -438,7 +486,7 @@ async def generate_box_report(
         "conditions_met": conditions_met,
         "conditions_total": conditions_total,
         "formation_progress": formation_progress,
-        "jpy_available": jpy_available,
+        "next_box_estimate_at": next_box_estimate_at,
         "coin_available": coin_available,
         "basis_timeframe": basis_tf,
         "candle_open_time_jst": candle_open_time_jst,
