@@ -446,81 +446,10 @@ def _compute_monthly_from_trades(trades: List[BacktestTrade]) -> List[dict]:
 
 
 # ──────────────────────────────────────────────────────────────
-# 파라미터 그리드 서치
+# 파라미터 그리드 서치 — grid_search.py로 분리됨, 하위 호환 re-export
 # ──────────────────────────────────────────────────────────────
 
-@dataclass
-class GridSearchResult:
-    """그리드 서치 결과."""
-    results: List[dict] = field(default_factory=list)
-    best_params: dict = field(default_factory=dict)
-    best_sharpe: Optional[float] = None
-    total_combinations: int = 0
-
-    def to_dict(self) -> dict:
-        return {
-            "total_combinations": self.total_combinations,
-            "best_params": self.best_params,
-            "best_sharpe": self.best_sharpe,
-            "results": self.results,
-        }
-
-
-def run_grid_search(
-    candles: List[Any],
-    base_params: dict,
-    param_grid: Dict[str, List[Any]],
-    config: Optional[BacktestConfig] = None,
-    top_n: int = 10,
-    strategy_type: str = "trend_following",
-) -> GridSearchResult:
-    """
-    파라미터 그리드 서치.
-
-    param_grid 예시:
-      {
-        "trailing_stop_atr_initial": [1.5, 2.0, 2.5],
-        "trailing_stop_atr_mature": [1.0, 1.2, 1.5],
-        "entry_rsi_max": [60, 65, 70],
-      }
-
-    모든 조합 실행 후 Sharpe ratio 기준 정렬.
-    """
-    if config is None:
-        config = BacktestConfig()
-
-    # 조합 생성
-    combinations = _generate_combinations(param_grid)
-
-    result = GridSearchResult(total_combinations=len(combinations))
-    all_results = []
-
-    for combo in combinations:
-        merged_params = {**base_params, **combo}
-        bt_result = run_backtest(candles, merged_params, config, strategy_type)
-        summary = {
-            "params": combo,
-            "total_trades": bt_result.total_trades,
-            "win_rate": bt_result.win_rate,
-            "total_return_pct": bt_result.total_return_pct,
-            "sharpe_ratio": bt_result.sharpe_ratio,
-            "max_drawdown_pct": bt_result.max_drawdown_pct,
-            "total_pnl_jpy": bt_result.total_pnl_jpy,
-        }
-        all_results.append(summary)
-
-    # Sharpe ratio 기준 정렬 (None은 최하위)
-    all_results.sort(
-        key=lambda x: x["sharpe_ratio"] if x["sharpe_ratio"] is not None else -999,
-        reverse=True,
-    )
-
-    result.results = all_results[:top_n]
-    if all_results and all_results[0]["sharpe_ratio"] is not None:
-        result.best_params = all_results[0]["params"]
-        result.best_sharpe = all_results[0]["sharpe_ratio"]
-
-    return result
+from core.backtest.grid_search import GridSearchResult, run_grid_search, _generate_combinations  # noqa: E402, F401
 
 
 def _run_box_backtest(
@@ -529,15 +458,23 @@ def _run_box_backtest(
     config: BacktestConfig,
 ) -> BacktestResult:
     """
-    박스역추세 백테스트.
-    params 키 (레이첼/앨리스 표준):
-      tolerance_pct         (default 0.3)  — 박스 클러스터 허용 오차 (%)
-      box_min_touches       (default 3)    — 최소 터치 횟수 (구: min_touches)
-      box_lookback_candles  (default 60)   — 박스 감지 윈도우 (구: box_window)
-      near_bound_pct        (default 1.0)  — 박스 경계 진입 허용 오차 (%)
-      stop_loss_pct         (default 1.5)  — 박스 이탈 스탑 (박스 폭 배수)
-      take_profit_pct       (default 1.0)  — 목표 이익 비율 (박스 폭 배수)
+    박스역추세 백테스트 — 실전 BoxMeanReversionManager 로직 재현.
+
+    실전과 동일하게 구현된 청산 로직:
+      - near_upper 도달 시 청산 (D-2)
+      - 4H 종가 박스 이탈 시 무효화 + 강제 청산 (D-3)
+      - 수렴 삼각형 감지 시 무효화 + 강제 청산 (D-4)
+      - FX 주말 자동 청산 (D-5, exchange_type="fx" 시)
+
+    진입: near_lower 양방향 밴드 (D-1, 실전 _is_price_in_box와 동일)
+
+    params 키:
+      box_tolerance_pct     (default 0.3)  — 박스 클러스터 허용 오차 (%)
+      box_min_touches       (default 3)    — 최소 터치 횟수
+      box_lookback_candles  (default 60)   — 박스 감지 윈도우
+      near_bound_pct        (default 0.3)  — 진입/청산 경계 밴드 (%)
       position_size_pct     (default 100)
+      exchange_type         (default "spot") — "spot" | "fx"
     """
     tolerance_pct = float(params.get("box_tolerance_pct", params.get("tolerance_pct", 0.3)))
     min_touches = int(
@@ -546,10 +483,10 @@ def _run_box_backtest(
     box_window = int(
         params.get("box_lookback_candles", params.get("box_window", 60))
     )
-    near_bound_pct = float(params.get("near_bound_pct", 1.0))
-    stop_loss_pct = float(params.get("stop_loss_pct", 1.5))
-    take_profit_pct = float(params.get("take_profit_pct", 1.0))
+    near_bound_pct = float(params.get("near_bound_pct", 0.3))
     position_size = float(params.get("position_size_pct", config.position_size_pct))
+    exchange_type = params.get("exchange_type", "spot")
+    is_fx = exchange_type == "fx"
 
     min_candles = max(box_window, 10)
     if len(candles) < min_candles:
@@ -558,9 +495,8 @@ def _run_box_backtest(
     capital = config.initial_capital_jpy
     trades: List[BacktestTrade] = []
     current_position: Optional[BacktestTrade] = None
-    stop_loss_price: Optional[float] = None
-    take_profit_price: Optional[float] = None
-    active_box = None  # {"upper": float, "lower": float}
+    active_box: Optional[dict] = None  # {"upper": float, "lower": float}
+    prev_box_state: Optional[str] = None  # 실전 _prev_box_state 미러링
 
     result = BacktestResult(
         params_used=params,
@@ -570,107 +506,134 @@ def _run_box_backtest(
     )
 
     for i in range(min_candles, len(candles)):
-        window = candles[max(0, i - box_window):i]
         current_candle = candles[i]
         current_price = float(current_candle.close)
-        current_high = float(current_candle.high)
-        current_low = float(current_candle.low)
 
-        if current_position is not None:
-            # ── 포지션 보유: 스탑로스 / 목표가 체크 ──
-            side = current_position.side
-            stop_hit = False
-            tp_hit = False
-
-            if stop_loss_price is not None:
-                if side == "buy" and current_low <= stop_loss_price:
-                    stop_hit = True
-                elif side == "sell" and current_high >= stop_loss_price:
-                    stop_hit = True
-
-            if take_profit_price is not None:
-                if side == "buy" and current_high >= take_profit_price:
-                    tp_hit = True
-                elif side == "sell" and current_low <= take_profit_price:
-                    tp_hit = True
-
-            if stop_hit or tp_hit:
-                exit_reason = "take_profit" if tp_hit else "stop_loss"
-                if tp_hit:
-                    exit_price = _apply_slippage(
-                        take_profit_price, "sell" if side == "buy" else "buy",
-                        config.slippage_pct,
-                    )
-                else:
-                    exit_price = _apply_slippage(
-                        stop_loss_price, "sell" if side == "buy" else "buy",
-                        config.slippage_pct,
-                    )
+        # ── D-5: FX 주말 청산 시뮬레이션 ──
+        if is_fx and current_position is not None:
+            candle_time = _candle_time(current_candle)
+            if _is_weekend_close_time(candle_time):
+                exit_price = _apply_slippage(
+                    current_price, "sell" if current_position.side == "buy" else "buy",
+                    config.slippage_pct,
+                )
                 _close_position(
                     current_position, exit_price, current_candle,
-                    exit_reason, config.fee_pct, capital,
+                    "weekend_close", config.fee_pct, capital,
                 )
                 capital += current_position.pnl_jpy or 0
                 trades.append(current_position)
                 current_position = None
-                stop_loss_price = None
-                take_profit_price = None
                 active_box = None
+                prev_box_state = None
+                continue
+
+        # ── D-5: FX 주말 진입 차단 ──
+        if is_fx:
+            candle_time = _candle_time(current_candle)
+            if _is_weekend_close_time(candle_time) or _is_market_closed(candle_time):
+                continue
+
+        # ── D-3: 4H 종가 박스 무효화 체크 (포지션 유무 무관) ──
+        if active_box is not None:
+            invalidation_reason = _check_box_invalidation(
+                current_candle, active_box, tolerance_pct,
+                candles[max(0, i - box_window):i + 1],
+            )
+            if invalidation_reason:
+                if current_position is not None:
+                    exit_price = _apply_slippage(
+                        current_price,
+                        "sell" if current_position.side == "buy" else "buy",
+                        config.slippage_pct,
+                    )
+                    _close_position(
+                        current_position, exit_price, current_candle,
+                        invalidation_reason, config.fee_pct, capital,
+                    )
+                    capital += current_position.pnl_jpy or 0
+                    trades.append(current_position)
+                    current_position = None
+                active_box = None
+                prev_box_state = None
+                continue
+
+        if current_position is not None:
+            # ── D-2: near_upper 도달 시 청산 (실전 _entry_monitor와 동일) ──
+            box_state = _classify_price_in_box(
+                current_price, active_box, near_bound_pct,
+            )
+            if box_state == "near_upper" and prev_box_state != "near_upper":
+                exit_price = _apply_slippage(
+                    current_price, "sell" if current_position.side == "buy" else "buy",
+                    config.slippage_pct,
+                )
+                _close_position(
+                    current_position, exit_price, current_candle,
+                    "near_upper_exit", config.fee_pct, capital,
+                )
+                capital += current_position.pnl_jpy or 0
+                trades.append(current_position)
+                current_position = None
+                # 박스는 유지 (실전과 동일 — 청산 후 재진입 가능)
+            prev_box_state = box_state
 
         else:
             # ── 포지션 없음: 박스 감지 + 진입 ──
-            highs = [float(c.high) for c in window]
-            lows = [float(c.low) for c in window]
-            box = detect_box(highs, lows, tolerance_pct=tolerance_pct, min_touches=min_touches)
 
-            if not box.box_detected:
-                continue
+            # 활성 박스 없으면 새로 감지
+            if active_box is None:
+                window = candles[max(0, i - box_window):i]
+                highs = [float(c.high) for c in window]
+                lows = [float(c.low) for c in window]
+                box = detect_box(highs, lows, tolerance_pct=tolerance_pct, min_touches=min_touches)
 
-            upper = box.upper_bound
-            lower = box.lower_bound
-            box_width = upper - lower
-
-            # ── min_width 체크 (실전 BoxManager와 동일 로직) ──
-            if lower > 0:
-                width_pct = box_width / lower * 100
-                min_width_pct = tolerance_pct * 2 + config.fee_pct * 2
-                if width_pct < min_width_pct:
+                if not box.box_detected:
+                    prev_box_state = None
                     continue
 
-            # near_bound_pct: 박스 경계 근처 진입 허용 오차
-            lower_entry_zone = lower * (1 + near_bound_pct / 100)
-            upper_entry_zone = upper * (1 - near_bound_pct / 100)
+                upper = box.upper_bound
+                lower = box.lower_bound
+                box_width = upper - lower
 
-            side = None
-            if current_price <= lower_entry_zone:
-                side = "buy"
-            elif current_price >= upper_entry_zone:
-                side = "sell"
+                # min_width 체크 (실전 _detect_and_create_box와 동일)
+                if lower > 0:
+                    width_pct = box_width / lower * 100
+                    min_width_pct = tolerance_pct * 2 + config.fee_pct * 2
+                    if width_pct < min_width_pct:
+                        continue
 
-            if side is None:
-                continue
+                # 현재가 박스 외부이면 즉시 무효화 (실전과 동일)
+                tol = tolerance_pct / 100
+                if current_price < lower * (1 - tol) or current_price > upper * (1 + tol):
+                    continue
 
-            entry_price = _apply_slippage(current_price, side, config.slippage_pct)
-            invest_jpy = capital * position_size / 100
-            entry_fee = _apply_fee(invest_jpy, config.fee_pct)
-            invest_after_fee = invest_jpy - entry_fee
-            amount = invest_after_fee / entry_price if entry_price > 0 else 0
+                active_box = {"upper": upper, "lower": lower}
 
-            current_position = BacktestTrade(
-                entry_time=_candle_time(current_candle),
-                entry_price=entry_price,
-                side=side,
-                amount=amount,
+            # D-1: 진입 판정 — 실전 _is_price_in_box와 동일한 양방향 밴드
+            box_state = _classify_price_in_box(
+                current_price, active_box, near_bound_pct,
             )
-            active_box = {"upper": upper, "lower": lower}
 
-            # 스탑로스/목표가: 박스 폭 배수 기준
-            if side == "buy":
-                stop_loss_price = lower - box_width * stop_loss_pct
-                take_profit_price = lower + box_width * take_profit_pct
-            else:
-                stop_loss_price = upper + box_width * stop_loss_pct
-                take_profit_price = upper - box_width * take_profit_pct
+            if (
+                box_state == "near_lower"
+                and prev_box_state != "near_lower"
+            ):
+                side = "buy"
+                entry_price = _apply_slippage(current_price, side, config.slippage_pct)
+                invest_jpy = capital * position_size / 100
+                entry_fee = _apply_fee(invest_jpy, config.fee_pct)
+                invest_after_fee = invest_jpy - entry_fee
+                amount = invest_after_fee / entry_price if entry_price > 0 else 0
+
+                current_position = BacktestTrade(
+                    entry_time=_candle_time(current_candle),
+                    entry_price=entry_price,
+                    side=side,
+                    amount=amount,
+                )
+
+            prev_box_state = box_state
 
     # 미종료 포지션 강제 청산
     if current_position is not None:
@@ -683,7 +646,7 @@ def _run_box_backtest(
         capital += current_position.pnl_jpy or 0
         trades.append(current_position)
 
-    # 결과 집계 (trend_following과 동일 로직)
+    # 결과 집계
     result.trades = trades
     result.total_trades = len(trades)
     valid = [t for t in trades if t.pnl_jpy is not None]
@@ -717,21 +680,114 @@ def _run_box_backtest(
     return result
 
 
-def _generate_combinations(param_grid: Dict[str, List[Any]]) -> List[dict]:
-    """파라미터 그리드에서 모든 조합 생성."""
-    if not param_grid:
-        return [{}]
+# ──────────────────────────────────────────────────────────────
+# 박스 백테스트 헬퍼 (실전 BoxMeanReversionManager 로직 재현)
+# ──────────────────────────────────────────────────────────────
 
-    keys = list(param_grid.keys())
-    values = list(param_grid.values())
+def _classify_price_in_box(
+    price: float,
+    box: Optional[dict],
+    near_bound_pct: float,
+) -> Optional[str]:
+    """
+    실전 _is_price_in_box와 동일한 가격 분류.
+    "near_lower" | "near_upper" | "middle" | "outside" | None
+    """
+    if box is None:
+        return None
+    upper = box["upper"]
+    lower = box["lower"]
+    near_pct = near_bound_pct / 100
 
-    combinations = [{}]
-    for key, vals in zip(keys, values):
-        new_combinations = []
-        for combo in combinations:
-            for val in vals:
-                new_combo = {**combo, key: val}
-                new_combinations.append(new_combo)
-        combinations = new_combinations
+    if lower * (1 - near_pct) <= price <= lower * (1 + near_pct):
+        return "near_lower"
+    elif upper * (1 - near_pct) <= price <= upper * (1 + near_pct):
+        return "near_upper"
+    elif lower * (1 + near_pct) < price < upper * (1 - near_pct):
+        return "middle"
+    else:
+        return "outside"
 
-    return combinations
+
+def _check_box_invalidation(
+    current_candle: Any,
+    box: dict,
+    tolerance_pct: float,
+    recent_candles: List[Any],
+) -> Optional[str]:
+    """
+    실전 _validate_active_box + _check_converging_triangle 재현.
+
+    D-3: 4H 종가가 tolerance 밖이면 무효화
+    D-4: 수렴 삼각형 감지 시 무효화
+    """
+    close = float(current_candle.close)
+    upper = box["upper"]
+    lower = box["lower"]
+    tol = tolerance_pct / 100
+
+    # D-3: 종가 이탈
+    if close < lower * (1 - tol):
+        return "4h_close_below_lower"
+    if close > upper * (1 + tol):
+        return "4h_close_above_upper"
+
+    # D-4: 수렴 삼각형
+    lookback = min(len(recent_candles), 20)
+    if lookback >= 8:
+        highs = [float(c.high) for c in recent_candles[-lookback:]]
+        lows = [float(c.low) for c in recent_candles[-lookback:]]
+        xs = list(range(lookback))
+        high_slope = _linear_slope(xs, highs)
+        low_slope = _linear_slope(xs, lows)
+        if high_slope < -1e-6 and low_slope > 1e-6:
+            return "converging_triangle"
+
+    return None
+
+
+def _linear_slope(xs: List[int], ys: List[float]) -> float:
+    """간이 선형 회귀 기울기. 실전 BoxMeanReversionManager._linear_slope와 동일."""
+    n = len(xs)
+    if n < 2:
+        return 0.0
+    sum_x = sum(xs)
+    sum_y = sum(ys)
+    sum_xy = sum(x * y for x, y in zip(xs, ys))
+    sum_x2 = sum(x * x for x in xs)
+    denom = n * sum_x2 - sum_x ** 2
+    if denom == 0:
+        return 0.0
+    return (n * sum_xy - sum_x * sum_y) / denom
+
+
+def _is_weekend_close_time(dt: datetime) -> bool:
+    """
+    D-5: 주말 청산 시점 판정 (실전 should_close_for_weekend 재현).
+    토요일·일요일만 True. 월요일 07:00 이전은 시장 휴장이지만
+    청산 트리거가 아님 (실전: is_fx_market_open이 별도 차단).
+    """
+    from zoneinfo import ZoneInfo
+    jst = dt.astimezone(ZoneInfo("Asia/Tokyo")) if dt.tzinfo else dt
+    weekday = jst.weekday()
+
+    if weekday == 5:  # 토요일
+        return True
+    if weekday == 6:  # 일요일
+        return True
+    return False
+
+
+def _is_market_closed(dt: datetime) -> bool:
+    """FX 시장 휴장 판정 (실전 is_fx_market_open 반전)."""
+    from zoneinfo import ZoneInfo
+    jst = dt.astimezone(ZoneInfo("Asia/Tokyo")) if dt.tzinfo else dt
+    weekday = jst.weekday()
+
+    if weekday == 6:  # 일요일
+        return True
+    if weekday == 5 and jst.hour >= 7:  # 토요일 07:00 이후
+        return True
+    if weekday == 0 and jst.hour < 7:  # 월요일 07:00 이전
+        return True
+    return False

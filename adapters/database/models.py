@@ -683,3 +683,84 @@ class StrategyChange(Base):
             f"<StrategyChange(id={self.id}, pair={self.pair!r}, "
             f"type={self.change_type!r}, status={self.status!r})>"
         )
+
+
+# ──────────────────────────────────────────────────────────────
+# 백테스트 Result Store (공유 테이블, prefix 없음)
+# 설계서: trader-common/solution-design/BACKTEST_MODULE_DESIGN.md §3.4
+# ──────────────────────────────────────────────────────────────
+
+class BacktestRun(Base):
+    """백테스트 실행 이력."""
+    __tablename__ = "backtest_runs"
+    __table_args__ = (
+        Index("idx_backtest_runs_pair_type", "pair", "strategy_type", "run_type"),
+        Index("idx_backtest_runs_created", "created_at"),
+        {"extend_existing": True},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    pair = Column(String(20), nullable=False)
+    strategy_type = Column(String(50), nullable=False)
+    run_type = Column(String(20), nullable=False)
+    parameters = Column(JSON, nullable=False)
+    result = Column(JSON, nullable=False)
+    candle_range_from = Column(DateTime(timezone=True), nullable=True)
+    candle_range_to = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    wf_windows = relationship("WfWindow", back_populates="run", cascade="all, delete-orphan")
+    grid_results = relationship("GridResult", back_populates="run", cascade="all, delete-orphan")
+
+    def __repr__(self) -> str:
+        return (
+            f"<BacktestRun(id={self.id}, pair={self.pair!r}, "
+            f"type={self.run_type!r}, strategy={self.strategy_type!r})>"
+        )
+
+
+class WfWindow(Base):
+    """WF 윈도우별 상세."""
+    __tablename__ = "wf_windows"
+    __table_args__ = (
+        Index("idx_wf_windows_run_id", "run_id", "window_index"),
+        {"extend_existing": True},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    run_id = Column(Integer, ForeignKey("backtest_runs.id", ondelete="CASCADE"), nullable=False)
+    window_index = Column(Integer, nullable=False)
+    is_start = Column(DateTime, nullable=True)
+    is_end = Column(DateTime, nullable=True)
+    oos_start = Column(DateTime, nullable=True)
+    oos_end = Column(DateTime, nullable=True)
+    is_sharpe = Column(Float, nullable=True)
+    oos_sharpe = Column(Float, nullable=True)
+    is_return_pct = Column(Float, nullable=True)
+    oos_return_pct = Column(Float, nullable=True)
+    trades = Column(Integer, nullable=True)
+    win_rate = Column(Float, nullable=True)
+    mdd = Column(Float, nullable=True)
+
+    run = relationship("BacktestRun", back_populates="wf_windows")
+
+
+class GridResult(Base):
+    """그리드서치 상위 결과."""
+    __tablename__ = "grid_results"
+    __table_args__ = (
+        Index("idx_grid_results_run_id", "run_id", "rank"),
+        {"extend_existing": True},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    run_id = Column(Integer, ForeignKey("backtest_runs.id", ondelete="CASCADE"), nullable=False)
+    rank = Column(Integer, nullable=False)
+    parameters = Column(JSON, nullable=False)
+    sharpe = Column(Float, nullable=True)
+    return_pct = Column(Float, nullable=True)
+    trades = Column(Integer, nullable=True)
+    win_rate = Column(Float, nullable=True)
+    mdd = Column(Float, nullable=True)
+
+    run = relationship("BacktestRun", back_populates="grid_results")

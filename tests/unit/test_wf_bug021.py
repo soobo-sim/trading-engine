@@ -122,20 +122,20 @@ def test_wf03_tolerance_affects_trades():
         f"tolerance 0.2={r1.total_trades}거래 vs 0.6={r2.total_trades}거래 — 같으면 버그"
 
 
-# ─── WF-04: SL 차이 → 결과 상이 ─────────────────────────────
-def test_wf04_sl_affects_result():
-    """SL/TP 조합이 다르면 trades 또는 pnl이 달라야 함."""
+# ─── WF-04: near_bound_pct 차이 → 결과 상이 ─────────────────
+def test_wf04_near_bound_affects_result():
+    """near_bound_pct가 다르면 trades 또는 pnl이 달라야 함 (D-2: SL/TP 제거됨)."""
     candles = _make_candles(500)
     base = {"tolerance_pct": 0.3, "box_lookback_candles": 40, "box_min_touches": 2}
     config = BacktestConfig(initial_capital_jpy=100_000, slippage_pct=0.05, fee_pct=0.0)
-    # TP만 크게 다르게 → 목표가 다르면 체결 시점이 달라짐
-    r1 = run_backtest(candles, {**base, "stop_loss_pct": 1.0, "take_profit_pct": 0.5},
+    # near_bound_pct가 다르면 진입/청산 밴드가 달라짐
+    r1 = run_backtest(candles, {**base, "near_bound_pct": 0.1},
                       config, "box_mean_reversion")
-    r2 = run_backtest(candles, {**base, "stop_loss_pct": 1.0, "take_profit_pct": 3.0},
+    r2 = run_backtest(candles, {**base, "near_bound_pct": 2.0},
                       config, "box_mean_reversion")
-    # TP가 0.5 vs 3.0이면 거래수 또는 수익률이 달라야 함
+    # 밴드 폭이 0.1% vs 2.0%이면 결과가 달라야 함
     assert (r1.total_trades, r1.total_pnl_jpy) != (r2.total_trades, r2.total_pnl_jpy), \
-        f"TP 0.5={r1.total_trades}거래/{r1.total_pnl_jpy} vs TP 3.0={r2.total_trades}거래/{r2.total_pnl_jpy}"
+        f"near_bound 0.1={r1.total_trades}거래/{r1.total_pnl_jpy} vs 2.0={r2.total_trades}거래/{r2.total_pnl_jpy}"
 
 
 # ─── WF-05: 캔들 부족 → fail_reason ─────────────────────────
@@ -170,7 +170,7 @@ def test_wf07_pass_fail_criteria():
     """pass_fail=True이면 조건 충족 확인."""
     candles = _make_candles(600)
     params = {"tolerance_pct": 0.3, "box_lookback_candles": 30, "box_min_touches": 2,
-              "stop_loss_pct": 1.5, "take_profit_pct": 1.0}
+              "near_bound_pct": 1.0}
     result = run_walk_forward(
         candles, params, "box_mean_reversion",
         train_days=60, valid_days=30, step_days=15, min_windows=2,

@@ -685,3 +685,197 @@ async def get_performance_by_strategy_id(
         **metrics,
         "grade": grade,
     }
+
+
+# ──────────────────────────────────────────────────────────────
+# Result Store — 백테스트 결과 저장/조회
+# 설계서: BACKTEST_MODULE_DESIGN.md §3.4
+# ──────────────────────────────────────────────────────────────
+
+async def save_backtest_run(
+    db: AsyncSession,
+    pair: str,
+    strategy_type: str,
+    run_type: str,
+    parameters: dict,
+    result_data: dict,
+    candle_range_from: Optional[datetime] = None,
+    candle_range_to: Optional[datetime] = None,
+) -> int:
+    """백테스트 실행 이력 저장. 반환: run_id."""
+    from adapters.database.models import BacktestRun
+
+    run = BacktestRun(
+        pair=pair,
+        strategy_type=strategy_type,
+        run_type=run_type,
+        parameters=parameters,
+        result=result_data,
+        candle_range_from=candle_range_from,
+        candle_range_to=candle_range_to,
+    )
+    db.add(run)
+    await db.flush()
+    return run.id
+
+
+async def save_wf_windows(
+    db: AsyncSession,
+    run_id: int,
+    windows: list,
+) -> None:
+    """WF 윈도우별 상세 저장."""
+    from adapters.database.models import WfWindow
+
+    for w in windows:
+        db.add(WfWindow(
+            run_id=run_id,
+            window_index=w.get("index", 0),
+            is_start=w.get("is_start"),
+            is_end=w.get("is_end"),
+            oos_start=w.get("oos_start"),
+            oos_end=w.get("oos_end"),
+            is_sharpe=w.get("is_sharpe"),
+            oos_sharpe=w.get("oos_sharpe"),
+            is_return_pct=w.get("is_return_pct"),
+            oos_return_pct=w.get("oos_return_pct"),
+            trades=w.get("oos_trades"),
+            win_rate=w.get("oos_win_rate"),
+            mdd=w.get("oos_mdd"),
+        ))
+    await db.flush()
+
+
+async def save_grid_results(
+    db: AsyncSession,
+    run_id: int,
+    results: list,
+) -> None:
+    """그리드서치 상위 결과 저장."""
+    from adapters.database.models import GridResult
+
+    for i, r in enumerate(results, 1):
+        db.add(GridResult(
+            run_id=run_id,
+            rank=i,
+            parameters=r.get("params", {}),
+            sharpe=r.get("sharpe_ratio"),
+            return_pct=r.get("total_return_pct"),
+            trades=r.get("total_trades"),
+            win_rate=r.get("win_rate"),
+            mdd=r.get("max_drawdown_pct"),
+        ))
+    await db.flush()
+
+
+async def get_backtest_results(
+    db: AsyncSession,
+    pair: Optional[str] = None,
+    strategy_type: Optional[str] = None,
+    run_type: Optional[str] = None,
+    limit: int = 20,
+    offset: int = 0,
+) -> dict:
+    """백테스트 실행 이력 목록 조회."""
+    from adapters.database.models import BacktestRun
+
+    query = select(BacktestRun)
+    if pair:
+        query = query.where(BacktestRun.pair == pair)
+    if strategy_type:
+        query = query.where(BacktestRun.strategy_type == strategy_type)
+    if run_type:
+        query = query.where(BacktestRun.run_type == run_type)
+    query = query.order_by(BacktestRun.created_at.desc()).offset(offset).limit(limit)
+
+    result = await db.execute(query)
+    runs = list(result.scalars().all())
+
+    return {
+        "success": True,
+        "count": len(runs),
+        "results": [
+            {
+                "id": r.id,
+                "pair": r.pair,
+                "strategy_type": r.strategy_type,
+                "run_type": r.run_type,
+                "parameters": r.parameters,
+                "result": r.result,
+                "candle_range_from": r.candle_range_from.isoformat() if r.candle_range_from else None,
+                "candle_range_to": r.candle_range_to.isoformat() if r.candle_range_to else None,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in runs
+        ],
+    }
+
+
+async def get_backtest_result_detail(
+    db: AsyncSession,
+    run_id: int,
+) -> Optional[dict]:
+    """백테스트 실행 이력 단건 상세 (윈도우/그리드 포함)."""
+    from adapters.database.models import BacktestRun, WfWindow, GridResult
+
+    run_result = await db.execute(
+        select(BacktestRun).where(BacktestRun.id == run_id)
+    )
+    run = run_result.scalar_one_or_none()
+    if not run:
+        return None
+
+    data = {
+        "id": run.id,
+        "pair": run.pair,
+        "strategy_type": run.strategy_type,
+        "run_type": run.run_type,
+        "parameters": run.parameters,
+        "result": run.result,
+        "candle_range_from": run.candle_range_from.isoformat() if run.candle_range_from else None,
+        "candle_range_to": run.candle_range_to.isoformat() if run.candle_range_to else None,
+        "created_at": run.created_at.isoformat() if run.created_at else None,
+    }
+
+    # WF 윈도우
+    if run.run_type == "walk_forward":
+        wf_result = await db.execute(
+            select(WfWindow).where(WfWindow.run_id == run_id).order_by(WfWindow.window_index)
+        )
+        data["windows"] = [
+            {
+                "index": w.window_index,
+                "is_start": w.is_start.isoformat() if w.is_start else None,
+                "is_end": w.is_end.isoformat() if w.is_end else None,
+                "oos_start": w.oos_start.isoformat() if w.oos_start else None,
+                "oos_end": w.oos_end.isoformat() if w.oos_end else None,
+                "is_sharpe": w.is_sharpe,
+                "oos_sharpe": w.oos_sharpe,
+                "is_return_pct": w.is_return_pct,
+                "oos_return_pct": w.oos_return_pct,
+                "trades": w.trades,
+                "win_rate": w.win_rate,
+                "mdd": w.mdd,
+            }
+            for w in wf_result.scalars().all()
+        ]
+
+    # 그리드서치 결과
+    if run.run_type == "grid":
+        grid_result_rows = await db.execute(
+            select(GridResult).where(GridResult.run_id == run_id).order_by(GridResult.rank)
+        )
+        data["grid_results"] = [
+            {
+                "rank": g.rank,
+                "parameters": g.parameters,
+                "sharpe": g.sharpe,
+                "return_pct": g.return_pct,
+                "trades": g.trades,
+                "win_rate": g.win_rate,
+                "mdd": g.mdd,
+            }
+            for g in grid_result_rows.scalars().all()
+        ]
+
+    return data

@@ -165,6 +165,7 @@ def test_bt08_new_key_box_tolerance_pct_recognized():
 
     버그 상태에서는 box_tolerance_pct 키를 무시하고 기본값 0.3 으로 처리했기 때문에
     tight(0.2)과 loose(0.8) 결과가 동일했음.
+    D-2 이후 near_upper 청산으로 변경되어 거래 수가 아닌 PnL 차이로 검증.
     """
     candles = _box_candles(n=200)
     config = BacktestConfig()
@@ -172,8 +173,8 @@ def test_bt08_new_key_box_tolerance_pct_recognized():
     r_tight = run_backtest(candles, {"box_tolerance_pct": 0.2}, config, "box_mean_reversion")
     r_loose = run_backtest(candles, {"box_tolerance_pct": 0.8}, config, "box_mean_reversion")
 
-    # 버그가 재발하면 두 값이 동일해짐 (기본값 0.3으로 처리)
-    assert r_tight.total_trades != r_loose.total_trades, (
+    # 버그가 재발하면 두 값이 완전 동일해짐 (기본값 0.3으로 처리)
+    assert r_tight.total_pnl_jpy != r_loose.total_pnl_jpy, (
         "box_tolerance_pct 키가 무시되고 있음 — BUG-021 재발"
     )
 

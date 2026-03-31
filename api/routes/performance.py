@@ -212,36 +212,55 @@ async def walk_forward_api(
         fee_pct=body.fee_pct,
     )
 
+    # 결과 요약
+    summary = {
+        "total_windows": wf.total_windows,
+        "positive_windows": wf.positive_windows,
+        "total_trades": wf.total_trades,
+        "total_return_pct": wf.total_return_pct,
+        "avg_sharpe": wf.avg_sharpe,
+        "max_mdd": wf.max_mdd,
+    }
+    windows_data = [
+        {
+            "index": w.index,
+            "is_period": f"{w.is_start}~{w.is_end}",
+            "is_start": w.is_start,
+            "is_end": w.is_end,
+            "oos_period": f"{w.oos_start}~{w.oos_end}",
+            "oos_start": w.oos_start,
+            "oos_end": w.oos_end,
+            "is_trades": w.is_trades,
+            "is_sharpe": w.is_sharpe,
+            "is_return_pct": w.is_return_pct,
+            "oos_trades": w.oos_trades,
+            "oos_win_rate": w.oos_win_rate,
+            "oos_return_pct": w.oos_return_pct,
+            "oos_sharpe": w.oos_sharpe,
+            "oos_mdd": w.oos_mdd,
+        }
+        for w in wf.windows
+    ]
+
+    # Result Store 저장
+    run_id = await svc.save_backtest_run(
+        db, pair, body.strategy_type, "walk_forward",
+        body.parameters,
+        {"pass": wf.pass_fail, "fail_reason": wf.fail_reason or None, **summary},
+    )
+    await svc.save_wf_windows(db, run_id, windows_data)
+    await db.commit()
+
     return {
+        "run_id": run_id,
         "pair": pair,
         "strategy_type": body.strategy_type,
         "timeframe": body.timeframe,
         "params": body.parameters,
         "pass": wf.pass_fail,
         "fail_reason": wf.fail_reason or None,
-        "summary": {
-            "total_windows": wf.total_windows,
-            "positive_windows": wf.positive_windows,
-            "total_trades": wf.total_trades,
-            "total_return_pct": wf.total_return_pct,
-            "avg_sharpe": wf.avg_sharpe,
-            "max_mdd": wf.max_mdd,
-        },
-        "windows": [
-            {
-                "index": w.index,
-                "is_period": f"{w.is_start}~{w.is_end}",
-                "oos_period": f"{w.oos_start}~{w.oos_end}",
-                "is_trades": w.is_trades,
-                "is_sharpe": w.is_sharpe,
-                "oos_trades": w.oos_trades,
-                "oos_win_rate": w.oos_win_rate,
-                "oos_return_pct": w.oos_return_pct,
-                "oos_sharpe": w.oos_sharpe,
-                "oos_mdd": w.oos_mdd,
-            }
-            for w in wf.windows
-        ],
+        "summary": summary,
+        "windows": windows_data,
     }
 
 
@@ -269,4 +288,34 @@ async def compare_performance(
             "blocked_code": result["error"],
             "detail": f"pair={result['pair']}에 해당하는 전략 없음",
         })
+    return result
+
+
+# ──────────────────────────────────────────────────────────────
+# GET /api/backtest/results — 실행 이력 조회
+# GET /api/backtest/results/{id} — 단건 상세 (윈도우/그리드 포함)
+# ──────────────────────────────────────────────────────────────
+
+@router.get("/api/backtest/results", summary="백테스트 실행 이력 목록")
+async def list_backtest_results(
+    pair: Optional[str] = Query(None, description="페어 필터"),
+    strategy_type: Optional[str] = Query(None, description="전략 타입 필터"),
+    run_type: Optional[str] = Query(None, description="실행 타입: single|grid|walk_forward"),
+    limit: int = Query(20, ge=1, le=100, description="조회 개수"),
+    offset: int = Query(0, ge=0, description="시작 오프셋"),
+    db: AsyncSession = Depends(get_db),
+):
+    """백테스트 실행 이력 목록. 필터 옵션으로 pair/strategy_type/run_type 가능."""
+    return await svc.get_backtest_results(db, pair, strategy_type, run_type, limit, offset)
+
+
+@router.get("/api/backtest/results/{run_id}", summary="백테스트 단건 상세")
+async def get_backtest_result(
+    run_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """백테스트 실행 이력 단건 상세 (WF 윈도우/그리드 결과 포함)."""
+    result = await svc.get_backtest_result_detail(db, run_id)
+    if not result:
+        raise HTTPException(404, {"blocked_code": "NOT_FOUND", "detail": f"run_id={run_id} 없음"})
     return result
