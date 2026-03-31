@@ -481,6 +481,7 @@ async def generate_box_report(
         "next_scan_minutes_str": next_scan_minutes_str,
         "box_conditions_str": f"tol={tol_str}% / {min_t_str}+ 터치 필요",
         "coin_available": coin_available,
+        "jpy_available": round(jpy_available, 0),
         "basis_timeframe": basis_tf,
         "candle_open_time_jst": candle_open_time_jst,
         "next_candle_minutes_str": next_candle_minutes_str,
