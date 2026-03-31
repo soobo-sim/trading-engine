@@ -180,6 +180,7 @@ class AutoReporter:
                 style = params.get("trading_style")
                 if not pair or not style:
                     continue
+                pair = state.normalize_pair(pair)  # 거래소별 대소문자 정규화
 
                 try:
                     report = await self._generate_report(
