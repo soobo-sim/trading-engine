@@ -383,10 +383,13 @@ async def generate_box_report(
             from datetime import timezone as _tz
             latest_open_time = latest_open_time.replace(tzinfo=_tz.utc)
         next_open = latest_open_time + timedelta(hours=tf_hours)
+        now_utc = now_jst.astimezone(next_open.tzinfo)
+        while next_open <= now_utc:
+            next_open += timedelta(hours=tf_hours)
         next_open_jst = next_open.astimezone(JST)
         candle_open_time_jst = next_open_jst.strftime("%H:%M")
         next_candle_jst = next_open_jst
-        diff_min = int((next_open - now_jst.astimezone(next_open.tzinfo)).total_seconds() / 60)
+        diff_min = int((next_open - now_utc).total_seconds() / 60)
         if diff_min > 0:
             next_candle_minutes_str = f"{diff_min}분 후"
         else:
