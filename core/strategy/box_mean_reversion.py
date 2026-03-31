@@ -140,6 +140,22 @@ class BoxMeanReversionManager:
           1. validate_active_box → 무효화 시 자동 손절
           2. detect_and_create_box → 신규 박스 감지
         """
+        # ── 기동 시 즉시 validate (재시작 후 stale 박스 정리) ──
+        try:
+            params = self._params.get(pair, {})
+            existing_box = await self._get_active_box(pair)
+            if existing_box:
+                reason = await self._validate_active_box(pair, params)
+                if reason:
+                    logger.info(f"[BoxMgr] {pair}: 기동 시 기존 박스 무효화 ({reason})")
+                    pos = await self._get_open_position(pair)
+                    if pos:
+                        await self._close_position_market(pair, pos, reason)
+                else:
+                    logger.info(f"[BoxMgr] {pair}: 기동 시 기존 박스 유효 확인 (id={existing_box.id})")
+        except Exception as e:
+            logger.warning(f"[BoxMgr] {pair}: 기동 시 validate 실패 — {e}")
+
         while True:
             await asyncio.sleep(_BOX_MONITOR_INTERVAL)
 
@@ -342,6 +358,26 @@ class BoxMeanReversionManager:
             f"상단={upper:.8f}({upper_count}회) 하단={lower:.8f}({lower_count}회) "
             f"폭={width_pct:.2f}%"
         )
+
+        # ── 생성 직후 현재가가 outside이면 즉시 무효화 ──
+        try:
+            ticker = await self._adapter.get_ticker(pair)
+            current_price = ticker.get("price") or ticker.get("last")
+            if current_price:
+                near_pct = float(params.get("near_bound_pct", 0.3)) / 100
+                tol = tolerance_pct / 100
+                cp = float(current_price)
+                is_outside = cp < lower * (1 - tol) or cp > upper * (1 + tol)
+                if is_outside:
+                    await self._invalidate_box(box.id, "created_outside_price")
+                    logger.info(
+                        f"[BoxMgr] {pair}: 박스 생성 직후 현재가 outside → 즉시 무효화 "
+                        f"(price={cp:.4f} box=[{lower:.4f}, {upper:.4f}])"
+                    )
+                    return None
+        except Exception as e:
+            logger.warning(f"[BoxMgr] {pair}: 박스 생성 후 outside 체크 실패 — {e}")
+
         return box
 
     # ──────────────────────────────────────────
