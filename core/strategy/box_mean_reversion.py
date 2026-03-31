@@ -96,7 +96,17 @@ class BoxMeanReversionManager:
         """pair에 대한 박스 역추세 태스크 2개 등록."""
         self._params[pair] = params
         self._last_seen_open_time[pair] = None
-        self._prev_box_state[pair] = None
+
+        # 재시작 시 현재가로 prev_state 초기화 (None → 초기 tick에서 잘못된 진입 방지)
+        try:
+            ticker = await self._adapter.get_ticker(pair)
+            current_price = ticker.get("price") or ticker.get("last")
+            if current_price:
+                self._prev_box_state[pair] = await self._is_price_in_box(pair, float(current_price))
+            else:
+                self._prev_box_state[pair] = None
+        except Exception:
+            self._prev_box_state[pair] = None
 
         # 기존 태스크 정리
         await self._supervisor.stop_group(pair)
@@ -408,6 +418,9 @@ class BoxMeanReversionManager:
         """
         현재 가격이 박스 어느 구간에 있는지 반환.
         "near_lower" | "near_upper" | "middle" | "outside" | None(박스 없음)
+
+        진입 범위는 near_bound_pct(기본 0.3%) 기준 양방향 경계 사용.
+        백테스트 엔진과 동일 로직.
         """
         box = await self._get_active_box(pair)
         if not box:
@@ -415,13 +428,14 @@ class BoxMeanReversionManager:
 
         upper = float(box.upper_bound)
         lower = float(box.lower_bound)
-        tol = float(box.tolerance_pct) / 100
+        params = self._params.get(pair, {})
+        near_pct = float(params.get("near_bound_pct", 0.3)) / 100
 
-        if price <= lower * (1 + tol):
+        if lower * (1 - near_pct) <= price <= lower * (1 + near_pct):
             return "near_lower"
-        elif price >= upper * (1 - tol):
+        elif upper * (1 - near_pct) <= price <= upper * (1 + near_pct):
             return "near_upper"
-        elif lower * (1 - tol) <= price <= upper * (1 + tol):
+        elif lower * (1 + near_pct) < price < upper * (1 - near_pct):
             return "middle"
         else:
             return "outside"
