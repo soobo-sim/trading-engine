@@ -100,7 +100,7 @@ class BoxMeanReversionManager:
         # 재시작 시 현재가로 prev_state 초기화 (None → 초기 tick에서 잘못된 진입 방지)
         try:
             ticker = await self._adapter.get_ticker(pair)
-            current_price = ticker.get("price") or ticker.get("last")
+            current_price = ticker.last
             if current_price:
                 self._prev_box_state[pair] = await self._is_price_in_box(pair, float(current_price))
             else:
@@ -362,7 +362,7 @@ class BoxMeanReversionManager:
         # ── 생성 직후 현재가가 outside이면 즉시 무효화 ──
         try:
             ticker = await self._adapter.get_ticker(pair)
-            current_price = ticker.get("price") or ticker.get("last")
+            current_price = ticker.last
             if current_price:
                 near_pct = float(params.get("near_bound_pct", 0.3)) / 100
                 tol = tolerance_pct / 100
