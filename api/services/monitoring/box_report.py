@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import and_, desc, select
@@ -101,24 +101,51 @@ def build_box_telegram_text(prefix: str, time_str: str, pair: str, data: dict) -
         fp = data.get("formation_progress")
         if fp:
             min_t = fp["min_touches"]
-            remaining = fp["candles_remaining"]
             tf = data.get("basis_timeframe", "4h")
-            lines.append(
-                f"📊 형성 진행: 상단 {fp['upper_touches']}/{min_t} "
-                f"하단 {fp['lower_touches']}/{min_t} — "
-                f"최소 {remaining}봉({tf}) 후"
-            )
+            fail_reason = fp.get("fail_reason", "터치 부족")
+            upper_t = fp["upper_touches"]
+            lower_t = fp["lower_touches"]
 
-    # 진입 조건 N/3 표시
+            if fail_reason == "폭 부족" and fp.get("width_pct") is not None:
+                width = fp["width_pct"]
+                min_w = fp.get("min_width_pct", 0)
+                lines.append(
+                    f"📊 터치 충분(상{upper_t}/하{lower_t}) but "
+                    f"박스 폭 {width:.2f}% < 최소 {min_w:.2f}% → 더 넓은 박스 대기"
+                )
+            else:
+                remaining = fp["candles_remaining"]
+                if remaining > 0:
+                    lines.append(
+                        f"📊 터치 진행: 상단 {upper_t}/{min_t} 하단 {lower_t}/{min_t} — "
+                        f"최소 {remaining}봉({tf}) 더 필요"
+                    )
+                else:
+                    lines.append(
+                        f"📊 터치 진행: 상단 {upper_t}/{min_t} 하단 {lower_t}/{min_t}"
+                    )
+
+    # 진입 조건 개별 표시
     met = data.get("conditions_met", 0)
     total = data.get("conditions_total", 3)
     entry_blockers = data.get("entry_blockers", [])
+    has_box = "✅박스" if box else "❌박스"
+    has_balance = "✅잔고"  # 잔고는 보고 시점에 이미 조회됨
+    has_strategy = "✅전략"
     if entry_blockers:
-        lines.append(f"🚫 {met}/{total} | {' | '.join(entry_blockers)}")
+        lines.append(f"🚫 {met}/{total} | {has_box} {has_balance} {has_strategy} | {entry_blockers[0]}")
     else:
-        lines.append(f"✅ {met}/{total} 진입 조건 충족")
+        lines.append(f"✅ {met}/{total} 진입 조건 충족 | {has_box} {has_balance} {has_strategy}")
 
-    lines.append(f"{data['basis_timeframe']}봉 시작: {data['candle_open_time_jst']} JST")
+    # 다음 캔들 시간
+    next_min_str = data.get("next_candle_minutes_str", "")
+    tf_label = data.get("basis_timeframe", "4h")
+    candle_time = data.get("candle_open_time_jst", "불명")
+    if candle_time != "불명":
+        suffix = f" ({next_min_str})" if next_min_str else ""
+        lines.append(f"⏰ 다음 {tf_label}봉: {candle_time} JST{suffix}")
+    else:
+        lines.append(f"⏰ 다음 {tf_label}봉: 불명")
 
     currency = pair.split("_")[0]
     pos = data.get("position")
@@ -267,6 +294,21 @@ async def generate_box_report(
                 highs = [max(float(c.open), float(c.close)) for c in prog_candles]
                 lows = [min(float(c.open), float(c.close)) for c in prog_candles]
                 progress = detect_box_progress(highs, lows, tol, min_t)
+                # 박스 폭 + 미형성 사유 계산
+                width_pct = None
+                min_width_pct = None
+                box_fail_reason = "터치 부족"
+                if progress.upper_center and progress.lower_center and progress.lower_center > 0:
+                    width_pct = round(
+                        (progress.upper_center - progress.lower_center)
+                        / progress.lower_center * 100, 3
+                    )
+                    fee_rate = float(params.get("fee_rate_pct", 0.0))
+                    min_width_pct = round(tol * 2 + fee_rate * 2, 3)
+                    if progress.upper_touches >= min_t and progress.lower_touches >= min_t:
+                        box_fail_reason = "폭 부족"
+                    else:
+                        box_fail_reason = "터치 부족"
                 formation_progress = {
                     "upper_touches": progress.upper_touches,
                     "lower_touches": progress.lower_touches,
@@ -274,6 +316,9 @@ async def generate_box_report(
                     "candles_remaining": progress.candles_remaining,
                     "upper_center": progress.upper_center,
                     "lower_center": progress.lower_center,
+                    "width_pct": width_pct,
+                    "min_width_pct": min_width_pct,
+                    "fail_reason": box_fail_reason,
                 }
         except Exception as e:
             logger.warning(f"[BoxReport] 형성 진행 계산 실패: {e}")
@@ -328,10 +373,24 @@ async def generate_box_report(
     )
     latest_candle = result.scalar_one_or_none()
     latest_open_time = latest_candle.open_time if latest_candle else None
-    candle_open_time_jst = (
-        latest_open_time.astimezone(JST).strftime("%H:%M")
-        if latest_open_time else "불명"
-    )
+    candle_open_time_jst = "불명"
+    next_candle_jst = None
+    next_candle_minutes_str = ""
+    if latest_open_time:
+        tf_hours = int(basis_tf.replace("h", "")) if basis_tf.endswith("h") else 4
+        # timezone-aware 처리
+        if latest_open_time.tzinfo is None:
+            from datetime import timezone as _tz
+            latest_open_time = latest_open_time.replace(tzinfo=_tz.utc)
+        next_open = latest_open_time + timedelta(hours=tf_hours)
+        next_open_jst = next_open.astimezone(JST)
+        candle_open_time_jst = next_open_jst.strftime("%H:%M")
+        next_candle_jst = next_open_jst
+        diff_min = int((next_open - now_jst.astimezone(next_open.tzinfo)).total_seconds() / 60)
+        if diff_min > 0:
+            next_candle_minutes_str = f"{diff_min}분 후"
+        else:
+            next_candle_minutes_str = "대기 중"
 
     last_candle_close = float(latest_candle.close) if latest_candle else None
     candle_change_pct = (
@@ -380,6 +439,7 @@ async def generate_box_report(
         "coin_available": coin_available,
         "basis_timeframe": basis_tf,
         "candle_open_time_jst": candle_open_time_jst,
+        "next_candle_minutes_str": next_candle_minutes_str,
         "strategy_name": strategy.name,
         "strategy_id": strategy.id,
     }
