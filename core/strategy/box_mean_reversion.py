@@ -882,13 +882,13 @@ class BoxMeanReversionManager:
 
     @staticmethod
     def _candle_high(candle: Any) -> float:
-        """몸통 고점 (max(open, close)) — 꼬리 배제 1차 기준."""
-        return float(max(candle.open, candle.close))
+        """꼬리 포함 고점 (candle.high) — 백테스트/box-detect API와 통일."""
+        return float(candle.high)
 
     @staticmethod
     def _candle_low(candle: Any) -> float:
-        """몸통 저점 (min(open, close)) — 꼬리 배제 1차 기준."""
-        return float(min(candle.open, candle.close))
+        """꼬리 포함 저점 (candle.low) — 백테스트/box-detect API와 통일."""
+        return float(candle.low)
 
     @staticmethod
     def _find_cluster(
