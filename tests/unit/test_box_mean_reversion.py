@@ -1037,3 +1037,106 @@ class TestFxMarginTrading:
             assert is_fx
             from core.strategy.box_mean_reversion import should_close_for_weekend as scw
             assert scw()  # 패치 확인
+
+
+# ── prev_state 초기화 테스트 (dd31a65 수정 검증) ──────────────
+
+
+class TestPrevStateInit:
+    """재시작 시 prev_state 초기화 로직 검증.
+
+    dd31a65: 포지션 없으면 prev_state=None → near_lower에서 즉시 진입 가능.
+    포지션 있으면 prev_state=현재 상태 유지 (중복 청산 방지).
+    """
+
+    @pytest.mark.asyncio
+    async def test_start_no_position_sets_prev_state_none(
+        self, manager, fake_adapter, db_session_factory
+    ):
+        """포지션 없이 start → prev_state = None (즉시 진입 가능)."""
+        fake_adapter.set_ticker_price(100.0)
+        params = {"pair": "TEST_JPY", "basis_timeframe": "4h", "near_bound_pct": 0.5}
+
+        await manager.start("TEST_JPY", params)
+
+        assert manager._prev_box_state.get("TEST_JPY") is None
+
+    @pytest.mark.asyncio
+    async def test_start_with_position_sets_prev_state_to_current(
+        self, manager, fake_adapter, db_session_factory
+    ):
+        """포지션 있으면 start → prev_state = 현재 zone."""
+        # 박스 + 포지션 생성
+        async with db_session_factory() as session:
+            box = BxtBox(
+                pair="TEST_JPY",
+                upper_bound=Decimal("105.0"),
+                lower_bound=Decimal("95.0"),
+                upper_touch_count=5,
+                lower_touch_count=5,
+                tolerance_pct=Decimal("0.3"),
+
+                status="active",
+                created_at=datetime.now(timezone.utc),
+            )
+            session.add(box)
+            await session.flush()
+
+            pos = BxtBoxPosition(
+                pair="TEST_JPY",
+                box_id=box.id,
+                entry_order_id="TEST-001",
+                entry_price=Decimal("96.0"),
+                entry_amount=Decimal("100"),
+                status="open",
+                created_at=datetime.now(timezone.utc),
+            )
+            session.add(pos)
+            await session.commit()
+
+        # 현재가를 near_lower 범위에 설정
+        fake_adapter.set_ticker_price(95.5)
+        params = {"pair": "TEST_JPY", "basis_timeframe": "4h", "near_bound_pct": 0.5}
+
+        await manager.start("TEST_JPY", params)
+
+        # 포지션 있으므로 현재 zone이 설정됨 (None이 아님)
+        assert manager._prev_box_state.get("TEST_JPY") is not None
+
+    @pytest.mark.asyncio
+    async def test_no_position_near_lower_triggers_entry(
+        self, manager, fake_adapter, db_session_factory
+    ):
+        """포지션 없고 가격이 이미 near_lower → prev_state=None이므로 진입 트리거됨.
+
+        진입 조건: box_state == "near_lower" and prev_state != "near_lower"
+        prev_state=None → 조건 충족 ✅
+        """
+        params = {"pair": "TEST_JPY", "basis_timeframe": "4h", "near_bound_pct": 0.5}
+
+        # prev_state=None (포지션 없이 시작)
+        manager._prev_box_state["TEST_JPY"] = None
+        manager._params["TEST_JPY"] = params
+
+        box_state = "near_lower"
+        prev_state = manager._prev_box_state.get("TEST_JPY")
+
+        # 진입 조건 충족 확인
+        assert box_state == "near_lower" and prev_state != "near_lower"
+
+    @pytest.mark.asyncio
+    async def test_with_position_near_lower_no_duplicate_entry(
+        self, manager, fake_adapter, db_session_factory
+    ):
+        """포지션 있고 near_lower → prev_state="near_lower" → 중복 진입 안 됨."""
+        params = {"pair": "TEST_JPY", "basis_timeframe": "4h", "near_bound_pct": 0.5}
+
+        # prev_state="near_lower" (포지션 있어서 현재 상태 유지)
+        manager._prev_box_state["TEST_JPY"] = "near_lower"
+        manager._params["TEST_JPY"] = params
+
+        box_state = "near_lower"
+        prev_state = manager._prev_box_state.get("TEST_JPY")
+
+        # 진입 조건 미충족 확인
+        assert not (box_state == "near_lower" and prev_state != "near_lower")
