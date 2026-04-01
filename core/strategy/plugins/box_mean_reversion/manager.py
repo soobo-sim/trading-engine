@@ -98,12 +98,18 @@ class BoxMeanReversionManager:
         self._params[pair] = params
         self._last_seen_open_time[pair] = None
 
-        # 재시작 시 현재가로 prev_state 초기화 (None → 초기 tick에서 잘못된 진입 방지)
+        # 재시작 시 prev_state 초기화
+        # 포지션 있으면 현재 상태 유지 (중복 청산 방지)
+        # 포지션 없으면 None으로 시작 → 이미 near_lower에 있으면 즉시 진입 가능
         try:
-            ticker = await self._adapter.get_ticker(pair)
-            current_price = ticker.last
-            if current_price:
-                self._prev_box_state[pair] = await self._is_price_in_box(pair, float(current_price))
+            has_pos = await self._has_open_position(pair)
+            if has_pos:
+                ticker = await self._adapter.get_ticker(pair)
+                current_price = ticker.last
+                if current_price:
+                    self._prev_box_state[pair] = await self._is_price_in_box(pair, float(current_price))
+                else:
+                    self._prev_box_state[pair] = None
             else:
                 self._prev_box_state[pair] = None
         except Exception:
