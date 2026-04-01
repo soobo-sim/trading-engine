@@ -670,7 +670,7 @@ class GmoFxAdapter:
                     async for raw in ws:
                         try:
                             data = json.loads(raw)
-                            if data.get("channel") == "ticker":
+                            if data.get("channel") == "ticker" or data.get("symbol"):
                                 ask = float(data.get("ask", 0))
                                 bid = float(data.get("bid", 0))
                                 mid = (ask + bid) / 2 if ask > 0 and bid > 0 else 0
