@@ -244,7 +244,8 @@ class BoxMeanReversionManager:
         async def _on_trade(price: float, amount: float) -> None:
             await price_queue.put(price)
 
-        await self._adapter.subscribe_trades(pair, _on_trade)
+        # subscribe_tradesは永久ループなのでバックグラウンドタスクで実行
+        asyncio.create_task(self._adapter.subscribe_trades(pair, _on_trade))
 
         try:
             while True:
