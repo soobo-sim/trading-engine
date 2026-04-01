@@ -268,6 +268,8 @@ async def generate_box_report(
     next_scan_jst = None
     next_scan_minutes_str = ""
     box_conditions_str = ""
+    tol_str = str(params.get("box_tolerance_pct", 0.5))
+    min_t_str = str(params.get("box_min_touches", params.get("min_touches", 3)))
     if box_row:
         upper = float(box_row.upper_bound)
         lower = float(box_row.lower_bound)
