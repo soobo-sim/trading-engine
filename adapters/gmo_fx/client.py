@@ -401,11 +401,12 @@ class GmoFxAdapter:
         client = self._get_client()
         symbol = self._pair_to_symbol(pair)
         query = urlencode({"symbol": symbol})
-        sign_path = f"/v1/activeOrders?{query}"
+        sign_path = "/v1/activeOrders"
+        request_path = f"{sign_path}?{query}"
         headers = self._get_auth_headers("GET", sign_path)
 
         try:
-            response = await client.get(f"{self._private_url}{sign_path}", headers=headers)
+            response = await client.get(f"{self._private_url}{request_path}", headers=headers)
             data = response.json()
             self._raise_for_exchange_error(response, data)
         except (AuthenticationError, RateLimitError, ExchangeError):
@@ -424,11 +425,12 @@ class GmoFxAdapter:
         """
         client = self._get_client()
         query = urlencode({"rootOrderId": order_id})
-        sign_path = f"/v1/orders?{query}"
+        sign_path = "/v1/orders"
+        request_path = f"{sign_path}?{query}"
         headers = self._get_auth_headers("GET", sign_path)
 
         try:
-            response = await client.get(f"{self._private_url}{sign_path}", headers=headers)
+            response = await client.get(f"{self._private_url}{request_path}", headers=headers)
             data = response.json()
             self._raise_for_exchange_error(response, data)
         except (AuthenticationError, RateLimitError, ExchangeError):
@@ -569,11 +571,12 @@ class GmoFxAdapter:
         client = self._get_client()
         symbol = product_code.upper()
         query = urlencode({"symbol": symbol})
-        sign_path = f"/v1/openPositions?{query}"
+        sign_path = "/v1/openPositions"
+        request_path = f"{sign_path}?{query}"
         headers = self._get_auth_headers("GET", sign_path)
 
         try:
-            response = await client.get(f"{self._private_url}{sign_path}", headers=headers)
+            response = await client.get(f"{self._private_url}{request_path}", headers=headers)
             data = response.json()
             self._raise_for_exchange_error(response, data)
         except (AuthenticationError, RateLimitError, ExchangeError):
@@ -617,11 +620,12 @@ class GmoFxAdapter:
         """
         client = self._get_client()
         query = urlencode({"symbol": symbol.upper()})
-        sign_path = f"/v1/positionSummary?{query}"
+        sign_path = "/v1/positionSummary"
+        request_path = f"{sign_path}?{query}"
         headers = self._get_auth_headers("GET", sign_path)
 
         try:
-            response = await client.get(f"{self._private_url}{sign_path}", headers=headers)
+            response = await client.get(f"{self._private_url}{request_path}", headers=headers)
             data = response.json()
             self._raise_for_exchange_error(response, data)
         except (AuthenticationError, RateLimitError, ExchangeError):
@@ -1022,11 +1026,12 @@ class GmoFxAdapter:
             params["symbol"] = symbol.upper()
 
         query = urlencode(params) if params else ""
-        sign_path = f"/v1/executions?{query}" if query else "/v1/executions"
+        sign_path = "/v1/executions"
+        request_path = f"{sign_path}?{query}" if query else sign_path
         headers = self._get_auth_headers("GET", sign_path)
 
         try:
-            response = await client.get(f"{self._private_url}{sign_path}", headers=headers)
+            response = await client.get(f"{self._private_url}{request_path}", headers=headers)
             data = response.json()
             self._raise_for_exchange_error(response, data)
         except (AuthenticationError, RateLimitError, ExchangeError):
@@ -1045,11 +1050,12 @@ class GmoFxAdapter:
         client = self._get_client()
         params = {"symbol": symbol.upper(), "count": str(count)}
         query = urlencode(params)
-        sign_path = f"/v1/latestExecutions?{query}"
+        sign_path = "/v1/latestExecutions"
+        request_path = f"{sign_path}?{query}"
         headers = self._get_auth_headers("GET", sign_path)
 
         try:
-            response = await client.get(f"{self._private_url}{sign_path}", headers=headers)
+            response = await client.get(f"{self._private_url}{request_path}", headers=headers)
             data = response.json()
             self._raise_for_exchange_error(response, data)
         except (AuthenticationError, RateLimitError, ExchangeError):

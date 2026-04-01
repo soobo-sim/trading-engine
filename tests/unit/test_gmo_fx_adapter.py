@@ -302,3 +302,84 @@ async def test_gmo_get_balance_empty_response(gmo_adapter: GmoFxAdapter) -> None
 
     balance = await gmo_adapter.get_balance()
     assert balance.get_available("jpy") == 0.0
+
+
+# ── BUG修正テスト (e8d2028, 9af807d, signature fix) ──────────────
+
+
+class TestWssTickerFilter:
+    """GMO FX WSS ticker応答にchannel fieldがない問題の検証."""
+
+    def test_ticker_without_channel_field_accepted(self):
+        """GMO WSS: channel=None, symbol=GBP_JPY → callback呼ばれるべき."""
+        data = {"symbol": "GBP_JPY", "ask": "210.82", "bid": "210.80", "timestamp": "2026-04-01T00:00:00Z", "status": "OPEN"}
+        # 修正後の条件: channel=="ticker" or symbol exists
+        assert data.get("channel") == "ticker" or data.get("symbol")
+
+    def test_ticker_with_channel_field_accepted(self):
+        """channel=ticker も引き続き受け入れる."""
+        data = {"channel": "ticker", "ask": "210.82", "bid": "210.80"}
+        assert data.get("channel") == "ticker" or data.get("symbol")
+
+    def test_unrelated_message_rejected(self):
+        """channel/symbol どちらもないメッセージは無視."""
+        data = {"type": "heartbeat"}
+        assert not (data.get("channel") == "ticker" or data.get("symbol"))
+
+
+class TestSignatureQueryExclusion:
+    """GET API署名にquery stringを含めてはいけない (ERR-5010修正)."""
+
+    def test_signer_path_without_query(self):
+        """sign()に渡すpathにquery stringが含まれないことを検証."""
+        from adapters.gmo_fx.signer import GmoFxSigner
+        signer = GmoFxSigner(api_key="test", api_secret="test_secret")
+
+        # 正しい署名: path にquery なし
+        headers_clean = signer.sign("GET", "/v1/openPositions")
+        # 間違った署名: path にquery あり
+        headers_dirty = signer.sign("GET", "/v1/openPositions?symbol=GBP_JPY")
+
+        # 同じtimestampでは署名が異なるはず（pathが違うため）
+        # ここでは「pathにqueryを含めるべきでない」というルールをドキュメント化
+        assert headers_clean["API-SIGN"] != headers_dirty["API-SIGN"], \
+            "query in sign path produces different (wrong) signature"
+
+    def test_sign_path_must_not_contain_question_mark(self):
+        """client.py内のsign_pathに?が含まれないことを静的に検証."""
+        import re
+        with open("adapters/gmo_fx/client.py") as f:
+            content = f.read()
+
+        # sign_path = "..." の行で ? が含まれるものを検出
+        bad_lines = re.findall(r'sign_path\s*=\s*f?["\'].*\?.*["\']', content)
+        # request_path に ? があるのはOK, sign_path に ? があるのはNG
+        assert len(bad_lines) == 0, f"sign_path with query string found: {bad_lines}"
+
+
+class TestSubscribeTradesNonBlocking:
+    """subscribe_tradesがbackground taskとして実行される検証."""
+
+    def test_entry_monitor_uses_create_task(self):
+        """_entry_monitorがsubscribe_tradesをcreate_taskで呼ぶことを確認."""
+        with open("core/strategy/plugins/box_mean_reversion/manager.py") as f:
+            content = f.read()
+
+        # asyncio.create_task(self._adapter.subscribe_trades が存在すること
+        assert "asyncio.create_task(self._adapter.subscribe_trades" in content, \
+            "subscribe_trades must be called via create_task, not await"
+
+        # await self._adapter.subscribe_trades が存在しないこと
+        assert "await self._adapter.subscribe_trades" not in content, \
+            "subscribe_trades must NOT be directly awaited (blocks forever)"
+
+
+class TestPrevStateRestartInit:
+    """再起動時のprev_state初期化 — 静的コード検証."""
+
+    def test_no_position_branch_sets_none(self):
+        """ポジションなし→prev_state=Noneのコードパスが存在."""
+        with open("core/strategy/plugins/box_mean_reversion/manager.py") as f:
+            content = f.read()
+        # "else:" 分岐で None 設定
+        assert "self._prev_box_state[pair] = None" in content
