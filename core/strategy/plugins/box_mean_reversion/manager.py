@@ -44,7 +44,7 @@ from core.exchange.base import ExchangeAdapter
 from core.exchange.session import is_fx_market_open, should_close_for_weekend, minutes_until_market_close
 from core.exchange.types import OrderType
 from core.task.supervisor import TaskSupervisor
-from core.analysis.box_detector import find_cluster
+from core.analysis.box_detector import find_cluster, find_cluster_percentile
 from core.strategy.box_signals import classify_price_in_box, check_box_invalidation, linear_slope
 
 logger = logging.getLogger(__name__)
@@ -296,6 +296,7 @@ class BoxMeanReversionManager:
         min_touches = int(params.get("box_min_touches", 3))
         lookback = int(params.get("box_lookback_candles", 60))
         basis_tf = params.get("basis_timeframe", "4h")
+        cluster_percentile = float(params.get("box_cluster_percentile", 100.0))
 
         existing = await self._get_active_box(pair)
         if existing:
@@ -309,11 +310,11 @@ class BoxMeanReversionManager:
 
         upper, upper_count = self._find_cluster(
             [self._candle_high(c) for c in candles],
-            tolerance_pct, min_touches, mode="high",
+            tolerance_pct, min_touches, mode="high", percentile=cluster_percentile,
         )
         lower, lower_count = self._find_cluster(
             [self._candle_low(c) for c in candles],
-            tolerance_pct, min_touches, mode="low",
+            tolerance_pct, min_touches, mode="low", percentile=cluster_percentile,
         )
 
         if upper is None or lower is None:
@@ -952,9 +953,10 @@ class BoxMeanReversionManager:
         tolerance_pct: float,
         min_touches: int,
         mode: str,
+        percentile: float = 100.0,
     ) -> tuple[Optional[float], int]:
-        """core.analysis.box_detector.find_cluster 위임."""
-        return find_cluster(prices, tolerance_pct, min_touches, mode)
+        """core.analysis.box_detector.find_cluster_percentile 위임."""
+        return find_cluster_percentile(prices, tolerance_pct, min_touches, mode, percentile)
 
     @staticmethod
     def _linear_slope(xs: list[int], ys: list[float]) -> float:

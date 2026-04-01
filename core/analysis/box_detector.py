@@ -69,11 +69,53 @@ class BoxDetectResult:
 # Public API
 # ──────────────────────────────────────────
 
+def find_cluster_percentile(
+    prices: list[float],
+    tolerance_pct: float,
+    min_touches: int,
+    mode: str,
+    percentile: float = 100.0,
+) -> tuple[Optional[float], int]:
+    """
+    Percentile 필터링 후 find_cluster 실행.
+
+    mode="high": 상위 percentile% (고가 극단) 추출 → 상단 클러스터
+    mode="low":  하위 percentile% (저가 극단) 추출 → 하단 클러스터
+    percentile=100 → 전체 사용 = find_cluster와 완전 동일 (v1 호환)
+
+    Args:
+        prices: OHLC 기반 고가 목록(mode=high) 또는 저가 목록(mode=low)
+        tolerance_pct: 클러스터 허용 오차 (%)
+        min_touches: 최소 터치 횟수
+        mode: "high" | "low"
+        percentile: 사용할 극단 비율 (0 < percentile ≤ 100)
+
+    Returns:
+        (cluster_center, touch_count)
+    """
+    if percentile >= 100:
+        return find_cluster(prices, tolerance_pct, min_touches, mode)
+
+    if not prices:
+        return None, 0
+
+    pct = max(0.0, min(100.0, percentile))
+    n = max(1, int(len(prices) * pct / 100))
+
+    if mode == "high":
+        filtered = sorted(prices, reverse=True)[:n]
+    else:
+        filtered = sorted(prices)[:n]
+
+    return find_cluster(filtered, tolerance_pct, min_touches, mode)
+
+
 def detect_box(
     highs: list[float],
     lows: list[float],
     tolerance_pct: float = 0.5,
     min_touches: int = 3,
+    cluster_percentile: float = 100.0,
 ) -> BoxDetectResult:
     """
     캔들 high/low 리스트로 박스권 감지.
@@ -83,6 +125,7 @@ def detect_box(
         lows:  각 캔들의 저가 리스트
         tolerance_pct: 클러스터 허용 오차 (%)
         min_touches: 최소 터치 횟수
+        cluster_percentile: 극단 percentile 필터 (100=기존 동작, v1 호환)
 
     Returns:
         BoxDetectResult
@@ -96,8 +139,12 @@ def detect_box(
             reason=f"캔들 부족: {len(highs)}개 (최소 {min_touches * 2}개 필요)",
         )
 
-    upper, upper_count = find_cluster(highs, tolerance_pct, min_touches, mode="high")
-    lower, lower_count = find_cluster(lows, tolerance_pct, min_touches, mode="low")
+    upper, upper_count = find_cluster_percentile(
+        highs, tolerance_pct, min_touches, mode="high", percentile=cluster_percentile
+    )
+    lower, lower_count = find_cluster_percentile(
+        lows, tolerance_pct, min_touches, mode="low", percentile=cluster_percentile
+    )
 
     if upper is None or lower is None:
         return BoxDetectResult(

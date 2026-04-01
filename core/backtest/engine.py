@@ -18,7 +18,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from core.strategy.signals import compute_trend_signal
-from core.analysis.box_detector import detect_box
+from core.analysis.box_detector import detect_box, find_cluster_percentile
 from core.strategy.box_signals import classify_price_in_box, check_box_invalidation, linear_slope
 from core.exchange.session import should_close_for_weekend, is_fx_market_open
 
@@ -489,6 +489,7 @@ def _run_box_backtest(
     position_size = float(params.get("position_size_pct", config.position_size_pct))
     exchange_type = params.get("exchange_type", "spot")
     is_fx = exchange_type == "fx"
+    cluster_percentile = float(params.get("box_cluster_percentile", 100.0))
 
     min_candles = max(box_window, 10)
     if len(candles) < min_candles:
@@ -593,7 +594,7 @@ def _run_box_backtest(
                 window = candles[max(0, i - box_window):i]
                 highs = [float(c.high) for c in window]
                 lows = [float(c.low) for c in window]
-                box = detect_box(highs, lows, tolerance_pct=tolerance_pct, min_touches=min_touches)
+                box = detect_box(highs, lows, tolerance_pct=tolerance_pct, min_touches=min_touches, cluster_percentile=cluster_percentile)
 
                 if not box.box_detected:
                     prev_box_state = None
