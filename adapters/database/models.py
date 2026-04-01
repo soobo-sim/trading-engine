@@ -16,6 +16,7 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     Column,
+    Date,
     DateTime,
     Enum,
     Float,
@@ -27,6 +28,7 @@ from sqlalchemy import (
     PrimaryKeyConstraint,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -764,3 +766,107 @@ class GridResult(Base):
     mdd = Column(Float, nullable=True)
 
     run = relationship("BacktestRun", back_populates="grid_results")
+
+
+# ──────────────────────────────────────────────────────────────
+# 전략 분석 시스템 (공유 테이블, prefix 없음)
+# 설계서: trader-common/solution-design/STRATEGY_ANALYSIS_SYSTEM.md §2
+# ──────────────────────────────────────────────────────────────
+
+class AnalysisReport(Base):
+    """분석 보고 헤더 — 목록 화면 카드 1개 = 1행, 상세 화면 스크롤 항목 1개 = 1행."""
+
+    __tablename__ = "analysis_reports"
+    __table_args__ = (
+        Index("idx_reports_pair_time", "currency_pair", "reported_at"),
+        Index("idx_reports_exchange_type", "exchange", "report_type"),
+        UniqueConstraint("exchange", "currency_pair", "report_type", "reported_at",
+                         name="uq_analysis_reports"),
+        {"extend_existing": True},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    exchange = Column(String(50), nullable=False)           # 'gmofx'
+    currency_pair = Column(String(20), nullable=False)      # 'USD_JPY'
+    report_type = Column(String(20), nullable=False)        # 'daily', 'weekly', 'monthly'
+    reported_at = Column(DateTime(timezone=True), nullable=False)
+    chart_start = Column(DateTime(timezone=True), nullable=False)
+    chart_end = Column(DateTime(timezone=True), nullable=False)
+    strategy_active = Column(Boolean, nullable=False, default=False)
+    strategy_id = Column(Integer, nullable=True)            # FK 없음 — 거래소별 테이블 다름
+    final_decision = Column(String(50), nullable=True)      # 'approved','rejected','conditional','hold'
+    final_rationale = Column(Text, nullable=True)
+    next_review = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    analyses = relationship(
+        "AgentAnalysis", back_populates="report", cascade="all, delete-orphan"
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<AnalysisReport(id={self.id}, pair={self.currency_pair!r}, "
+            f"type={self.report_type!r}, decision={self.final_decision!r})>"
+        )
+
+
+class AgentAnalysis(Base):
+    """에이전트별 분석 — 보고 1건 × alice / samantha / rachel 각 1행."""
+
+    __tablename__ = "agent_analysis"
+    __table_args__ = (
+        Index("idx_agent_analysis_report", "report_id"),
+        Index("idx_agent_analysis_agent", "agent_name"),
+        UniqueConstraint("report_id", "agent_name", name="uq_agent_analysis"),
+        {"extend_existing": True},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    report_id = Column(
+        Integer, ForeignKey("analysis_reports.id", ondelete="CASCADE"), nullable=False
+    )
+    agent_name = Column(String(50), nullable=False)         # 'alice', 'samantha', 'rachel'
+    summary = Column(Text, nullable=False)                  # 목록 화면 2~3줄 요약
+    structured_data = Column(JSON, nullable=False)          # JSONB — 프로그래밍적 접근용
+    full_text = Column(Text, nullable=True)                 # 상세 화면 Markdown 전문
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    report = relationship("AnalysisReport", back_populates="analyses")
+
+    def __repr__(self) -> str:
+        return (
+            f"<AgentAnalysis(id={self.id}, report_id={self.report_id}, "
+            f"agent={self.agent_name!r})>"
+        )
+
+
+class AgentReflection(Base):
+    """에이전트 미활용 데이터 발굴 반성 사이클 — 단기/중기/장기."""
+
+    __tablename__ = "agent_reflection"
+    __table_args__ = (
+        Index("idx_reflection_date", "reflection_date"),
+        Index("idx_reflection_agent", "agent_name"),
+        UniqueConstraint("reflection_date", "agent_name", "period_type",
+                         name="uq_agent_reflection"),
+        {"extend_existing": True},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    reflection_date = Column(Date, nullable=False)
+    agent_name = Column(String(50), nullable=False)         # 'alice', 'samantha', 'rachel'
+    period_type = Column(String(20), nullable=False)        # 'short', 'medium', 'long'
+    period_start = Column(Date, nullable=True)
+    period_end = Column(Date, nullable=True)
+    missed_data = Column(JSON, nullable=True)               # 단계①: 미고려 데이터 발굴
+    data_improvement = Column(JSON, nullable=True)          # 단계②: 기존 데이터 활용 개선
+    effective_decisions = Column(JSON, nullable=True)       # 단계③: 유효 판단 고정
+    action_items = Column(JSON, nullable=True)              # 다음 액션 (추적용)
+    strategy_performance = Column(JSON, nullable=True)      # 전략별 성과 평가
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    def __repr__(self) -> str:
+        return (
+            f"<AgentReflection(id={self.id}, date={self.reflection_date!r}, "
+            f"agent={self.agent_name!r}, period={self.period_type!r})>"
+        )

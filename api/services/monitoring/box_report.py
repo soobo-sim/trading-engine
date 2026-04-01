@@ -93,12 +93,17 @@ def build_box_telegram_text(prefix: str, time_str: str, pair: str, data: dict) -
     lines.append(data["health_line"])
 
     box = data.get("box")
+    currency = pair.split("_")[0]
+    pos = data.get("position")
+    has_position = pos is not None
+    is_margin = data.get("is_margin_trading", False)
+    current_price = data["current_price"]
+
     if box:
-        lines.append(f"¥{data['current_price']:,.2f} {data['position_label']} (폭 {box['box_width_pct']:.1f}%)")
+        lines.append(f"¥{current_price:,.2f} {data['position_label']} (폭 {box['box_width_pct']:.1f}%)")
         lines.append(f"하단¥{box['lower_bound']:,.2f} {box['bar_chart']} 상단¥{box['upper_bound']:,.2f}")
     else:
-        lines.append(f"¥{data['current_price']:,.2f} 📭 박스: 없음")
-        # 다음 스캔 시각
+        lines.append(f"¥{current_price:,.2f} 📭박스 미형성")
         scan_dt = data.get("next_scan_jst")
         scan_min = data.get("next_scan_minutes_str", "")
         cond_str = data.get("box_conditions_str", "")
@@ -137,42 +142,79 @@ def build_box_telegram_text(prefix: str, time_str: str, pair: str, data: dict) -
                         f"📊 터치 진행: 상단 {upper_t}/{min_t} 하단 {lower_t}/{min_t}"
                     )
 
-    # 진입 조건 개별 표시
-    met = data.get("conditions_met", 0)
-    total = data.get("conditions_total", 3)
-    entry_blockers = data.get("entry_blockers", [])
-    has_box = "✅박스" if box else "❌박스"
-    has_balance = "✅잔고"  # 잔고는 보고 시점에 이미 조회됨
-    has_strategy = "✅전략"
-    if entry_blockers:
-        lines.append(f"🚫 {met}/{total} | {has_box} {has_balance} {has_strategy} | {entry_blockers[0]}")
-    else:
-        lines.append(f"✅ {met}/{total} 진입 조건 충족 | {has_box} {has_balance} {has_strategy}")
-
-    # 다음 캔들 시간
-    next_min_str = data.get("next_candle_minutes_str", "")
-    tf_label = data.get("basis_timeframe", "4h")
-    candle_time = data.get("candle_open_time_jst", "불명")
-    if candle_time != "불명":
-        suffix = f" ({next_min_str})" if next_min_str else ""
-        lines.append(f"⏰ 다음 {tf_label}봉: {candle_time} JST{suffix}")
-    else:
-        lines.append(f"⏰ 다음 {tf_label}봉: 불명")
-
-    currency = pair.split("_")[0]
-    pos = data.get("position")
-    if pos:
+    # ── 포지션 유무에 따른 분기 ──
+    if has_position:
+        # ── 포지션 보유 모드: 청산/익절/손절 조건 표시 ──
+        entry_price = pos["entry_price"]
+        entry_amount = pos["entry_amount"]
+        pnl = pos["unrealized_pnl_jpy"]
+        pnl_pct = pos["unrealized_pnl_pct"]
+        pnl_sign = "+" if pnl >= 0 else ""
         lines.append(
-            f"JPY ¥{data['jpy_available']:,.0f} {currency} {data['coin_available']:.2f}개 | "
-            f"보유 {pos['entry_amount']}{currency} @ ¥{pos['entry_price']:,.2f} | "
-            f"미실현 ¥{pos['unrealized_pnl_jpy']:,.0f} ({pos['unrealized_pnl_pct']:.2f}%)"
+            f"📈 보유: {entry_amount:.0f}{currency} @ ¥{entry_price:,.2f} | "
+            f"미실현 {pnl_sign}¥{pnl:,.0f} ({pnl_sign}{pnl_pct:.2f}%)"
         )
+
+        if box:
+            near_bound_pct = float(data.get("near_bound_pct", 1.5))
+            tolerance_pct_val = float(data.get("tolerance_pct", 1.5))
+            stop_loss_pct = float(data.get("stop_loss_pct", 1.5))
+            upper = box["upper_bound"]
+            lower_val = box["lower_bound"]
+
+            # 익절: near_upper zone
+            tp_low = upper * (1 - near_bound_pct / 100)
+            tp_high = upper * (1 + near_bound_pct / 100)
+            tp_low_pct = (tp_low - current_price) / current_price * 100
+            tp_high_pct = (tp_high - current_price) / current_price * 100
+            tp_sign_low = "+" if tp_low_pct >= 0 else ""
+            tp_sign_high = "+" if tp_high_pct >= 0 else ""
+            lines.append(
+                f"🎯 익절: near_upper ¥{tp_low:,.2f}~¥{tp_high:,.2f} "
+                f"(현재가 {tp_sign_low}{tp_low_pct:.1f}%~{tp_sign_high}{tp_high_pct:.1f}%)"
+            )
+
+            # 손절: 박스 무효화 + 가격 SL
+            inv_price = lower_val * (1 - tolerance_pct_val / 100)
+            inv_pct = (inv_price - current_price) / current_price * 100
+            sl_price = entry_price * (1 - stop_loss_pct / 100)
+            sl_pct_val = -stop_loss_pct
+            lines.append(
+                f"🛑 손절: 박스 무효화 ¥{inv_price:,.2f} (현재가 {inv_pct:.1f}%) / "
+                f"가격SL ¥{sl_price:,.2f} ({sl_pct_val:.1f}%)"
+            )
     else:
-        lines.append(f"JPY ¥{data['jpy_available']:,.0f} {currency} {data['coin_available']:.2f}개 | 포지션 미보유")
+        # ── 포지션 없음: 진입 대기 모드 (현행) ──
+        met = data.get("conditions_met", 0)
+        total = data.get("conditions_total", 3)
+        entry_blockers = data.get("entry_blockers", [])
+        has_box = "✅박스" if box else "❌박스"
+        has_balance = "✅잔고"
+        has_strategy = "✅전략"
+        if entry_blockers:
+            lines.append(f"🚫 {met}/{total} | {has_box} {has_balance} {has_strategy} | {entry_blockers[0]}")
+        else:
+            lines.append(f"✅ {met}/{total} 진입 조건 충족 | {has_box} {has_balance} {has_strategy}")
+
+        next_min_str = data.get("next_candle_minutes_str", "")
+        tf_label = data.get("basis_timeframe", "4h")
+        candle_time = data.get("candle_open_time_jst", "불명")
+        if candle_time != "불명":
+            suffix = f" ({next_min_str})" if next_min_str else ""
+            lines.append(f"⏰ 다음 {tf_label}봉: {candle_time} JST{suffix}")
+        else:
+            lines.append(f"⏰ 다음 {tf_label}봉: 불명")
+
+    # ── 잔고 라인 (FX/현물 분기) ──
+    jpy_part = f"JPY ¥{data['jpy_available']:,.0f}"
+    if is_margin:
+        # FX: 통화 현물 라인 제거, JPY만 표시
+        lines.append(f"{jpy_part}" if has_position else f"{jpy_part} | 포지션 미보유")
+    else:
+        coin_part = f"{currency} {data['coin_available']:.2f}개"
+        lines.append(f"{jpy_part} {coin_part}" if has_position else f"{jpy_part} {coin_part} | 포지션 미보유")
 
     return "\n".join(lines)
-
-
 def build_box_memory_block(prefix: str, time_str: str, pair: str, data: dict) -> str:
     strategy_name = data.get("strategy_name", "unknown")
     strategy_id = data.get("strategy_id", "?")
@@ -489,6 +531,11 @@ async def generate_box_report(
         "next_candle_minutes_str": next_candle_minutes_str,
         "strategy_name": strategy.name,
         "strategy_id": strategy.id,
+        # P0.7: 익절/손절 계산용 파라미터 + FX 분기
+        "near_bound_pct": float(params.get("near_bound_pct", 1.5)),
+        "tolerance_pct": float(box_row.tolerance_pct) if box_row else float(params.get("box_tolerance_pct", 1.5)),
+        "stop_loss_pct": float(params.get("stop_loss_pct", 1.5)),
+        "is_margin_trading": getattr(adapter, "is_margin_trading", False),
     }
 
     telegram_text = build_box_telegram_text(prefix.upper(), time_str, pair, report_data)

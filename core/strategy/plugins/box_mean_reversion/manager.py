@@ -88,6 +88,11 @@ class BoxMeanReversionManager:
         self._params: Dict[str, Dict] = {}
         self._last_seen_open_time: Dict[str, Optional[str]] = {}
         self._prev_box_state: Dict[str, Optional[str]] = {}
+        # tick마다 DB 조회 최소화를 위한 포지션 캐시
+        # pair not in dict → cold (첫 DB 조회 필요)
+        # dict[pair] is None → 포지션 없음 (확인됨)
+        # dict[pair] is not None → 포지션 있음 (ORM 객체)
+        self._cached_position: Dict[str, Optional[Any]] = {}
 
     # ──────────────────────────────────────────
     # 시작 / 종료
@@ -134,6 +139,7 @@ class BoxMeanReversionManager:
         self._params.pop(pair, None)
         self._last_seen_open_time.pop(pair, None)
         self._prev_box_state.pop(pair, None)
+        self._cached_position.pop(pair, None)
         logger.info(f"[BoxMgr] {pair}: 박스 인프라 태스크 종료")
 
     def is_running(self, pair: str) -> bool:
@@ -282,6 +288,21 @@ class BoxMeanReversionManager:
                     pos = await self._get_open_position(pair)
                     if pos:
                         await self._close_position_market(pair, pos, "near_upper_exit")
+
+                # ── 가격 기반 손절: 마지막 방어선 (매 tick 체크) ──
+                # near_upper 청산 후 캐시가 None으로 갱신되므로 중복 발동 없음
+                pos = await self._get_open_position(pair)
+                if pos and pos.entry_price:
+                    sl_pct = float(params.get("stop_loss_pct", 1.5))
+                    if sl_pct > 0:
+                        sl_price = float(pos.entry_price) * (1 - sl_pct / 100)
+                        if price <= sl_price:
+                            logger.warning(
+                                f"[BoxMgr] {pair}: 가격 SL 발동 "
+                                f"price={price} <= sl={sl_price:.4f} "
+                                f"(entry={pos.entry_price}, sl_pct={sl_pct}%)"
+                            )
+                            await self._close_position_market(pair, pos, "price_stop_loss")
 
                 self._prev_box_state[pair] = box_state
 
@@ -750,6 +771,7 @@ class BoxMeanReversionManager:
             await db.commit()
             await db.refresh(pos)
 
+        self._cached_position[pair] = pos  # 캐시 갱신
         logger.info(
             f"[BoxMgr] 진입 기록: {pair} "
             f"order_id={entry_order_id} price={entry_price} amount={entry_amount}"
@@ -798,6 +820,7 @@ class BoxMeanReversionManager:
             )
             await db.commit()
 
+        self._cached_position[pair] = None  # 캐시 해제: 포지션 없음
         logger.info(
             f"[BoxMgr] 청산 기록: {pair} "
             f"reason={exit_reason} pnl={pnl_jpy:+.2f}JPY ({pnl_pct:+.2f}%)"
@@ -841,7 +864,10 @@ class BoxMeanReversionManager:
     # ──────────────────────────────────────────
 
     async def _get_open_position(self, pair: str) -> Optional[Any]:
-        """현재 open 포지션 반환."""
+        """현재 open 포지션 반환. 인메모리 캐시 우선 — tick 루프의 DB 부하 최소화."""
+        if pair in self._cached_position:
+            return self._cached_position[pair]
+        # cold path: 최초 또는 캐시 무효화 후 DB 조회
         PosModel = self._box_position_model
         pair_col_attr = getattr(PosModel, self._pair_column)
         async with self._session_factory() as db:
@@ -851,7 +877,9 @@ class BoxMeanReversionManager:
                 .order_by(desc(PosModel.created_at))
                 .limit(1)
             )
-            return result.scalar_one_or_none()
+            pos = result.scalar_one_or_none()
+        self._cached_position[pair] = pos
+        return pos
 
     async def _has_open_position(self, pair: str) -> bool:
         """open 포지션 존재 여부."""

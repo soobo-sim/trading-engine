@@ -896,6 +896,7 @@ class TestFxMarginTrading:
                 sa_update(BxtBoxPosition).where(BxtBoxPosition.id == pos.id).values(status="closed")
             )
             await db.commit()
+        fx_manager._cached_position.pop(pair, None)  # 수동 DB 조작 후 캐시 무효화
 
         fx_adapter.set_balance("jpy", 49_950.0)  # 49950 * 3 / 150 = 999 → floor(999/1000)*1000 = 0
         order_count_before = len(fx_adapter.order_history)
@@ -967,6 +968,7 @@ class TestFxMarginTrading:
                     sa_update(BxtBox).where(BxtBox.id == box_id).values(status="invalidated")
                 )
                 await db.commit()
+            fx_manager._cached_position.pop(pair, None)  # 수동 DB 조작 후 캐시 무효화
 
     @pytest.mark.asyncio
     async def test_fx_close_position_failure_logged(
@@ -1140,3 +1142,106 @@ class TestPrevStateInit:
 
         # 진입 조건 미충족 확인
         assert not (box_state == "near_lower" and prev_state != "near_lower")
+
+
+# ══════════════════════════════════════════════
+# 테스트: 포지션 캐시 (T-SL-01~05)
+# ══════════════════════════════════════════════
+
+class TestPositionCache:
+    """포지션 인메모리 캐시 — tick 루프의 DB 부하 최소화."""
+
+    @pytest.mark.asyncio
+    async def test_cache_cold_then_warm(self, manager, db_session_factory):
+        """T-SL-01: 캐시 cold → DB 조회 후 warm (이후 호출은 DB 없이 반환)."""
+        pair = "xrp_jpy"
+        assert pair not in manager._cached_position  # cold 상태
+
+        # 포지션 없음 — DB 조회 → cache 갱신
+        result = await manager._get_open_position(pair)
+        assert result is None
+        assert pair in manager._cached_position  # warm (None)
+        assert manager._cached_position[pair] is None
+
+    @pytest.mark.asyncio
+    async def test_cache_set_on_open(self, manager, db_session_factory):
+        """T-SL-02: record_open_position 후 캐시가 포지션 객체로 갱신됨."""
+        pair = "xrp_jpy"
+        box_id = await insert_box(db_session_factory, pair, 110.0, 90.0)
+
+        pos = await manager._record_open_position(
+            pair=pair, box_id=box_id,
+            entry_order_id="CACHE-001", entry_price=91.0, entry_amount=10.0,
+        )
+        # 캐시에 포지션 객체가 설정되어야 함
+        assert manager._cached_position.get(pair) is not None
+        assert manager._cached_position[pair].id == pos.id
+
+        # 이후 _get_open_position은 캐시에서 반환 (DB 미조회)
+        result = await manager._get_open_position(pair)
+        assert result is not None
+        assert result.id == pos.id
+
+    @pytest.mark.asyncio
+    async def test_cache_cleared_on_close(self, manager, db_session_factory):
+        """T-SL-03: record_close_position 후 캐시가 None으로 해제됨."""
+        pair = "xrp_jpy"
+        box_id = await insert_box(db_session_factory, pair, 110.0, 90.0)
+
+        await manager._record_open_position(
+            pair=pair, box_id=box_id,
+            entry_order_id="CACHE-002", entry_price=91.0, entry_amount=10.0,
+        )
+        assert manager._cached_position.get(pair) is not None
+
+        await manager._record_close_position(
+            pair=pair, exit_order_id="CACHE-002-X",
+            exit_price=109.0, exit_amount=10.0, exit_reason="near_upper_exit",
+        )
+        # 캐시가 None으로 해제되어야 함
+        assert manager._cached_position.get(pair) is None
+        # _has_open_position도 False
+        assert not await manager._has_open_position(pair)
+
+    @pytest.mark.asyncio
+    async def test_cache_cleared_on_stop(self, manager, db_session_factory):
+        """T-SL-04: stop() 호출 시 캐시 항목 제거."""
+        pair = "xrp_jpy"
+        manager._params[pair] = {}
+        manager._cached_position[pair] = None  # warm 상태 수동 설정
+
+        await manager.stop(pair)
+        assert pair not in manager._cached_position  # cold로 복귀
+
+    @pytest.mark.asyncio
+    async def test_cache_no_duplicate_close_after_near_upper(
+        self, manager, fake_adapter, db_session_factory,
+    ):
+        """T-SL-05: near_upper 청산 후 SL 중복 발동 없음 (캐시에 None 반영됨).
+
+        near_upper_exit → _record_close_position → cache=None
+        이후 SL 체크 → _get_open_position → None → SL 미발동.
+        """
+        pair = "xrp_jpy"
+        box_id = await insert_box(db_session_factory, pair, 110.0, 90.0)
+
+        # 포지션 열기
+        fake_adapter.set_balance("xrp", 100.0)
+        await manager._record_open_position(
+            pair=pair, box_id=box_id,
+            entry_order_id="SL-COMPAT-001", entry_price=91.0, entry_amount=100.0,
+        )
+        assert manager._cached_position.get(pair) is not None
+
+        # near_upper_exit 청산
+        pos = await manager._get_open_position(pair)
+        manager._params[pair] = {"min_coin_size": 0.001, "trading_fee_rate": 0.002}
+        await manager._close_position_market(pair, pos, "near_upper_exit")
+
+        # 캐시가 None → SL 체크 시 포지션 없음
+        cached_after = manager._cached_position.get(pair)
+        assert cached_after is None
+
+        # _get_open_position 재호출 → None (DB조회 없이 캐시 반환)
+        result = await manager._get_open_position(pair)
+        assert result is None

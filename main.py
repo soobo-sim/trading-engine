@@ -80,7 +80,7 @@ from adapters.database.models import (
 )
 from adapters.database.session import create_db_engine, create_session_factory
 from api.dependencies import AppState, ModelRegistry
-from api.routes import system, trading, account, strategies, boxes, candles, techniques, analysis, monitoring, cfd, performance, wake_up_reviews, strategy_changes
+from api.routes import system, trading, account, strategies, boxes, candles, techniques, analysis, monitoring, cfd, performance, wake_up_reviews, strategy_changes, strategy_analysis
 from core.monitoring.health import HealthChecker
 from core.strategy.box_mean_reversion import BoxMeanReversionManager
 from core.strategy.cfd_trend_following import CfdTrendFollowingManager
@@ -225,6 +225,7 @@ async def lifespan(app: FastAPI):
         box_position_model=models.box_position,
         pair_column=pair_column,
         trend_manager=trend_manager,
+        box_model=models.box,
     )
 
     # 7. AppState → app.state
@@ -313,3 +314,4 @@ app.include_router(cfd.router)
 app.include_router(performance.router)
 app.include_router(wake_up_reviews.router)
 app.include_router(strategy_changes.router)
+app.include_router(strategy_analysis.router)

@@ -137,8 +137,13 @@ class SafetyChecksMixin:
 
     def _check_sf04(
         self, positions: list[dict], has_positions: bool,
+        active_box_pairs: set[str] | None = None,
     ) -> list["SafetyCheck"]:
-        """SF-04: 오픈 포지션에 스탑 가격 설정 여부."""
+        """SF-04: 오픈 포지션에 스탑 가격 설정 여부.
+
+        - trend 포지션: stop_loss_price 컬럼 존재 여부로 판정
+        - box 포지션: active box 존재 여부로 판정 (박스 무효화 감시 중)
+        """
         from .health import SafetyCheck
 
         if not has_positions:
@@ -147,24 +152,44 @@ class SafetyChecksMixin:
                 severity="critical", detail="포지션 없음 (해당없음)",
             )]
 
+        _active_box_pairs = active_box_pairs or set()
         checks: list[SafetyCheck] = []
         for pos in positions:
             pair = pos["pair"]
-            stop = pos.get("stop_loss_price")
-            if stop and stop > 0:
-                checks.append(SafetyCheck(
-                    id="SF-04", name="스탑 가격 설정", status="ok",
-                    severity="critical",
-                    detail=f"stop=¥{stop:,.0f}",
-                    pair=pair,
-                ))
+            pos_type = pos.get("type", "trend")
+
+            if pos_type == "box":
+                # box 포지션: active box 존재 = 박스 무효화 감시 중 → ok
+                if pair in _active_box_pairs:
+                    checks.append(SafetyCheck(
+                        id="SF-04", name="스탑 가격 설정", status="ok",
+                        severity="critical",
+                        detail="박스 무효화 감시 중",
+                        pair=pair,
+                    ))
+                else:
+                    checks.append(SafetyCheck(
+                        id="SF-04", name="스탑 가격 설정", status="critical",
+                        severity="critical",
+                        detail="박스 포지션 있으나 active box 없음",
+                        pair=pair,
+                    ))
             else:
-                checks.append(SafetyCheck(
-                    id="SF-04", name="스탑 가격 설정", status="critical",
-                    severity="critical",
-                    detail="스탑 가격 미설정",
-                    pair=pair,
-                ))
+                stop = pos.get("stop_loss_price")
+                if stop and stop > 0:
+                    checks.append(SafetyCheck(
+                        id="SF-04", name="스탑 가격 설정", status="ok",
+                        severity="critical",
+                        detail=f"stop=¥{stop:,.0f}",
+                        pair=pair,
+                    ))
+                else:
+                    checks.append(SafetyCheck(
+                        id="SF-04", name="스탑 가격 설정", status="critical",
+                        severity="critical",
+                        detail="스탑 가격 미설정",
+                        pair=pair,
+                    ))
         return checks
 
     async def _check_sf05(self) -> "SafetyCheck":

@@ -109,6 +109,7 @@ class HealthChecker(SafetyChecksMixin):
         box_position_model: Type,
         pair_column: str = "pair",
         trend_manager: Any = None,
+        box_model: Optional[Type] = None,
     ) -> None:
         self._adapter = adapter
         self._supervisor = supervisor
@@ -118,6 +119,7 @@ class HealthChecker(SafetyChecksMixin):
         self._box_position_model = box_position_model
         self._pair_column = pair_column
         self._trend_manager = trend_manager
+        self._box_model = box_model
 
     async def check(self) -> HealthReport:
         """전체 헬스 체크 수행."""
@@ -211,6 +213,10 @@ class HealthChecker(SafetyChecksMixin):
         if hasattr(self._adapter, "has_credentials") and not self._adapter.has_credentials():
             return []
 
+        # SF-07: FX 마진 거래는 현물 통화를 보유하지 않으므로 잔고 비교 불가 → 스킵
+        if getattr(self._adapter, "is_margin_trading", False):
+            return []
+
         try:
             open_positions = await self._get_open_positions()
             if not open_positions:
@@ -274,6 +280,22 @@ class HealthChecker(SafetyChecksMixin):
 
         # fallback: entry_amount 그대로 사용
         return float(row.entry_amount)
+
+    async def _get_active_box_pairs(self) -> set[str]:
+        """DB에서 status=active인 박스의 pair 집합을 반환. box_model 미설정 시 빈 집합."""
+        if self._box_model is None:
+            return set()
+        pairs: set[str] = set()
+        try:
+            async with self._session_factory() as db:
+                pair_col = getattr(self._box_model, self._pair_column)
+                stmt = select(pair_col).where(self._box_model.status == "active")
+                result = await db.execute(stmt)
+                for (pair,) in result.all():
+                    pairs.add(pair)
+        except Exception as e:
+            logger.error(f"[HealthChecker] 활성 박스 조회 실패: {e}")
+        return pairs
 
     async def _get_open_positions(self) -> list[dict]:
         """trend + box 오픈 포지션 모두 조회."""
@@ -339,8 +361,9 @@ class HealthChecker(SafetyChecksMixin):
         # SF-03: WebSocket
         checks.append(self._check_sf03(ws_connected))
 
-        # SF-04: 스탑 가격 설정
-        checks.extend(self._check_sf04(positions, has_positions))
+        # SF-04: 스탑 가격 설정 (box 포지션은 active box 존재 여부로 대체)
+        active_box_pairs = await self._get_active_box_pairs()
+        checks.extend(self._check_sf04(positions, has_positions, active_box_pairs))
 
         # SF-05: 레이첼 webhook 파이프라인
         checks.append(await self._check_sf05())

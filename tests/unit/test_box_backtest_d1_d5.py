@@ -395,3 +395,150 @@ class TestLinearSlope:
     def test_empty(self):
         slope = _linear_slope([], [])
         assert slope == 0.0
+
+
+# ──────────────────────────────────────────────────────────────
+# SL: 가격 기반 손절 (실전 _entry_monitor SL과 동일)
+# ──────────────────────────────────────────────────────────────
+
+# ──────────────────────────────────────────────────────────────
+# SL: 가격 기반 손절 (실전 _entry_monitor SL과 동일)
+# ──────────────────────────────────────────────────────────────
+
+class TestPriceStopLoss:
+    """SL: entry × (1 - stop_loss_pct/100) 이하 시 즉시 청산.
+
+    SL이 D-3 박스 무효화보다 먼저 발동하려면:
+      SL 가격 > lower × (1 - tolerance_pct/100) — D-3 임계값보다 높아야 함
+
+    tolerance_pct=1.5 사용 시:
+      - 박스 lower ≈ 89.91 (lower=90 * 0.999)
+      - D-3 임계값: 89.91 × 0.985 ≈ 88.56
+      - near_lower 진입 at 90.5 → SL@1.5% = 90.5×0.985 = 89.14
+      - SL 트리거: 89.1 (D-3 임계 88.56 < 89.1 < SL 89.14) → SL 발동 ✓
+    """
+
+    def _make_sl_candles(self):
+        """
+        박스 상/하단을 형성하는 middle-zone 클로즈 캔들 70개 +
+        near_lower 진입 캔들 1개 + SL 트리거 캔들 1개.
+
+        tolerance_pct=1.5 기준으로 설계됨:
+          - upper ≈ 110.11 (110 × 1.001)
+          - lower ≈ 89.91  (90 × 0.999)
+          - near_lower zone: [89.91×0.985, 89.91×1.015] = [88.56, 91.26]
+          - D-3 임계: 89.91 × 0.985 = 88.56
+
+        주의: high=110.0×1.001 고정 → high_slope≈0 → converging_triangle 미발동.
+        """
+        candles = []
+        # Formation: close=100 (middle), high/low으로 박스 상/하단 형성
+        for _ in range(70):
+            candles.append(FakeCandle(close=100.0, high=110.0 * 1.001, low=90.0 * 0.999))
+        # near_lower 진입 (90.5 ∈ [88.56, 91.26])
+        # high를 상단과 동일하게 유지 → high_slope≈0 → converging_triangle 미발동
+        candles.append(FakeCandle(close=90.5, high=110.0 * 1.001, low=90.5 * 0.999))
+        # SL 평가 캔들: 89.1 > D-3(88.56), 89.1 < SL@1.5%(89.14) → SL만 발동
+        candles.append(FakeCandle(close=89.1, high=110.0 * 1.001, low=89.1 * 0.999))
+        return candles
+
+    def test_sl_BT01_fires_at_sl_price(self):
+        """T-SL-BT-01: SL 이하 가격 → price_stop_loss 청산."""
+        candles = self._make_sl_candles()
+        config = BacktestConfig(fee_pct=0.0, slippage_pct=0.0)
+        params = {
+            "box_tolerance_pct": 1.5,
+            "box_min_touches": 2,
+            "near_bound_pct": 1.5,
+            "stop_loss_pct": 1.5,
+        }
+        result = _run_box_backtest(candles, params, config)
+        sl_trades = [t for t in result.trades if t.exit_reason == "price_stop_loss"]
+        assert len(sl_trades) >= 1, (
+            f"SL이 발동되어야 함. trades={[(t.exit_reason, t.entry_price, t.exit_price) for t in result.trades]}"
+        )
+
+    def test_sl_BT02_no_fire_above_sl(self):
+        """T-SL-BT-02: SL 이상 가격에서는 SL 미발동."""
+        candles = []
+        # 박스 형성
+        for _ in range(70):
+            candles.append(FakeCandle(close=100.0, high=110.0 * 1.001, low=90.0 * 0.999))
+        # near_lower 진입 — high 고정으로 converging_triangle 미발동
+        candles.append(FakeCandle(close=90.5, high=110.0 * 1.001, low=90.5 * 0.999))
+        # SL@1.5% = 89.14, 90.3 > 89.14 → SL 미발동 — high 고정
+        candles.append(FakeCandle(close=90.3, high=110.0 * 1.001, low=90.3 * 0.999))
+
+        config = BacktestConfig(fee_pct=0.0, slippage_pct=0.0)
+        params = {
+            "box_tolerance_pct": 1.5,
+            "box_min_touches": 2,
+            "near_bound_pct": 1.5,
+            "stop_loss_pct": 1.5,  # SL = 90.5 × 0.985 = 89.14, 90.3 > 89.14
+        }
+        result = _run_box_backtest(candles, params, config)
+        sl_trades = [t for t in result.trades if t.exit_reason == "price_stop_loss"]
+        assert len(sl_trades) == 0, "SL이 발동되면 안 됨"
+
+    def test_sl_BT03_near_upper_first_then_no_sl(self):
+        """T-SL-BT-03: near_upper 청산 직후 SL이 추가 발동하지 않음 (중복 청산 없음).
+
+        같은 near_upper trade가 price_stop_loss로도 기록되면 안 됨.
+        """
+        candles = _box_candles(n=200, upper=110.0, lower=90.0, oscillations=10)
+        config = BacktestConfig(fee_pct=0.0, slippage_pct=0.0)
+        params = {
+            "box_tolerance_pct": 1.5,
+            "box_min_touches": 2,
+            "near_bound_pct": 1.5,
+            "stop_loss_pct": 1.5,
+        }
+        result = _run_box_backtest(candles, params, config)
+        # 모든 거래 각각 하나의 exit_reason만 가져야 함
+        # (BacktestTrade는 단일 포지션 → 중복 청산이면 extra trade가 생성됨)
+        assert result.total_trades == len(result.trades)
+        # near_upper 청산 직후 추가 price_stop_loss 없음 확인:
+        # BT는 캔들 단위이므로 same-candle 중복은 발생하지 않는 구조.
+        # near_upper 후 current_position=None → SL check 스킵.
+        for trade in result.trades:
+            assert trade.exit_reason in {
+                "near_upper_exit", "price_stop_loss",
+                "4h_close_below_lower", "4h_close_above_upper",
+                "converging_triangle", "backtest_end",
+                "weekend_close",
+            }
+
+    def test_sl_BT04_default_sl_pct_matches_explicit(self):
+        """T-SL-BT-04: stop_loss_pct 기본값 1.5% — 미설정 시 명시적 1.5%와 동일."""
+        candles = self._make_sl_candles()
+        config = BacktestConfig(fee_pct=0.0, slippage_pct=0.0)
+        base_params = {
+            "box_tolerance_pct": 1.5,
+            "box_min_touches": 2,
+            "near_bound_pct": 1.5,
+        }
+        result_default = _run_box_backtest(candles, dict(base_params), config)
+
+        params_explicit = dict(base_params)
+        params_explicit["stop_loss_pct"] = 1.5
+        result_explicit = _run_box_backtest(candles, params_explicit, config)
+
+        # 동일 파라미터이므로 결과 동일해야 함
+        assert result_default.total_trades == result_explicit.total_trades
+        assert result_default.wins == result_explicit.wins
+
+    def test_sl_BT05_sl_zero_disables_sl(self):
+        """T-SL-BT-05: stop_loss_pct=0 → SL 비활성화. price_stop_loss 청산 없음."""
+        # SL 트리거 가격이지만 stop_loss_pct=0이므로 SL 미발동
+        # D-3 임계(88.56) 이상인 89.1에서 무엇도 일어나지 않아야 함
+        candles = self._make_sl_candles()
+        config = BacktestConfig(fee_pct=0.0, slippage_pct=0.0)
+        params = {
+            "box_tolerance_pct": 1.5,
+            "box_min_touches": 2,
+            "near_bound_pct": 1.5,
+            "stop_loss_pct": 0,  # SL 비활성화
+        }
+        result = _run_box_backtest(candles, params, config)
+        sl_trades = [t for t in result.trades if t.exit_reason == "price_stop_loss"]
+        assert len(sl_trades) == 0, "stop_loss_pct=0 → SL 없어야 함"

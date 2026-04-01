@@ -652,6 +652,111 @@ class TestBuildBoxMemoryBlock:
 
 
 # ══════════════════════════════════════════════════════════════
+#  T-RPT: 보고 모드 분기 테스트 (P0.7)
+# ══════════════════════════════════════════════════════════════
+
+
+class TestBoxTelegramTextModes:
+    """T-RPT-01~05: 포지션 유무 / FX / SL 근접 분기 테스트."""
+
+    def _box(self):
+        return {
+            "id": 7,
+            "upper_bound": 212.0,
+            "lower_bound": 208.0,
+            "box_width_pct": 1.9,
+            "bar_chart": "[━━━━●━━━━━━]",
+        }
+
+    def _pos(self, entry_price: float = 208.5, pnl_jpy: float = 150.0, pnl_pct: float = 0.07):
+        return {
+            "entry_price": entry_price,
+            "entry_amount": 1000.0,
+            "unrealized_pnl_jpy": pnl_jpy,
+            "unrealized_pnl_pct": pnl_pct,
+        }
+
+    def _base_data(self, **overrides):
+        data = {
+            "health_line": "🟢 WS✅ 태스크3/3✅ 잔고✅",
+            "current_price": 209.5,
+            "box": self._box(),
+            "position_label": "middle",
+            "position": None,
+            "jpy_available": 100000,
+            "coin_available": 0.0,
+            "basis_timeframe": "4h",
+            "candle_open_time_jst": "20:00",
+            "near_bound_pct": 1.5,
+            "tolerance_pct": 1.5,
+            "stop_loss_pct": 1.5,
+            "is_margin_trading": False,
+            "conditions_met": 1,
+            "conditions_total": 3,
+            "entry_blockers": ["중심부 → 하한 진입대 대기"],
+        }
+        data.update(overrides)
+        return data
+
+    def test_rpt01_no_position_shows_entry_conditions(self):
+        """T-RPT-01: 포지션 없음 → 진입 조건 행 + 다음 4h봉 행 표시."""
+        data = self._base_data()
+        text = build_box_telegram_text("GMO", "22:58", "gbp_jpy", data)
+        assert "🚫" in text or "✅" in text, "진입 조건 행 있어야 함"
+        assert "⏰ 다음 4h봉" in text, "다음 4h봉 행 있어야 함"
+        assert "포지션 미보유" in text
+
+    def test_rpt02_has_position_shows_exit_not_entry(self):
+        """T-RPT-02: 포지션 있음 → 익절/손절 표시 + 진입 조건/다음캔들 미표시."""
+        data = self._base_data(position=self._pos())
+        text = build_box_telegram_text("GMO", "22:58", "gbp_jpy", data)
+        assert "🎯 익절" in text, "익절 행 있어야 함"
+        assert "🛑 손절" in text, "손절 행 있어야 함"
+        assert "📈 보유" in text, "보유 행 있어야 함"
+        assert "미실현" in text
+        # 진입 조건 행과 다음 캔들 행은 표시 안 됨
+        assert "🚫" not in text, "포지션 있을 때 진입 조건 행 미표시"
+        assert "⏰ 다음 4h봉" not in text, "포지션 있을 때 다음 캔들 행 미표시"
+
+    def test_rpt03_fx_hides_coin_line(self):
+        """T-RPT-03: FX(is_margin_trading=True) → coin 잔고 미표시."""
+        data = self._base_data(is_margin_trading=True, coin_available=0.0)
+        text = build_box_telegram_text("GMO", "22:58", "gbp_jpy", data)
+        assert "gbp 0.00개" not in text, "FX에서 통화 현물 잔고 미표시"
+        assert "JPY" in text, "JPY 잔고는 표시"
+
+    def test_rpt04_has_position_tp_range_calculation(self):
+        """T-RPT-04: 포지션 있음 + near_upper 근접 → 익절 가격 범위 표시."""
+        # upper=212.0, near_bound_pct=1.5
+        # tp_low = 212.0 * 0.985 = 208.82, tp_high = 212.0 * 1.015 = 215.18
+        data = self._base_data(
+            current_price=209.0,
+            position=self._pos(entry_price=208.5),
+            near_bound_pct=1.5,
+        )
+        text = build_box_telegram_text("GMO", "22:58", "gbp_jpy", data)
+        assert "🎯 익절: near_upper" in text
+        # 익절 가격 숫자 확인 (¥208.82 형식으로 반올림 차이 허용)
+        assert "¥208." in text or "¥209." in text, f"익절 하단 가격 표시 확인: {text}"
+
+    def test_rpt05_has_position_sl_price_in_text(self):
+        """T-RPT-05: 포지션 있음 → 손절 가격 (박스 무효화 + 가격SL) 표시."""
+        # entry=208.5, sl_pct=1.5 → sl=208.5*0.985=205.37
+        # lower=208.0, tol=1.5 → inv=208.0*0.985=204.88
+        data = self._base_data(
+            current_price=208.1,
+            position=self._pos(entry_price=208.5),
+            stop_loss_pct=1.5,
+            tolerance_pct=1.5,
+        )
+        text = build_box_telegram_text("GMO", "22:58", "gbp_jpy", data)
+        assert "🛑 손절" in text
+        assert "박스 무효화" in text
+        assert "가격SL" in text
+        assert "-1.5%" in text, "SL 퍼센트 표시 확인"
+
+
+# ══════════════════════════════════════════════════════════════
 #  Alert 평가 테스트
 # ══════════════════════════════════════════════════════════════
 

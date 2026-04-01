@@ -584,6 +584,27 @@ def _run_box_backtest(
                 trades.append(current_position)
                 current_position = None
                 # 박스는 유지 (실전과 동일 — 청산 후 재진입 가능)
+
+            # ── SL: 가격 기반 손절 — 마지막 방어선 (실전 _entry_monitor와 동일) ──
+            # near_upper가 이미 청산했으면 current_position=None → 이 블록 스킵됨
+            if current_position is not None:
+                sl_pct = float(params.get("stop_loss_pct", 1.5))
+                if sl_pct > 0:
+                    sl_price = current_position.entry_price * (1 - sl_pct / 100)
+                    if current_price <= sl_price:
+                        exit_price = _apply_slippage(
+                            current_price,
+                            "sell" if current_position.side == "buy" else "buy",
+                            config.slippage_pct,
+                        )
+                        _close_position(
+                            current_position, exit_price, current_candle,
+                            "price_stop_loss", config.fee_pct, capital,
+                        )
+                        capital += current_position.pnl_jpy or 0
+                        trades.append(current_position)
+                        current_position = None
+
             prev_box_state = box_state
 
         else:
