@@ -800,7 +800,8 @@ class AnalysisReport(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     analyses = relationship(
-        "AgentAnalysis", back_populates="report", cascade="all, delete-orphan"
+        "AgentAnalysis", back_populates="report", cascade="all, delete-orphan",
+        lazy="selectin",
     )
 
     def __repr__(self) -> str:
