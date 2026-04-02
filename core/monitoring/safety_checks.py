@@ -422,14 +422,7 @@ class SafetyChecksMixin:
         return self._EXCHANGE_DISPLAY.get(raw, raw)
 
     async def _send_safety_telegram_alert(self, checks: list["SafetyCheck"]) -> None:
-        """안전장치 critical/warning 시 서버가 직접 Telegram으로 경고 전송.
-
-        개선사항:
-        - 거래소명 + 장애 건수 표시
-        - severity별 이모지 분리 (🔴 critical, ⚠️ warning)
-        - 항목별 페어 + 상세 원인
-        - 조치 힌트 제공
-        """
+        """안전장치 이상 시 사람이 읽기 쉬운 형태로 Telegram 경고 전송."""
         bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
         chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
         if not bot_token or not chat_id:
@@ -442,7 +435,6 @@ class SafetyChecksMixin:
             logger.info(f"[Safety] Telegram 경고 쿨다운 중 ({int(now - last_sent)}s ago)")
             return
 
-        # critical + warning 분리 (n/a, ok 제외)
         critical_checks = [c for c in checks if c.status == "critical"]
         warning_checks = [c for c in checks if c.status == "warning"]
 
@@ -452,27 +444,42 @@ class SafetyChecksMixin:
         exchange = self._get_exchange_display_name()
         total_issues = len(critical_checks) + len(warning_checks)
 
-        # 헤더: severity에 따라 이모지 결정
+        # 포지션 유무 확인 (긴급도 판단용)
+        has_position = False
+        try:
+            positions = await self._get_open_positions()
+            has_position = len(positions) > 0
+        except Exception:
+            pass
+
+        # 헤더
         if critical_checks:
-            header = f"🔴 [{exchange}] 안전장치 경고 ({total_issues}건)"
+            header = f"🔴 [{exchange}] 시스템 경고 ({total_issues}건)"
         else:
-            header = f"⚠️ [{exchange}] 안전장치 주의 ({total_issues}건)"
+            header = f"⚠️ [{exchange}] 시스템 주의 ({total_issues}건)"
 
         lines = [header, ""]
 
-        for c in critical_checks:
-            pair_str = f" ({c.pair})" if c.pair else ""
-            lines.append(f"🔴 {c.id} {c.name}{pair_str} — {c.detail}")
+        all_failed = critical_checks + warning_checks
+        for c in all_failed:
+            emoji = "🔴" if c.status == "critical" else "⚠️"
+            desc = self._human_readable_description(c, has_position)
+            lines.append(f"{emoji} {desc}")
 
-        for c in warning_checks:
-            pair_str = f" ({c.pair})" if c.pair else ""
-            lines.append(f"⚠️ {c.id} {c.name}{pair_str} — {c.detail}")
-
-        # 조치 힌트
-        hints = self._build_action_hints(critical_checks + warning_checks)
-        if hints:
+        # 종합 긴급도
+        if has_position and critical_checks:
             lines.append("")
-            lines.append(f"💡 조치: {'; '.join(hints)}")
+            lines.append("⚡ 포지션 보유 중 — 즉시 확인 필요")
+        elif not has_position and not critical_checks:
+            lines.append("")
+            lines.append("ℹ️ 포지션 없음 — 즉시 위험 없음")
+
+        # 조치 안내
+        actions = self._build_human_actions(all_failed)
+        if actions:
+            lines.append("")
+            for a in actions:
+                lines.append(f"→ {a}")
 
         text = "\n".join(lines)
 
@@ -493,20 +500,72 @@ class SafetyChecksMixin:
             logger.error(f"[Safety] Telegram 전송 오류: {e}")
 
     @staticmethod
-    def _build_action_hints(failed_checks: list["SafetyCheck"]) -> list[str]:
-        """실패한 체크 목록 → 조치 힌트 문자열 목록."""
-        hints: list[str] = []
+    def _human_readable_description(check: "SafetyCheck", has_position: bool) -> str:
+        """SF 코드 대신 사람이 이해할 수 있는 설명 생성."""
+        pair_str = f" ({check.pair})" if check.pair else ""
+
+        descriptions = {
+            "SF-01": {
+                "title": f"자동매매 감시 중단{pair_str}",
+                "impact": "스탑로스/진입 감시가 멈춤" + (" → 포지션 보호 불가" if has_position else ""),
+            },
+            "SF-02": {
+                "title": f"캔들/박스 모니터 중단{pair_str}",
+                "impact": "새 캔들 감지·박스 갱신 불가",
+            },
+            "SF-03": {
+                "title": "실시간 시세 수신 중단",
+                "impact": "실시간 가격 피드 끊김 → 4H봉 기준으로만 동작" + (" → 스탑 지연 위험" if has_position else ""),
+            },
+            "SF-04": {
+                "title": f"스탑로스 미설정{pair_str}",
+                "impact": "손절 안전장치 없이 포지션 보유 중",
+            },
+            "SF-05": {
+                "title": f"최대 포지션 한도 초과{pair_str}",
+                "impact": "설정된 자본 비율 초과 진입",
+            },
+            "SF-06": {
+                "title": "거래소 API 응답 없음",
+                "impact": "주문·잔고 조회 불가",
+            },
+            "SF-07": {
+                "title": f"잔고-포지션 불일치{pair_str}",
+                "impact": "DB 기록과 실제 거래소 잔고가 다름",
+            },
+            "SF-08": {
+                "title": f"Kill 조건 접근{pair_str}",
+                "impact": "연패/손실 누적이 전략 중단 기준에 근접",
+            },
+            "SF-09": {
+                "title": f"스탑로스 가격 이상{pair_str}",
+                "impact": "설정된 스탑 가격이 현재가 대비 비정상",
+            },
+            "SF-10": {
+                "title": f"주문 실패 반복{pair_str}",
+                "impact": "거래소 주문이 연속 거부됨",
+            },
+        }
+
+        info = descriptions.get(check.id, {"title": f"{check.name}{pair_str}", "impact": check.detail})
+        detail_extra = f" ({check.detail})" if check.detail and check.detail not in info["impact"] else ""
+        return f"{info['title']}\n   영향: {info['impact']}{detail_extra}"
+
+    @staticmethod
+    def _build_human_actions(failed_checks: list["SafetyCheck"]) -> list[str]:
+        """실패 항목 → 구체적 조치 안내."""
+        actions: list[str] = []
         ids = {c.id for c in failed_checks}
 
         if "SF-01" in ids or "SF-02" in ids:
-            hints.append("태스크 재시작 또는 컨테이너 재기동 필요")
+            actions.append("자동 복구 시도 중. 복구 안 되면 서버 재시작 필요 (docker restart)")
         if "SF-03" in ids:
-            hints.append("WebSocket 연결 확인 (네트워크/API 키)")
+            actions.append("자동 재연결 시도 중. 5분 내 복구 안 되면 서버 재시작 필요")
         if "SF-04" in ids or "SF-09" in ids:
-            hints.append("스탑로스 가격 즉시 설정 필요")
+            actions.append("스탑로스 즉시 확인 — 대시보드 관제 페이지에서 포지션 상태 점검")
         if "SF-06" in ids:
-            hints.append("거래소 API 상태 확인")
+            actions.append("거래소 사이트 접속 확인. API 키 만료 가능성 점검")
         if "SF-07" in ids:
-            hints.append("잔고-포지션 불일치 확인")
+            actions.append("거래소 사이트에서 실제 잔고 확인 후, 불일치 시 레이첼에게 점검 요청")
 
-        return hints
+        return actions
