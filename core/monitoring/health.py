@@ -140,6 +140,7 @@ class HealthChecker(SafetyChecksMixin):
 
         # 3. 활성 전략
         strategies = await self._get_active_strategies()
+        self._has_active_strategies = len(strategies) > 0
 
         # 4. 포지션-잔고 정합성
         discrepancies = await self._check_position_balance_consistency()
@@ -171,6 +172,10 @@ class HealthChecker(SafetyChecksMixin):
         ws_connected = self._adapter.is_ws_connected()
         task_health = self._supervisor.get_health()
         discrepancies = await self._check_position_balance_consistency()
+        # SF-03에서 활성 전략 유무 참조
+        if not hasattr(self, "_has_active_strategies"):
+            strategies = await self._get_active_strategies()
+            self._has_active_strategies = len(strategies) > 0
         return await self._check_safety(ws_connected, task_health, discrepancies)
 
     async def _get_active_strategies(self) -> list[dict]:

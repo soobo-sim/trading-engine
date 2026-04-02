@@ -114,7 +114,7 @@ class SafetyChecksMixin:
         return checks
 
     def _check_sf03(self, ws_connected: bool) -> "SafetyCheck":
-        """SF-03: WebSocket 연결. API 키 미설정 시 스킵."""
+        """SF-03: WebSocket 연결. API 키 미설정 또는 활성 전략 없으면 스킵."""
         from .health import SafetyCheck
 
         # API 키 미설정 시 스킵
@@ -123,6 +123,15 @@ class SafetyChecksMixin:
                 id="SF-03", name="WebSocket", status="n/a",
                 severity="critical",
                 detail="API key not configured — skip",
+            )
+
+        # 활성 전략 없으면 WS 불필요 → 스킵
+        has_active = getattr(self, "_has_active_strategies", None)
+        if has_active is not None and not has_active:
+            return SafetyCheck(
+                id="SF-03", name="WebSocket", status="n/a",
+                severity="critical",
+                detail="활성 전략 없음 — WS 불필요",
             )
 
         if ws_connected:
