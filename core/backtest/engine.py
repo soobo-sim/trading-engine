@@ -501,6 +501,64 @@ def _run_box_backtest(
     active_box: Optional[dict] = None  # {"upper": float, "lower": float}
     prev_box_state: Optional[str] = None  # 실전 _prev_box_state 미러링
 
+    # ── 3-layer direction filter state ──
+    slope_threshold = float(params.get("direction_slope_threshold", 0.1))
+    consec_loss_limit = int(params.get("direction_consecutive_loss_limit", 2))
+    box_center_count = int(params.get("direction_box_center_count", 3))
+    box_center_history: list = []   # [(upper+lower)/2 for each box]
+    long_consec_losses = 0
+    short_consec_losses = 0
+
+    def _ema_slope(idx: int, period: int = 20) -> float:
+        """EMA20 slope % over last 3 candles."""
+        if idx < period + 3:
+            return 0.0
+        closes_w = [float(candles[j].close) for j in range(idx - period - 2, idx + 1)]
+        # Simple EMA approximation via SMA for speed
+        sma_prev = sum(closes_w[:period]) / period
+        sma_curr = sum(closes_w[-period:]) / period
+        return (sma_curr - sma_prev) / sma_prev * 100 if sma_prev > 0 else 0.0
+
+    def _direction_allowed(side: str, candle_idx: int) -> bool:
+        """3-layer filter: return False if this direction is blocked."""
+        if direction_mode != "both":
+            return True  # filter only in bidirectional mode
+        # Layer 1: EMA slope
+        slope = _ema_slope(candle_idx)
+        if side == "sell" and slope > slope_threshold:
+            return False  # uptrend → no short
+        if side == "buy" and slope < -slope_threshold:
+            return False  # downtrend → no long
+        # Layer 2: box center drift
+        if len(box_center_history) >= box_center_count:
+            recent = box_center_history[-box_center_count:]
+            all_rising = all(recent[j] < recent[j+1] for j in range(len(recent)-1))
+            all_falling = all(recent[j] > recent[j+1] for j in range(len(recent)-1))
+            if side == "sell" and all_rising:
+                return False
+            if side == "buy" and all_falling:
+                return False
+        # Layer 3: consecutive losses
+        if side == "buy" and long_consec_losses >= consec_loss_limit:
+            return False
+        if side == "sell" and short_consec_losses >= consec_loss_limit:
+            return False
+        return True
+
+    def _update_consec_losses(trade: BacktestTrade):
+        nonlocal long_consec_losses, short_consec_losses
+        if trade.pnl_jpy is not None:
+            if trade.side == "buy":
+                if trade.pnl_jpy <= 0:
+                    long_consec_losses += 1
+                else:
+                    long_consec_losses = 0
+            else:
+                if trade.pnl_jpy <= 0:
+                    short_consec_losses += 1
+                else:
+                    short_consec_losses = 0
+
     result = BacktestResult(
         params_used=params,
         candle_count=len(candles),
@@ -526,6 +584,7 @@ def _run_box_backtest(
                 )
                 capital += current_position.pnl_jpy or 0
                 trades.append(current_position)
+                _update_consec_losses(current_position)
                 current_position = None
                 active_box = None
                 prev_box_state = None
@@ -561,6 +620,7 @@ def _run_box_backtest(
                     )
                     capital += current_position.pnl_jpy or 0
                     trades.append(current_position)
+                    _update_consec_losses(current_position)
                     current_position = None
                 active_box = None
                 prev_box_state = None
@@ -588,10 +648,11 @@ def _run_box_backtest(
                 )
                 capital += current_position.pnl_jpy or 0
                 trades.append(current_position)
+                _update_consec_losses(current_position)
                 current_position = None
 
                 # 양방향: 롱 청산 직후 숏 진입
-                if direction_mode == "both":
+                if direction_mode == "both" and _direction_allowed("sell", i):
                     s_entry = _apply_slippage(current_price, "sell", config.slippage_pct)
                     invest_jpy = capital * position_size / 100
                     entry_fee = _apply_fee(invest_jpy, config.fee_pct)
@@ -617,10 +678,11 @@ def _run_box_backtest(
                 )
                 capital += current_position.pnl_jpy or 0
                 trades.append(current_position)
+                _update_consec_losses(current_position)
                 current_position = None
 
                 # 양방향: 숏 청산 직후 롱 진입
-                if direction_mode == "both":
+                if direction_mode == "both" and _direction_allowed("buy", i):
                     l_entry = _apply_slippage(current_price, "buy", config.slippage_pct)
                     invest_jpy = capital * position_size / 100
                     entry_fee = _apply_fee(invest_jpy, config.fee_pct)
@@ -652,6 +714,7 @@ def _run_box_backtest(
                         )
                         capital += current_position.pnl_jpy or 0
                         trades.append(current_position)
+                        _update_consec_losses(current_position)
                         current_position = None
 
             prev_box_state = box_state
@@ -687,6 +750,7 @@ def _run_box_backtest(
                     continue
 
                 active_box = {"upper": upper, "lower": lower}
+                box_center_history.append((upper + lower) / 2)
 
             # D-1: 진입 판정 — 실전 _is_price_in_box와 동일한 양방향 밴드
             box_state = classify_price_in_box(
@@ -694,10 +758,12 @@ def _run_box_backtest(
             )
             direction_mode = params.get("direction_mode", "long_only")
 
-            # 롱 진입: near_lower
+            # 롱 진입: near_lower (long_only 또는 both)
             if (
-                box_state == "near_lower"
+                direction_mode in ("long_only", "both")
+                and box_state == "near_lower"
                 and prev_box_state != "near_lower"
+                and _direction_allowed("buy", i)
             ):
                 side = "buy"
                 entry_price = _apply_slippage(current_price, side, config.slippage_pct)
@@ -713,11 +779,12 @@ def _run_box_backtest(
                     amount=amount,
                 )
 
-            # 숏 진입: near_upper (양방향 모드)
+            # 숏 진입: near_upper (both 또는 short_only)
             elif (
-                direction_mode == "both"
+                direction_mode in ("both", "short_only")
                 and box_state == "near_upper"
                 and prev_box_state != "near_upper"
+                and _direction_allowed("sell", i)
             ):
                 side = "sell"
                 entry_price = _apply_slippage(current_price, side, config.slippage_pct)
@@ -745,6 +812,7 @@ def _run_box_backtest(
         )
         capital += current_position.pnl_jpy or 0
         trades.append(current_position)
+        _update_consec_losses(current_position)
 
     # 결과 집계
     result.trades = trades

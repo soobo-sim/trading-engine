@@ -670,6 +670,7 @@ class TestBoxTelegramTextModes:
 
     def _pos(self, entry_price: float = 208.5, pnl_jpy: float = 150.0, pnl_pct: float = 0.07):
         return {
+            "side": "buy",
             "entry_price": entry_price,
             "entry_amount": 1000.0,
             "unrealized_pnl_jpy": pnl_jpy,
@@ -712,7 +713,7 @@ class TestBoxTelegramTextModes:
         text = build_box_telegram_text("GMO", "22:58", "gbp_jpy", data)
         assert "🎯 익절" in text, "익절 행 있어야 함"
         assert "🛑 손절" in text, "손절 행 있어야 함"
-        assert "📈 보유" in text, "보유 행 있어야 함"
+        assert "📈 롱 보유" in text, "보유 행 있어야 함"
         assert "미실현" in text
         # 진입 조건 행과 다음 캔들 행은 표시 안 됨
         assert "🚫" not in text, "포지션 있을 때 진입 조건 행 미표시"
@@ -754,6 +755,36 @@ class TestBoxTelegramTextModes:
         assert "박스 무효화" in text
         assert "가격SL" in text
         assert "-1.5%" in text, "SL 퍼센트 표시 확인"
+
+    def test_rpt06_short_position_display(self):
+        """T-RPT-06: 숏(sell) 포지션 → 📉 숏 보유 + near_lower 익절 + 박스상단 손절."""
+        # entry=212.5 (near_upper 진입), upper=212.0, lower=208.0
+        short_pos = {
+            "side": "sell",
+            "entry_price": 212.5,
+            "entry_amount": 1000.0,
+            "unrealized_pnl_jpy": 500.0,
+            "unrealized_pnl_pct": 0.23,
+        }
+        data = self._base_data(
+            current_price=210.0,
+            position=short_pos,
+            near_bound_pct=1.5,
+            tolerance_pct=1.5,
+            stop_loss_pct=1.5,
+        )
+        text = build_box_telegram_text("GMO", "22:58", "gbp_jpy", data)
+
+        # 숏 보유 아이콘 + 라벨
+        assert "📉 숏 보유" in text, f"숏 보유 행 미표시: {text}"
+        # 익절: near_lower (하한 근처)
+        assert "🎯 익절: near_lower" in text, f"숏 익절 방향 오류: {text}"
+        # 손절: 박스 상단 이탈
+        assert "🛑 손절" in text
+        assert "박스 무효화" in text
+        # 진입 조건 / 다음 캔들 행 미표시 (포지션 있으므로)
+        assert "⏰ 다음 4h봉" not in text
+        assert "🚫" not in text
 
 
 # ══════════════════════════════════════════════════════════════

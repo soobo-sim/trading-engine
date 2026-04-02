@@ -240,10 +240,14 @@ class BoxMeanReversionManager:
 
     async def _entry_monitor(self, pair: str) -> None:
         """
-        WS 틱마다 is_price_in_box() 체크 → 자동 진입/청산.
+        WS 틱마다 is_price_in_box() 체크 → 자동 진입/청산. 양방향 대응.
 
-        진입: active box 존재 + position 없음 + near_lower로 전환
-        청산: open position 존재 + near_upper로 전환
+        direction_mode:
+          "long_only" (기본): near_lower 롱 진입, near_upper 롱 청산
+          "both": near_lower 롱 진입(+숏 청산), near_upper 숏 진입(+롱 청산)
+          "short_only": near_upper 숏 진입, near_lower 숏 청산
+
+        is_margin_trading=False(현물) 시 direction_mode 무시하고 long_only 강제.
         """
         price_queue: asyncio.Queue[float] = asyncio.Queue()
 
@@ -270,36 +274,77 @@ class BoxMeanReversionManager:
                     self._prev_box_state[pair] = box_state
                     continue
 
-                # ── 진입: near_lower로 새로 진입했을 때 ──
-                if (
-                    box_state == "near_lower"
-                    and prev_state != "near_lower"
-                    and not await self._has_open_position(pair)
-                ):
-                    box = await self._get_active_box(pair)
-                    if box:
-                        await self._open_position_market(pair, box, price, params)
+                # ── direction_mode 결정: 현물이면 무조건 long_only ──
+                if not is_fx:
+                    direction_mode = "long_only"
+                else:
+                    direction_mode = params.get("direction_mode", "long_only")
 
-                # ── 청산: near_upper로 새로 진입했을 때 ──
-                elif (
-                    box_state == "near_upper"
-                    and prev_state != "near_upper"
-                ):
+                # ── near_lower 도달 ──────────────────────
+                if box_state == "near_lower" and prev_state != "near_lower":
                     pos = await self._get_open_position(pair)
-                    if pos:
-                        await self._close_position_market(pair, pos, "near_upper_exit")
 
-                # ── 가격 기반 손절: 마지막 방어선 (매 tick 체크) ──
-                # near_upper 청산 후 캐시가 None으로 갱신되므로 중복 발동 없음
+                    # 숏 포지션 청산 (both 모드)
+                    if pos and pos.side == "sell" and direction_mode in ("both",):
+                        try:
+                            await self._close_position_market(pair, pos, "near_lower_exit")
+                            pos = None  # 청산 완료
+                        except Exception:
+                            logger.error(
+                                f"[BoxMgr] {pair}: 숏→롱 전환 중 청산 실패, 롱 진입 스킵"
+                            )
+                            self._prev_box_state[pair] = box_state
+                            continue
+
+                    # 롱 진입 (long_only 또는 both)
+                    if direction_mode in ("long_only", "both") and pos is None:
+                        box = await self._get_active_box(pair)
+                        if box:
+                            await self._open_position_market(
+                                pair, box, price, params, direction="long"
+                            )
+
+                # ── near_upper 도달 ──────────────────────
+                elif box_state == "near_upper" and prev_state != "near_upper":
+                    pos = await self._get_open_position(pair)
+
+                    # 롱 포지션 청산 (long_only 또는 both)
+                    if pos and pos.side == "buy" and direction_mode in ("long_only", "both"):
+                        try:
+                            await self._close_position_market(pair, pos, "near_upper_exit")
+                            pos = None  # 청산 완료
+                        except Exception:
+                            logger.error(
+                                f"[BoxMgr] {pair}: 롱→숏 전환 중 청산 실패, 숏 진입 스킵"
+                            )
+                            self._prev_box_state[pair] = box_state
+                            continue
+
+                    # 숏 진입 (both 또는 short_only)
+                    if direction_mode in ("both", "short_only") and pos is None:
+                        box = await self._get_active_box(pair)
+                        if box:
+                            await self._open_position_market(
+                                pair, box, price, params, direction="short"
+                            )
+
+                # ── 가격 기반 손절: 마지막 방어선 (매 tick 체크, 방향별) ──
                 pos = await self._get_open_position(pair)
                 if pos and pos.entry_price:
                     sl_pct = float(params.get("stop_loss_pct", 1.5))
                     if sl_pct > 0:
-                        sl_price = float(pos.entry_price) * (1 - sl_pct / 100)
-                        if price <= sl_price:
+                        ep = float(pos.entry_price)
+                        if pos.side == "buy":
+                            sl_price = ep * (1 - sl_pct / 100)
+                            sl_triggered = price <= sl_price
+                        else:  # sell (숏)
+                            sl_price = ep * (1 + sl_pct / 100)
+                            sl_triggered = price >= sl_price
+
+                        if sl_triggered:
                             logger.warning(
                                 f"[BoxMgr] {pair}: 가격 SL 발동 "
-                                f"price={price} <= sl={sl_price:.4f} "
+                                f"side={pos.side} price={price} sl={sl_price:.4f} "
                                 f"(entry={pos.entry_price}, sl_pct={sl_pct}%)"
                             )
                             await self._close_position_market(pair, pos, "price_stop_loss")
@@ -516,9 +561,14 @@ class BoxMeanReversionManager:
     # ──────────────────────────────────────────
 
     async def _open_position_market(
-        self, pair: str, box: Any, price: float, params: Dict[str, Any],
+        self,
+        pair: str,
+        box: Any,
+        price: float,
+        params: Dict[str, Any],
+        direction: str = "long",
     ) -> None:
-        """market_buy 자동 진입 + DB 포지션 기록."""
+        """market 자동 진입 + DB 포지션 기록. direction: 'long' | 'short'."""
         try:
             balance = await self._adapter.get_balance()
             jpy_available = balance.get_available("jpy")
@@ -551,8 +601,9 @@ class BoxMeanReversionManager:
                         f"[BoxMgr] {pair}: FX 수량({order_size}) < 최소 로트({min_lot}), 진입 스킵"
                     )
                     return
+                order_type = OrderType.MARKET_BUY if direction == "long" else OrderType.MARKET_SELL
                 order = await self._adapter.place_order(
-                    OrderType.MARKET_BUY, pair, float(order_size),
+                    order_type, pair, float(order_size),
                 )
                 exec_price = order.price or price
                 exec_amount = order.amount or float(order_size)
@@ -568,9 +619,10 @@ class BoxMeanReversionManager:
                     entry_amount=exec_amount,
                     entry_jpy=invest_jpy,
                     exchange_position_id=exchange_position_id,
+                    direction=direction,
                 )
             else:
-                # 현물: amount=JPY (adapter가 내부적으로 코인 수량 변환)
+                # 현물: 항상 롱(MARKET_BUY). is_margin=False 시 direction=long 강제.
                 order = await self._adapter.place_order(
                     OrderType.MARKET_BUY, pair, invest_jpy,
                 )
@@ -586,12 +638,13 @@ class BoxMeanReversionManager:
                     entry_price=exec_price,
                     entry_amount=exec_amount,
                     entry_jpy=invest_jpy,
+                    direction="long",
                 )
 
             logger.info(
                 f"[BoxMgr] {pair}: 자동 진입 완료 "
-                f"order_id={order.order_id} price={exec_price} "
-                f"amount={exec_amount}"
+                f"direction={direction} order_id={order.order_id} "
+                f"price={exec_price} amount={exec_amount}"
             )
         except Exception as e:
             logger.error(f"[BoxMgr] {pair}: 진입 주문 오류 — {e}", exc_info=True)
@@ -674,7 +727,7 @@ class BoxMeanReversionManager:
     async def _close_position_market_fx(
         self, pair: str, pos: Any, reason: str,
     ) -> None:
-        """FX 청산: closeOrder(positionId)로 건옥 결제."""
+        """FX 청산: closeOrder(positionId)로 건옥 결제. 롱/숏 양방향 대응."""
         symbol = pair.upper()
 
         # 1. positionId 확보: DB 저장값 우선, 없으면 API 조회 매칭
@@ -686,16 +739,16 @@ class BoxMeanReversionManager:
         else:
             # DB에 positionId 없으면 get_positions()로 매칭 시도
             position_id = await self._match_fx_position_id(
-                pair, float(pos.entry_price), close_size,
+                pair, float(pos.entry_price), close_size, pos.side,
             )
             if position_id is None:
                 logger.error(
                     f"[BoxMgr] {pair}: FX 청산 실패 — positionId 매칭 불가 "
-                    f"(entry_price={pos.entry_price}, amount={pos.entry_amount})"
+                    f"(entry_price={pos.entry_price}, amount={pos.entry_amount}, side={pos.side})"
                 )
                 return
 
-        # 2. close_side: 매수 포지션 청산 → SELL
+        # 2. close_side: 롱(buy) → SELL 청산, 숏(sell) → BUY 청산
         close_side = "SELL" if pos.side == "buy" else "BUY"
 
         order = await self._adapter.close_position(
@@ -742,8 +795,9 @@ class BoxMeanReversionManager:
         entry_amount: float,
         entry_jpy: Optional[float] = None,
         exchange_position_id: Optional[str] = None,
+        direction: str = "long",
     ) -> Any:
-        """진입 주문 직후 포지션 기록. open 이미 존재 시 경고 → 기존 반환."""
+        """진입 주문 직후 포지션 기록. direction: 'long'→side='buy', 'short'→side='sell'."""
         existing = await self._get_open_position(pair)
         if existing:
             logger.warning(
@@ -756,7 +810,7 @@ class BoxMeanReversionManager:
         pos = PosModel()
         setattr(pos, pair_col, pair)
         pos.box_id = box_id
-        pos.side = "buy"
+        pos.side = "buy" if direction == "long" else "sell"
         pos.entry_order_id = str(entry_order_id)
         pos.entry_price = Decimal(str(entry_price))
         pos.entry_amount = Decimal(str(entry_amount))
@@ -795,8 +849,12 @@ class BoxMeanReversionManager:
 
         ep = float(pos.entry_price)
         ea = float(pos.entry_amount)
-        pnl_jpy = (exit_price - ep) * min(exit_amount, ea)
-        pnl_pct = (exit_price - ep) / ep * 100 if ep > 0 else 0.0
+        # 방향별 PnL: 롱은 (exit-entry)*amount, 숏은 (entry-exit)*amount
+        if pos.side == "buy":
+            pnl_jpy = (exit_price - ep) * min(exit_amount, ea)
+        else:  # sell (숏)
+            pnl_jpy = (ep - exit_price) * min(exit_amount, ea)
+        pnl_pct = pnl_jpy / (ep * min(exit_amount, ea)) * 100 if ep > 0 and ea > 0 else 0.0
 
         if exit_jpy is None:
             exit_jpy = exit_price * exit_amount
@@ -903,20 +961,22 @@ class BoxMeanReversionManager:
         return None
 
     async def _match_fx_position_id(
-        self, pair: str, entry_price: float, size: int,
+        self, pair: str, entry_price: float, size: int, side: str = "buy",
     ) -> Optional[int]:
-        """get_positions()에서 진입가/수량으로 매칭하여 positionId 반환."""
+        """get_positions()에서 진입가/수량/방향으로 매칭하여 positionId 반환."""
+        # DB side('buy'/'sell') → GMO API side('BUY'/'SELL') 변환
+        api_side = "BUY" if side == "buy" else "SELL"
         try:
             positions = await self._adapter.get_positions(pair.upper())
             for p in positions:
-                if p.side == "BUY" and int(p.size) == size:
+                if p.side == api_side and int(p.size) == size:
                     # 진입가 근사 매칭 (0.1% 이내)
                     if entry_price > 0 and abs(p.price - entry_price) / entry_price < 0.001:
                         return p.position_id
-            # 정확한 매칭 실패 시, BUY 포지션 중 가장 근접한 것
-            buy_positions = [p for p in positions if p.side == "BUY"]
-            if len(buy_positions) == 1 and buy_positions[0].position_id is not None:
-                return buy_positions[0].position_id
+            # 정확한 매칭 실패 시, 해당 방향 포지션 중 단일 건이면 반환
+            side_positions = [p for p in positions if p.side == api_side]
+            if len(side_positions) == 1 and side_positions[0].position_id is not None:
+                return side_positions[0].position_id
         except Exception as e:
             logger.warning(f"[BoxMgr] {pair}: FX 포지션 매칭 실패 — {e}")
         return None

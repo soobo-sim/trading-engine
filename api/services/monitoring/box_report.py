@@ -150,8 +150,11 @@ def build_box_telegram_text(prefix: str, time_str: str, pair: str, data: dict) -
         pnl = pos["unrealized_pnl_jpy"]
         pnl_pct = pos["unrealized_pnl_pct"]
         pnl_sign = "+" if pnl >= 0 else ""
+        pos_side = pos.get("side", "buy")  # 방향: 'buy'=롱, 'sell'=숏
+        pos_icon = "📈" if pos_side == "buy" else "📉"
+        pos_label = "롱" if pos_side == "buy" else "숏"
         lines.append(
-            f"📈 보유: {entry_amount:.0f}{currency} @ ¥{entry_price:,.2f} | "
+            f"{pos_icon} {pos_label} 보유: {entry_amount:.0f}{currency} @ ¥{entry_price:,.2f} | "
             f"미실현 {pnl_sign}¥{pnl:,.0f} ({pnl_sign}{pnl_pct:.2f}%)"
         )
 
@@ -162,27 +165,44 @@ def build_box_telegram_text(prefix: str, time_str: str, pair: str, data: dict) -
             upper = box["upper_bound"]
             lower_val = box["lower_bound"]
 
-            # 익절: near_upper zone
-            tp_low = upper * (1 - near_bound_pct / 100)
-            tp_high = upper * (1 + near_bound_pct / 100)
-            tp_low_pct = (tp_low - current_price) / current_price * 100
-            tp_high_pct = (tp_high - current_price) / current_price * 100
-            tp_sign_low = "+" if tp_low_pct >= 0 else ""
-            tp_sign_high = "+" if tp_high_pct >= 0 else ""
-            lines.append(
-                f"🎯 익절: near_upper ¥{tp_low:,.2f}~¥{tp_high:,.2f} "
-                f"(현재가 {tp_sign_low}{tp_low_pct:.1f}%~{tp_sign_high}{tp_high_pct:.1f}%)"
-            )
-
-            # 손절: 박스 무효화 + 가격 SL
-            inv_price = lower_val * (1 - tolerance_pct_val / 100)
-            inv_pct = (inv_price - current_price) / current_price * 100
-            sl_price = entry_price * (1 - stop_loss_pct / 100)
-            sl_pct_val = -stop_loss_pct
-            lines.append(
-                f"🛑 손절: 박스 무효화 ¥{inv_price:,.2f} (현재가 {inv_pct:.1f}%) / "
-                f"가격SL ¥{sl_price:,.2f} ({sl_pct_val:.1f}%)"
-            )
+            if pos_side == "buy":
+                # 롱: 익절=near_upper, 손절=박스하단이탈+가격SL
+                tp_low = upper * (1 - near_bound_pct / 100)
+                tp_high = upper * (1 + near_bound_pct / 100)
+                tp_low_pct = (tp_low - current_price) / current_price * 100
+                tp_high_pct = (tp_high - current_price) / current_price * 100
+                tp_sign_low = "+" if tp_low_pct >= 0 else ""
+                tp_sign_high = "+" if tp_high_pct >= 0 else ""
+                lines.append(
+                    f"🎯 익절: near_upper ¥{tp_low:,.2f}~¥{tp_high:,.2f} "
+                    f"(현재가 {tp_sign_low}{tp_low_pct:.1f}%~{tp_sign_high}{tp_high_pct:.1f}%)"
+                )
+                inv_price = lower_val * (1 - tolerance_pct_val / 100)
+                inv_pct = (inv_price - current_price) / current_price * 100
+                sl_price = entry_price * (1 - stop_loss_pct / 100)
+                lines.append(
+                    f"🛑 손절: 박스 무효화 ¥{inv_price:,.2f} (현재가 {inv_pct:.1f}%) / "
+                    f"가격SL ¥{sl_price:,.2f} (-{stop_loss_pct:.1f}%)"
+                )
+            else:
+                # 숏: 익절=near_lower, 손절=박스상단이탈+가격SL
+                tp_low = lower_val * (1 - near_bound_pct / 100)
+                tp_high = lower_val * (1 + near_bound_pct / 100)
+                tp_low_pct = (current_price - tp_high) / current_price * 100
+                tp_high_pct = (current_price - tp_low) / current_price * 100
+                tp_sign_low = "+" if tp_low_pct >= 0 else ""
+                tp_sign_high = "+" if tp_high_pct >= 0 else ""
+                lines.append(
+                    f"🎯 익절: near_lower ¥{tp_low:,.2f}~¥{tp_high:,.2f} "
+                    f"(현재가 {tp_sign_low}{tp_low_pct:.1f}%~{tp_sign_high}{tp_high_pct:.1f}%)"
+                )
+                inv_price = upper * (1 + tolerance_pct_val / 100)
+                inv_pct = (inv_price - current_price) / current_price * 100
+                sl_price = entry_price * (1 + stop_loss_pct / 100)
+                lines.append(
+                    f"🛑 손절: 박스 무효화 ¥{inv_price:,.2f} (현재가 +{inv_pct:.1f}%) / "
+                    f"가격SL ¥{sl_price:,.2f} (+{stop_loss_pct:.1f}%)"
+                )
     else:
         # ── 포지션 없음: 진입 대기 모드 (현행) ──
         met = data.get("conditions_met", 0)
@@ -419,12 +439,17 @@ async def generate_box_report(
     if pos_row and pos_row.entry_price:
         entry_price = float(pos_row.entry_price)
         entry_amount = float(pos_row.entry_amount)
-        unrealized_pnl_jpy = (current_price - entry_price) * entry_amount
+        pos_side = getattr(pos_row, "side", "buy")  # 'buy'=롱, 'sell'=숏
+        if pos_side == "sell":
+            unrealized_pnl_jpy = (entry_price - current_price) * entry_amount
+        else:
+            unrealized_pnl_jpy = (current_price - entry_price) * entry_amount
         unrealized_pnl_pct = (
-            (current_price - entry_price) / entry_price * 100
-            if entry_price > 0 else 0.0
+            unrealized_pnl_jpy / (entry_price * entry_amount) * 100
+            if entry_price > 0 and entry_amount > 0 else 0.0
         )
         position_data = {
+            "side": pos_side,
             "entry_price": entry_price,
             "entry_amount": entry_amount,
             "current_price": current_price,
