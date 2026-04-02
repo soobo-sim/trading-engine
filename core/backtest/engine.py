@@ -567,14 +567,20 @@ def _run_box_backtest(
                 continue
 
         if current_position is not None:
-            # ── D-2: near_upper 도달 시 청산 (실전 _entry_monitor와 동일) ──
+            # ── D-2: near_upper/near_lower 도달 시 청산 (양방향 지원) ──
             box_state = classify_price_in_box(
                 current_price, active_box["upper"], active_box["lower"], near_bound_pct,
             )
-            if box_state == "near_upper" and prev_box_state != "near_upper":
+            direction_mode = params.get("direction_mode", "long_only")
+
+            # 롱 청산: near_upper 도달
+            if (
+                current_position.side == "buy"
+                and box_state == "near_upper"
+                and prev_box_state != "near_upper"
+            ):
                 exit_price = _apply_slippage(
-                    current_price, "sell" if current_position.side == "buy" else "buy",
-                    config.slippage_pct,
+                    current_price, "sell", config.slippage_pct,
                 )
                 _close_position(
                     current_position, exit_price, current_candle,
@@ -583,15 +589,58 @@ def _run_box_backtest(
                 capital += current_position.pnl_jpy or 0
                 trades.append(current_position)
                 current_position = None
-                # 박스는 유지 (실전과 동일 — 청산 후 재진입 가능)
 
-            # ── SL: 가격 기반 손절 — 마지막 방어선 (실전 _entry_monitor와 동일) ──
-            # near_upper가 이미 청산했으면 current_position=None → 이 블록 스킵됨
+                # 양방향: 롱 청산 직후 숏 진입
+                if direction_mode == "both":
+                    s_entry = _apply_slippage(current_price, "sell", config.slippage_pct)
+                    invest_jpy = capital * position_size / 100
+                    entry_fee = _apply_fee(invest_jpy, config.fee_pct)
+                    amount = (invest_jpy - entry_fee) / s_entry if s_entry > 0 else 0
+                    current_position = BacktestTrade(
+                        entry_time=_candle_time(current_candle),
+                        entry_price=s_entry, side="sell", amount=amount,
+                    )
+
+            # 숏 청산: near_lower 도달
+            if (
+                current_position is not None
+                and current_position.side == "sell"
+                and box_state == "near_lower"
+                and prev_box_state != "near_lower"
+            ):
+                exit_price = _apply_slippage(
+                    current_price, "buy", config.slippage_pct,
+                )
+                _close_position(
+                    current_position, exit_price, current_candle,
+                    "near_lower_exit", config.fee_pct, capital,
+                )
+                capital += current_position.pnl_jpy or 0
+                trades.append(current_position)
+                current_position = None
+
+                # 양방향: 숏 청산 직후 롱 진입
+                if direction_mode == "both":
+                    l_entry = _apply_slippage(current_price, "buy", config.slippage_pct)
+                    invest_jpy = capital * position_size / 100
+                    entry_fee = _apply_fee(invest_jpy, config.fee_pct)
+                    amount = (invest_jpy - entry_fee) / l_entry if l_entry > 0 else 0
+                    current_position = BacktestTrade(
+                        entry_time=_candle_time(current_candle),
+                        entry_price=l_entry, side="buy", amount=amount,
+                    )
+
+            # ── SL: 가격 기반 손절 — 방향별 분기 ──
             if current_position is not None:
                 sl_pct = float(params.get("stop_loss_pct", 1.5))
                 if sl_pct > 0:
-                    sl_price = current_position.entry_price * (1 - sl_pct / 100)
-                    if current_price <= sl_price:
+                    if current_position.side == "buy":
+                        sl_price = current_position.entry_price * (1 - sl_pct / 100)
+                        sl_hit = current_price <= sl_price
+                    else:
+                        sl_price = current_position.entry_price * (1 + sl_pct / 100)
+                        sl_hit = current_price >= sl_price
+                    if sl_hit:
                         exit_price = _apply_slippage(
                             current_price,
                             "sell" if current_position.side == "buy" else "buy",
@@ -643,12 +692,34 @@ def _run_box_backtest(
             box_state = classify_price_in_box(
                 current_price, active_box["upper"], active_box["lower"], near_bound_pct,
             )
+            direction_mode = params.get("direction_mode", "long_only")
 
+            # 롱 진입: near_lower
             if (
                 box_state == "near_lower"
                 and prev_box_state != "near_lower"
             ):
                 side = "buy"
+                entry_price = _apply_slippage(current_price, side, config.slippage_pct)
+                invest_jpy = capital * position_size / 100
+                entry_fee = _apply_fee(invest_jpy, config.fee_pct)
+                invest_after_fee = invest_jpy - entry_fee
+                amount = invest_after_fee / entry_price if entry_price > 0 else 0
+
+                current_position = BacktestTrade(
+                    entry_time=_candle_time(current_candle),
+                    entry_price=entry_price,
+                    side=side,
+                    amount=amount,
+                )
+
+            # 숏 진입: near_upper (양방향 모드)
+            elif (
+                direction_mode == "both"
+                and box_state == "near_upper"
+                and prev_box_state != "near_upper"
+            ):
+                side = "sell"
                 entry_price = _apply_slippage(current_price, side, config.slippage_pct)
                 invest_jpy = capital * position_size / 100
                 entry_fee = _apply_fee(invest_jpy, config.fee_pct)

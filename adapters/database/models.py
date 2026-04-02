@@ -387,7 +387,7 @@ def create_box_position_model(prefix: str, pair_column: str = "pair", order_id_l
             Index(f"idx_{prefix}_box_positions_box_id", "box_id"),
             Index(f"idx_{prefix}_box_positions_created", pair_column, "created_at"),
             CheckConstraint("status IN ('open','closed')", name=f"{prefix}_box_positions_status_check"),
-            CheckConstraint("side IN ('buy')", name=f"{prefix}_box_positions_side_check"),
+            CheckConstraint("side IN ('buy','sell')", name=f"{prefix}_box_positions_side_check"),
             {"extend_existing": True},
         ),
         pair_column: Column(String(20), nullable=False),
