@@ -14,9 +14,10 @@ from datetime import datetime, timedelta, timezone
 # JST = UTC+9
 _JST = timezone(timedelta(hours=9))
 
-# 금요일 자동 청산 기본값: 토요일 06:00 JST (= 금요일 21:00 UTC)
-# 클로즈(06:50)보다 50분 여유 — 주문 실행 지연 대비
-_DEFAULT_FRIDAY_CLOSE_HOUR_JST = 6  # 토요일 새벽
+# 금요일 자동 청산 기본값: 금요일 21:00 JST
+# 주말 갭 리스크 대비 — 토요일 새벽(06:50 마감)까지 기다리지 않고
+# 금요일 밤에 능동적으로 청산하여 수익 보전 + 갭 리스크 회피
+_DEFAULT_FRIDAY_CLOSE_HOUR_JST = 21  # 금요일 밤 9시
 _DEFAULT_FRIDAY_CLOSE_MINUTE_JST = 0
 
 
@@ -76,20 +77,21 @@ def should_close_for_weekend(
     jst = dt.astimezone(_JST) if dt else now_jst()
     weekday = jst.weekday()
 
-    # 토요일: close_hour 이전이면 아직 금요일 연장 → 청산 시점
+    # 토요일: 항상 True (시장 닫힘 임박 또는 닫힘)
     if weekday == 5:
-        if jst.hour < close_hour_jst:
-            return True
-        if jst.hour == close_hour_jst and jst.minute < close_minute_jst:
-            return True
-        return True  # 토요일은 어차피 닫힘 — 전부 True
+        return True
 
     # 일요일: 항상 True (시장 닫힘)
     if weekday == 6:
         return True
 
-    # 금요일 late session: 설계상 토요일 새벽 기준이므로 금요일은 False
-    # (금요일 자체는 정상 거래)
+    # 금요일: close_hour 이후 → True (능동적 주말 청산)
+    if weekday == 4:
+        if jst.hour > close_hour_jst:
+            return True
+        if jst.hour == close_hour_jst and jst.minute >= close_minute_jst:
+            return True
+
     return False
 
 
