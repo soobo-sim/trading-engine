@@ -63,12 +63,13 @@ def should_close_for_weekend(
     """
     금요일 마감 전 포지션 청산 시점인지 판정.
 
-    기본: 토요일 06:00 JST 이후 (= 금요일 21:00 UTC 이후) → True
+    기본: 금요일 21:00 JST 이후 → True
     이 시점 이후에는 신규 진입 차단 + 기존 포지션 청산.
+    주말 갭 리스크 대비 — 토요일 새벽 마감까지 기다리지 않고 능동적 청산.
 
     Args:
         dt: 판정 대상 시각 (None이면 현재 시각)
-        close_hour_jst:   청산 시작 시각(JST) — 토요일 새벽 기준
+        close_hour_jst:   청산 시작 시각(JST) — 금요일 기준
         close_minute_jst: 분
 
     Returns:
