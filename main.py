@@ -74,21 +74,25 @@ from adapters.database.models import (
     create_cfd_position_model,
     create_insight_model,
     create_strategy_model,
+    create_strategy_snapshot_model,
+    create_switch_recommendation_model,
     create_summary_model,
     create_trade_model,
     create_trend_position_model,
 )
 from adapters.database.session import create_db_engine, create_session_factory
 from api.dependencies import AppState, ModelRegistry
-from api.routes import system, trading, account, strategies, boxes, candles, techniques, analysis, monitoring, cfd, performance, wake_up_reviews, strategy_changes, strategy_analysis, paper_trades
+from api.routes import system, trading, account, strategies, boxes, candles, techniques, analysis, monitoring, cfd, performance, wake_up_reviews, strategy_changes, strategy_analysis, paper_trades, strategy_scores
+from core.notifications.switch_telegram import send_switch_recommendation_telegram
 from core.monitoring.health import HealthChecker
 from core.analysis.event_filter import create_event_filter
 from core.analysis.intermarket import create_intermarket_client
-from core.execution.executor import PaperExecutor
 from core.strategy.box_mean_reversion import BoxMeanReversionManager
 from core.strategy.cfd_trend_following import CfdTrendFollowingManager
 from core.strategy.trend_following import TrendFollowingManager
 from core.strategy.registry import StrategyRegistry
+from core.strategy.snapshot_collector import SnapshotCollector
+from core.strategy.switch_recommender import SwitchRecommender
 from core.task.auto_reporter import create_auto_reporter
 from core.task.supervisor import TaskSupervisor
 
@@ -137,7 +141,7 @@ def _create_models(prefix: str, pair_column: str, order_id_length: int) -> Model
     """프리픽스로 ORM 모델 인스턴스화."""
     return ModelRegistry(
         strategy=create_strategy_model(prefix),
-        trade=create_trade_model(prefix, order_id_length=order_id_length),
+        trade=create_trade_model(prefix, order_id_length=order_id_length, pair_column=pair_column),
         balance_entry=create_balance_entry_model(prefix),
         insight=create_insight_model(prefix),
         summary=create_summary_model(prefix),
@@ -147,6 +151,8 @@ def _create_models(prefix: str, pair_column: str, order_id_length: int) -> Model
         trend_position=create_trend_position_model(prefix, order_id_length=order_id_length),
         cfd_position=create_cfd_position_model(prefix, pair_column=pair_column, order_id_length=order_id_length),
         technique=StrategyTechnique,
+        strategy_snapshot=create_strategy_snapshot_model(prefix),
+        switch_recommendation=create_switch_recommendation_model(prefix),
     )
 
 
@@ -187,6 +193,21 @@ async def lifespan(app: FastAPI):
     supervisor = TaskSupervisor()
 
     # 5. Strategy Managers + Registry
+    switch_recommender = SwitchRecommender(
+        session_factory=session_factory,
+        recommendation_model=models.switch_recommendation,
+        on_recommendation=send_switch_recommendation_telegram,
+    )
+    snapshot_collector = SnapshotCollector(
+        session_factory=session_factory,
+        adapter=adapter,
+        strategy_model=models.strategy,
+        candle_model=models.candle,
+        box_model=models.box,
+        snapshot_model=models.strategy_snapshot,
+        pair_column=pair_column,
+        switch_recommender=switch_recommender,
+    )
     trend_manager = TrendFollowingManager(
         adapter=adapter,
         supervisor=supervisor,
@@ -194,6 +215,7 @@ async def lifespan(app: FastAPI):
         candle_model=models.candle,
         trend_position_model=models.trend_position,
         pair_column=pair_column,
+        snapshot_collector=snapshot_collector,
     )
     box_manager = BoxMeanReversionManager(
         adapter=adapter,
@@ -205,6 +227,7 @@ async def lifespan(app: FastAPI):
         pair_column=pair_column,
         event_filter=create_event_filter(),
         intermarket_client=create_intermarket_client(),
+        snapshot_collector=snapshot_collector,
     )
     cfd_manager = CfdTrendFollowingManager(
         adapter=adapter,
@@ -213,6 +236,7 @@ async def lifespan(app: FastAPI):
         candle_model=models.candle,
         cfd_position_model=models.cfd_position,
         pair_column=pair_column,
+        snapshot_collector=snapshot_collector,
     )
 
     strategy_registry = StrategyRegistry()
@@ -283,7 +307,7 @@ async def lifespan(app: FastAPI):
                     continue
                 # 전략 스타일별 매니저에 PaperExecutor 바인딩 (pair 레벨 분리)
                 if style == "box_mean_reversion":
-                    box_manager._executor = PaperExecutor(session_factory, strategy.id)
+                    box_manager.register_paper_pair(pair, strategy.id)
                 elif style == "trend_following":
                     trend_manager.register_paper_pair(pair, strategy.id)
                 elif style == "cfd_trend_following":
@@ -348,3 +372,4 @@ app.include_router(wake_up_reviews.router)
 app.include_router(strategy_changes.router)
 app.include_router(strategy_analysis.router)
 app.include_router(paper_trades.router)
+app.include_router(strategy_scores.router)

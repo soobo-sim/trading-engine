@@ -332,11 +332,11 @@ async def generate_box_report(
     ticker = await adapter.get_ticker(pair)
     current_price = ticker.last
 
-    # 3. 활성 박스 조회
+    # 3. 활성 박스 조회 (active 전략 박스만 — paper 박스 제외)
     pair_col = getattr(box_model, pair_column)
     result = await db.execute(
         select(box_model)
-        .where(and_(pair_col == pair, box_model.status == "active"))
+        .where(and_(pair_col == pair, box_model.status == "active", box_model.strategy_id.is_(None)))
         .order_by(desc(box_model.created_at))
         .limit(1)
     )

@@ -65,6 +65,7 @@ class BaseTrendManager(ABC):
         position_model: Type,
         pair_column: str = "pair",
         position_pair_column: Optional[str] = None,
+        snapshot_collector: Optional[Any] = None,
     ) -> None:
         self._adapter = adapter
         self._supervisor = supervisor
@@ -73,6 +74,7 @@ class BaseTrendManager(ABC):
         self._position_model = position_model
         self._pair_column = pair_column
         self._position_pair_column = position_pair_column or pair_column
+        self._snapshot_collector: Optional[Any] = snapshot_collector  # P-1 트리거 훅
 
         # pair별 상태
         self._params: Dict[str, Dict] = {}
@@ -165,6 +167,12 @@ class BaseTrendManager(ABC):
         logger.info(
             f"{self._log_prefix} {pair}: PaperExecutor 등록 (strategy_id={strategy_id})"
         )
+
+    def unregister_paper_pair(self, pair: str) -> None:
+        """Paper 등록 해제. 추천 승인/pair 전환 시 호출."""
+        self._paper_executors.pop(pair, None)
+        self._paper_positions.pop(pair, None)
+        logger.info(f"{self._log_prefix} {pair}: PaperExecutor 해제")
 
     async def _try_paper_entry(
         self, pair: str, direction: str, current_price: float,
@@ -635,6 +643,12 @@ class BaseTrendManager(ABC):
             )
             return
         await self._close_position_impl(pair, reason)
+        # T1 트리거: real 청산 완료 직후 全 전략 Score 스냅샷 수집 (P-1)
+        if self._snapshot_collector is not None:
+            import asyncio
+            asyncio.create_task(
+                self._snapshot_collector.collect_all_snapshots("T1_position_close", pair)
+            )
 
     @abstractmethod
     async def _close_position_impl(self, pair: str, reason: str) -> None:

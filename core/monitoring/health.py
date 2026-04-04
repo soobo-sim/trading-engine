@@ -300,7 +300,10 @@ class HealthChecker(SafetyChecksMixin):
         try:
             async with self._session_factory() as db:
                 pair_col = getattr(self._box_model, self._pair_column)
-                stmt = select(pair_col).where(self._box_model.status == "active")
+                stmt = select(pair_col).where(
+                    self._box_model.status == "active",
+                    self._box_model.strategy_id.is_(None),
+                )
                 result = await db.execute(stmt)
                 for (pair,) in result.all():
                     pairs.add(pair)

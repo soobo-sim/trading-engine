@@ -154,16 +154,27 @@ class AutoReporter:
             try:
                 from core.task.loss_detector import detect_and_notify_losses
                 trend_model = getattr(state.models, "trend_position", None)
+                box_model = getattr(state.models, "box_position", None)
                 if trend_model is not None:
                     sent = await detect_and_notify_losses(
                         db, trend_model,
+                        box_position_model=box_model,
                         prefix=state.prefix,
                         http_client=self._http_client,
                     )
                     if sent:
-                        logger.info(f"Loss detector: {sent}건 webhook 전송")
+                        logger.info(f"Loss detector: {sent}건 기록")
             except Exception as e:
                 logger.error(f"Loss detector 실패 (보고는 계속): {e}")
+
+            # Wake-Up 파이프라인 트리거 (24h 경과 리뷰 → 레이첼 발동)
+            try:
+                from core.task.wake_up_trigger import trigger_pending_reviews
+                triggered = await trigger_pending_reviews(db, http_client=self._http_client)
+                if triggered:
+                    logger.info(f"Wake-up trigger: {triggered}건 발동")
+            except Exception as e:
+                logger.error(f"Wake-up trigger 실패 (보고는 계속): {e}")
 
             # Kill 조건 자동 체크
             try:

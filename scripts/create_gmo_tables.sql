@@ -173,6 +173,7 @@ CREATE INDEX IF NOT EXISTS idx_gmo_candles_incomplete ON gmo_candles (pair, time
 CREATE TABLE IF NOT EXISTS gmo_boxes (
     id SERIAL PRIMARY KEY,
     pair VARCHAR(20) NOT NULL,
+    strategy_id INTEGER,
     upper_bound NUMERIC(18,8) NOT NULL,
     lower_bound NUMERIC(18,8) NOT NULL,
     upper_touch_count INTEGER NOT NULL DEFAULT 0,
@@ -191,6 +192,7 @@ CREATE TABLE IF NOT EXISTS gmo_boxes (
 
 CREATE INDEX IF NOT EXISTS idx_gmo_boxes_pair_status ON gmo_boxes (pair, status);
 CREATE INDEX IF NOT EXISTS idx_gmo_boxes_created ON gmo_boxes (pair, created_at);
+CREATE INDEX IF NOT EXISTS idx_gmo_boxes_strategy ON gmo_boxes (strategy_id);
 
 
 -- ──────────────────────────────────────────────────

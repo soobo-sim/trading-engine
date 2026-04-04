@@ -116,6 +116,7 @@ async def insert_box(
     lower: float,
     tolerance_pct: float = 0.5,
     status: str = "active",
+    strategy_id: Optional[int] = None,
 ) -> int:
     """박스를 직접 DB에 삽입. 반환: box id."""
     async with factory() as db:
@@ -128,6 +129,7 @@ async def insert_box(
         box.tolerance_pct = Decimal(str(tolerance_pct))
         box.basis_timeframe = "4h"
         box.status = status
+        box.strategy_id = strategy_id
         box.created_at = datetime.now(timezone.utc)
         db.add(box)
         await db.commit()
@@ -1637,4 +1639,370 @@ class TestInvalidationCooldownTimer:
         await manager.stop(pair)
 
         assert pair not in manager._last_invalidation_time
+
+
+# ══════════════════════════════════════════════
+# 테스트: pair-level executor 분리 (PP-01 ~ PP-05)
+# ══════════════════════════════════════════════
+
+class TestPairLevelExecutor:
+    """register_paper_pair() + _get_executor(pair) 동작 검증.
+
+    PP-01: register_paper_pair → 해당 pair에 PaperExecutor 바인딩
+    PP-02: register_paper_pair 안 된 pair → 공유 _executor 반환
+    PP-03: active pair의 _executor를 paper pair가 더럽히지 않음
+    PP-04: stop() 후 해당 pair PaperExecutor 제거
+    PP-05: 서로 다른 paper pair는 독립 PaperExecutor 보유
+    """
+
+    @pytest.mark.asyncio
+    async def test_pp01_register_paper_pair_binds_paper_executor(
+        self, manager, db_session_factory
+    ):
+        """PP-01: register_paper_pair → 해당 pair에 PaperExecutor 반환."""
+        from core.execution.executor import PaperExecutor
+
+        pair = "usd_jpy"
+        manager.register_paper_pair(pair, strategy_id=42)
+
+        executor = manager._get_executor(pair)
+        assert isinstance(executor, PaperExecutor)
+        assert manager._paper_executors[pair]._strategy_id == 42
+
+    @pytest.mark.asyncio
+    async def test_pp02_unregistered_pair_returns_shared_executor(self, manager):
+        """PP-02: 등록 안 된 pair → 공유 _executor 반환 (RealExecutor)."""
+        from core.execution.executor import RealExecutor
+
+        pair = "gbp_jpy"
+        executor = manager._get_executor(pair)
+        assert isinstance(executor, RealExecutor)
+
+    @pytest.mark.asyncio
+    async def test_pp03_paper_pair_does_not_affect_active_pair(self, manager):
+        """PP-03: paper pair 등록이 다른 active pair executor에 영향 없음."""
+        from core.execution.executor import PaperExecutor, RealExecutor
+
+        active_pair = "btc_jpy"
+        paper_pair = "usd_jpy"
+
+        # paper pair 등록 전 active는 RealExecutor
+        assert isinstance(manager._get_executor(active_pair), RealExecutor)
+
+        # paper pair 등록
+        manager.register_paper_pair(paper_pair, strategy_id=10)
+
+        # active pair는 여전히 RealExecutor
+        assert isinstance(manager._get_executor(active_pair), RealExecutor)
+        # paper pair는 PaperExecutor
+        assert isinstance(manager._get_executor(paper_pair), PaperExecutor)
+
+    @pytest.mark.asyncio
+    async def test_pp04_stop_removes_paper_executor(self, manager):
+        """PP-04: stop() 후 해당 pair PaperExecutor 제거, 공유 executor 복귀."""
+        from core.execution.executor import PaperExecutor, RealExecutor
+
+        pair = "usd_jpy"
+        manager.register_paper_pair(pair, strategy_id=10)
+        assert isinstance(manager._get_executor(pair), PaperExecutor)
+
+        # _params에 등록해야 stop()이 pair를 정리함
+        manager._params[pair] = {}
+        await manager.stop(pair)
+
+        assert pair not in manager._paper_executors
+        assert isinstance(manager._get_executor(pair), RealExecutor)
+
+    @pytest.mark.asyncio
+    async def test_pp05_independent_paper_executors_per_pair(self, manager):
+        """PP-05: 서로 다른 paper pair는 독립 PaperExecutor 보유."""
+        from core.execution.executor import PaperExecutor
+
+        pair_a = "usd_jpy"
+        pair_b = "gbp_jpy"
+
+        manager.register_paper_pair(pair_a, strategy_id=10)
+        manager.register_paper_pair(pair_b, strategy_id=20)
+
+        exec_a = manager._get_executor(pair_a)
+        exec_b = manager._get_executor(pair_b)
+
+        assert isinstance(exec_a, PaperExecutor)
+        assert isinstance(exec_b, PaperExecutor)
+        assert exec_a is not exec_b
+        assert exec_a._strategy_id == 10
+        assert exec_b._strategy_id == 20
+
+    @pytest.mark.asyncio
+    async def test_pp06_re_register_pair_overwrites_executor(self, manager):
+        """PP-06: 동일 pair 재등록 → 새 strategy_id로 PaperExecutor 교체."""
+        from core.execution.executor import PaperExecutor
+
+        pair = "usd_jpy"
+        manager.register_paper_pair(pair, strategy_id=10)
+        assert manager._get_executor(pair)._strategy_id == 10
+
+        manager.register_paper_pair(pair, strategy_id=99)
+        assert manager._get_executor(pair)._strategy_id == 99
+
+    @pytest.mark.asyncio
+    async def test_pp07_spot_close_uses_get_executor(
+        self, manager, fake_adapter, db_session_factory
+    ):
+        """PP-07: 현물 청산 경로(_close_position_market_spot)도 _get_executor 사용.
+
+        paper pair로 등록된 경우 실 MARKET_SELL 없이 paper 분기로 처리됨을 검증
+        (캐시에 paper_trade_id 있으면 spot 분기 진입 전 paper 분기에서 early return).
+        """
+        pair = "xrp_jpy"
+        manager.register_paper_pair(pair, strategy_id=7)
+        manager._params[pair] = {}
+
+        # 캐시에 paper 진입 상태 주입
+        manager._cached_position[pair] = {
+            "paper_trade_id": 55,
+            "entry_price": 90.0,
+            "invest_jpy": 10000.0,
+            "direction": "long",
+        }
+        fake_adapter.set_ticker_price(105.0)
+        fake_adapter.place_order = AsyncMock()
+
+        exit_called = {}
+
+        async def _capture_exit(**kwargs):
+            exit_called.update(kwargs)
+
+        manager._paper_executors[pair].record_paper_exit = _capture_exit
+
+        pos = MagicMock()
+        await manager._close_position_market(pair, pos, "near_upper_exit")
+
+        # spot 실 주문 없음
+        fake_adapter.place_order.assert_not_called()
+        # paper exit 기록됨
+        assert exit_called.get("paper_trade_id") == 55
+        # 캐시 초기화
+        assert manager._cached_position.get(pair) is None
+
+    @pytest.mark.asyncio
+    async def test_pp08_active_pair_uses_real_executor_on_close(
+        self, manager, fake_adapter, db_session_factory
+    ):
+        """PP-08: paper 등록 안 된 pair는 spot 청산 시 RealExecutor(MARKET_SELL) 사용.
+
+        _cached_position에 paper_trade_id가 없으면 실 청산 경로 진입.
+        """
+        from core.execution.executor import RealExecutor
+
+        pair = "xrp_jpy"
+        manager._params[pair] = {}
+        fake_adapter._balances = {"xrp": 10.0, "jpy": 0.0}
+
+        # _cached_position = None (포지션 캐시 있지만 paper 아님)
+        manager._cached_position[pair] = None
+
+        # pos 객체 (ORM row mock)
+        pos = MagicMock()
+        pos.id = 1
+        pos.entry_price = Decimal("90.0")
+        pos.entry_amount = Decimal("10.0")
+        pos.entry_jpy = Decimal("900.0")
+        pos.side = "buy"
+
+        # RealExecutor.place_order는 adapter에 위임 — fake_adapter 사용
+        fake_adapter.place_order = AsyncMock(return_value=MagicMock(
+            order_id="real-order-001", price=105.0, amount=9.98,
+        ))
+
+        # _record_close_position는 DB 조작이므로 mock
+        manager._record_close_position = AsyncMock()
+
+        await manager._close_position_market_spot(pair, pos, "near_upper_exit")
+
+        # 실 MARKET_SELL 호출됨
+        fake_adapter.place_order.assert_called_once()
+        call_args = fake_adapter.place_order.call_args
+        assert call_args.args[0] == OrderType.MARKET_SELL or \
+               call_args.kwargs.get("order_type") == OrderType.MARKET_SELL
+
+
+# ══════════════════════════════════════════════
+# 테스트: 박스 strategy_id 격리 (V-01 ~ V-07)
+# ══════════════════════════════════════════════
+
+class TestBoxStrategyIdIsolation:
+    """P-0A: 동일 pair에 active + paper 박스가 공존할 때 strategy_id로 격리."""
+
+    @pytest.mark.asyncio
+    async def test_v01_start_stores_strategy_id(self, manager, fake_adapter, db_session_factory):
+        """V-01: start() 호출 시 params의 strategy_id가 _strategy_id_map에 저장됨."""
+        pair = "btc_jpy"
+        manager._supervisor.register = AsyncMock()
+        manager._supervisor.stop_group = AsyncMock()
+        manager._has_open_position = AsyncMock(return_value=False)
+
+        await manager.start(pair, {"strategy_id": 42, "box_tolerance_pct": 0.5})
+        assert manager._strategy_id_map[pair] == 42
+
+    @pytest.mark.asyncio
+    async def test_v02_start_without_strategy_id_stores_none(self, manager, fake_adapter, db_session_factory):
+        """V-02: start() 시 strategy_id 없으면 _strategy_id_map[pair] = None (active 전략)."""
+        pair = "eth_jpy"
+        manager._supervisor.register = AsyncMock()
+        manager._supervisor.stop_group = AsyncMock()
+        manager._has_open_position = AsyncMock(return_value=False)
+
+        await manager.start(pair, {"box_tolerance_pct": 0.5})
+        assert manager._strategy_id_map.get(pair) is None
+
+    @pytest.mark.asyncio
+    async def test_v03_get_active_box_active_strategy_returns_null_strategy_id_box(
+        self, manager, db_session_factory
+    ):
+        """V-03: active 전략(strategy_id=None) _get_active_box는 strategy_id=NULL 박스만 반환."""
+        pair = "btc_jpy"
+        # strategy_id_map에 None (active 전략)
+        manager._strategy_id_map[pair] = None
+        # strategy_id=NULL 박스 삽입
+        await insert_box(db_session_factory, pair, upper=110.0, lower=90.0, strategy_id=None)
+        # strategy_id=5 (paper) 박스도 삽입 — 반환되면 안 됨
+        await insert_box(db_session_factory, pair, upper=115.0, lower=95.0, strategy_id=5)
+
+        box = await manager._get_active_box(pair)
+        assert box is not None
+        assert box.strategy_id is None
+        assert float(box.upper_bound) == 110.0
+
+    @pytest.mark.asyncio
+    async def test_v04_get_active_box_paper_strategy_returns_matching_strategy_id_box(
+        self, manager, db_session_factory
+    ):
+        """V-04: paper 전략(strategy_id=5) _get_active_box는 strategy_id=5 박스만 반환."""
+        pair = "btc_jpy"
+        manager._strategy_id_map[pair] = 5
+        # strategy_id=NULL 박스 삽입 — 반환되면 안 됨
+        await insert_box(db_session_factory, pair, upper=110.0, lower=90.0, strategy_id=None)
+        # strategy_id=5 박스 삽입
+        await insert_box(db_session_factory, pair, upper=115.0, lower=95.0, strategy_id=5)
+
+        box = await manager._get_active_box(pair)
+        assert box is not None
+        assert box.strategy_id == 5
+        assert float(box.upper_bound) == 115.0
+
+    @pytest.mark.asyncio
+    async def test_v05_same_pair_active_and_paper_box_coexist(self, manager, db_session_factory):
+        """V-05: 동일 pair에 active(NULL) + paper(5) 박스 공존 — 각자 자기 박스만 봄."""
+        pair = "usd_jpy"
+        # active 박스
+        await insert_box(db_session_factory, pair, upper=150.0, lower=140.0, strategy_id=None)
+        # paper 박스
+        await insert_box(db_session_factory, pair, upper=152.0, lower=142.0, strategy_id=5)
+
+        # active 매니저
+        manager._strategy_id_map[pair] = None
+        active_box = await manager._get_active_box(pair)
+        assert active_box is not None
+        assert active_box.strategy_id is None
+
+        # paper 매니저 (같은 인스턴스, strategy_id_map만 변경)
+        manager._strategy_id_map[pair] = 5
+        paper_box = await manager._get_active_box(pair)
+        assert paper_box is not None
+        assert paper_box.strategy_id == 5
+
+        # 서로 다른 박스
+        assert active_box.id != paper_box.id
+
+    @pytest.mark.asyncio
+    async def test_v06_detect_and_create_box_sets_strategy_id(self, manager, db_session_factory):
+        """V-06: _detect_and_create_box 호출 시 생성된 박스에 strategy_id 저장."""
+        pair = "eth_jpy"
+        manager._strategy_id_map[pair] = 7
+
+        # 충분한 캔들 삽입 (box 형성 가능)
+        ohlc_list = (
+            [(99.0, 101.0, 89.0, 100.0)] * 5  # 하단 클러스터 90
+            + [(109.0, 111.0, 99.0, 110.0)] * 5  # 상단 클러스터 110
+        ) * 6  # 60개
+        await insert_candles(db_session_factory, pair, "4h", ohlc_list)
+
+        # 쿨다운 + 포지션 가드 우회
+        manager._last_invalidation_time[pair] = None
+        manager._has_open_position = AsyncMock(return_value=False)
+
+        # ticker 가격 박스 내부로 설정
+        manager._adapter.set_ticker_price(100.0)
+
+        params = {
+            "strategy_id": 7,
+            "box_tolerance_pct": 5.0,
+            "box_min_touches": 3,
+            "box_lookback_candles": 60,
+            "basis_timeframe": "4h",
+            "box_cluster_percentile": 100.0,
+        }
+        manager._params[pair] = params
+
+        box = await manager._detect_and_create_box(pair, params)
+        if box is not None:
+            assert box.strategy_id == 7
+
+    @pytest.mark.asyncio
+    async def test_v07_stop_cleans_strategy_id_map(self, manager):
+        """V-07: stop() 호출 시 _strategy_id_map에서 pair 제거."""
+        pair = "gbp_jpy"
+        manager._strategy_id_map[pair] = 10
+        manager._supervisor.stop_group = AsyncMock()
+
+        await manager.stop(pair)
+        assert pair not in manager._strategy_id_map
+
+    @pytest.mark.asyncio
+    async def test_v08_invalidate_paper_box_does_not_affect_active_box(
+        self, manager, db_session_factory
+    ):
+        """V-08: paper 박스 무효화가 active 박스에 영향을 주지 않음.
+
+        _invalidate_box는 box_id로 직접 접근 — strategy_id 무관하게 동작하지만,
+        active 박스와 paper 박스가 서로 다른 row이므로 독립성 보장.
+        """
+        pair = "usd_jpy"
+        # active 박스 (strategy_id=NULL)
+        active_box_id = await insert_box(db_session_factory, pair, upper=150.0, lower=140.0, strategy_id=None)
+        # paper 박스 (strategy_id=3)
+        paper_box_id = await insert_box(db_session_factory, pair, upper=155.0, lower=145.0, strategy_id=3)
+
+        # paper 박스 무효화
+        await manager._invalidate_box(paper_box_id, "test_invalidate")
+
+        # active 박스는 여전히 active
+        manager._strategy_id_map[pair] = None
+        active_box = await manager._get_active_box(pair)
+        assert active_box is not None
+        assert active_box.id == active_box_id
+        assert active_box.status == "active"
+
+        # paper 박스는 invalidated
+        manager._strategy_id_map[pair] = 3
+        paper_box = await manager._get_active_box(pair)
+        assert paper_box is None  # invalidated 상태이므로 조회 안 됨
+
+    @pytest.mark.asyncio
+    async def test_v09_paper_box_not_visible_to_active_strategy(
+        self, manager, db_session_factory
+    ):
+        """V-09: paper 박스(strategy_id=N)가 active 전략(_get_active_box) 조회에 노출되지 않음.
+
+        active 전략이 paper 박스를 보고 "이미 박스 있음"으로 감지 스킵하는 버그 방지.
+        """
+        pair = "eur_jpy"
+        # paper 박스만 있는 상태 (active 박스 없음)
+        await insert_box(db_session_factory, pair, upper=160.0, lower=150.0, strategy_id=99)
+
+        # active 전략 조회 → None (paper 박스는 보이지 않아야 함)
+        manager._strategy_id_map[pair] = None
+        box = await manager._get_active_box(pair)
+        assert box is None
 

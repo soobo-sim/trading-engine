@@ -10,6 +10,7 @@ GET /api/boxes/{pair}/positions/history — 포지션 이력
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from typing import Optional
 
 from api.dependencies import AppState, get_db, get_state
 
@@ -19,16 +20,21 @@ router = APIRouter(prefix="/api/boxes", tags=["Boxes"])
 @router.get("/{pair}")
 async def get_active_box(
     pair: str,
+    strategy_id: Optional[int] = Query(None, description="strategy_id 지정 시 해당 paper 박스만 반환. 미지정 시 active 전략 박스(strategy_id=NULL)만 반환."),
     state: AppState = Depends(get_state),
     db: AsyncSession = Depends(get_db),
 ):
-    """활성 박스 조회."""
+    """활성 박스 조회. strategy_id 미지정 = active 전략 박스(후방 호환)."""
     pair = state.normalize_pair(pair)
     BoxModel = state.models.box
     pair_col = getattr(BoxModel, state.pair_column)
+    if strategy_id is None:
+        sid_filter = BoxModel.strategy_id.is_(None)
+    else:
+        sid_filter = BoxModel.strategy_id == strategy_id
     stmt = (
         select(BoxModel)
-        .where(pair_col == pair, BoxModel.status == "active")
+        .where(pair_col == pair, BoxModel.status == "active", sid_filter)
         .order_by(BoxModel.created_at.desc())
         .limit(1)
     )
@@ -43,16 +49,21 @@ async def get_active_box(
 async def get_box_history(
     pair: str,
     limit: int = Query(10, ge=1, le=50),
+    strategy_id: Optional[int] = Query(None, description="strategy_id 지정 시 해당 전략 박스만 반환. 미지정 시 active 전략 박스(strategy_id=NULL)만 반환."),
     state: AppState = Depends(get_state),
     db: AsyncSession = Depends(get_db),
 ):
-    """박스 이력 (active + invalidated)."""
+    """박스 이력 (active + invalidated). strategy_id 미지정 = active 전략 박스(후방 호환)."""
     pair = state.normalize_pair(pair)
     BoxModel = state.models.box
     pair_col = getattr(BoxModel, state.pair_column)
+    if strategy_id is None:
+        sid_filter = BoxModel.strategy_id.is_(None)
+    else:
+        sid_filter = BoxModel.strategy_id == strategy_id
     stmt = (
         select(BoxModel)
-        .where(pair_col == pair)
+        .where(pair_col == pair, sid_filter)
         .order_by(BoxModel.created_at.desc())
         .limit(limit)
     )
@@ -76,7 +87,7 @@ async def get_price_position(
     pair_col = getattr(BoxModel, state.pair_column)
     stmt = (
         select(BoxModel)
-        .where(pair_col == pair, BoxModel.status == "active")
+        .where(pair_col == pair, BoxModel.status == "active", BoxModel.strategy_id.is_(None))
         .limit(1)
     )
     result = await db.execute(stmt)
@@ -308,6 +319,7 @@ def _box_to_dict(box, pair_column: str) -> dict:
     return {
         "id": box.id,
         "pair": getattr(box, pair_column),
+        "strategy_id": box.strategy_id,
         "upper_bound": float(box.upper_bound),
         "lower_bound": float(box.lower_bound),
         "upper_touch_count": box.upper_touch_count,

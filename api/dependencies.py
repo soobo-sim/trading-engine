@@ -35,6 +35,8 @@ class ModelRegistry:
     trend_position: Type
     technique: Type  # StrategyTechnique (공유)
     cfd_position: Type | None = None  # BF CFD 전용
+    strategy_snapshot: Type | None = None  # P-1 동적 전략 스위칭
+    switch_recommendation: Type | None = None  # P-1 Step 3/4 스위칭 추천
 
 
 @dataclass

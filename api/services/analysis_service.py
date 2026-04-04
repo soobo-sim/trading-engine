@@ -270,19 +270,39 @@ async def get_box_history(
 async def get_trade_stats(
     pair: str, days: int, state: AppState, db: AsyncSession,
 ) -> dict:
-    """기간별 거래 통계 (승률, 기대값, 연속 손실 등)."""
+    """기간별 거래 통계 (승률, 기대값, 연속 손실 등).
+
+    _trades 테이블 + _trend_positions 테이블을 모두 집계한다.
+    BF의 경우 bf_trades가 비어있고 bf_trend_positions에 실거래 이력이 있으므로
+    양쪽 모두 조회하여 합산한다 (BUG-027).
+    """
     since = datetime.now(timezone.utc) - timedelta(days=days)
 
     TradeModel = state.models.trade
+    TrendPosModel = state.models.trend_position
     StrategyModel = state.models.strategy
-    pair_col = getattr(TradeModel, state.pair_column)
+    # Trade 모델의 pair 속성은 항상 `pair` (DB 컬럼명은 거래소별로 다르지만 ORM 속성은 통일). BUG-027
+    pair_col = TradeModel.pair
 
-    result = await db.execute(
+    trades_result = await db.execute(
         select(TradeModel)
         .where(and_(pair_col == pair, TradeModel.created_at >= since))
         .order_by(TradeModel.created_at.asc())
     )
-    trades = result.scalars().all()
+    trades = trades_result.scalars().all()
+
+    trend_result = await db.execute(
+        select(TrendPosModel)
+        .where(
+            and_(
+                TrendPosModel.pair == pair,
+                TrendPosModel.status == "closed",
+                TrendPosModel.closed_at >= since,
+            )
+        )
+        .order_by(TrendPosModel.closed_at.asc())
+    )
+    trend_positions = trend_result.scalars().all()
 
     sell_trades = [t for t in trades if t.order_type in ("sell", "market_sell")]
     buy_trades = [t for t in trades if t.order_type in ("buy", "market_buy")]
@@ -310,6 +330,23 @@ async def get_trade_stats(
                 max_consecutive_losses = max(max_consecutive_losses, current_consecutive_losses)
             if t.pnl_pct is not None:
                 total_pnl_pct += float(t.pnl_pct)
+
+    # trend_positions 병합: _trades에서 집계한 결과에 추가
+    for pos in trend_positions:
+        pnl = float(pos.realized_pnl_jpy) if pos.realized_pnl_jpy is not None else None
+        if pnl is not None:
+            pnl_list.append(pnl)
+            total_pnl += pnl
+            total += 1
+            if pnl > 0:
+                wins += 1
+                current_consecutive_losses = 0
+            else:
+                losses += 1
+                current_consecutive_losses += 1
+                max_consecutive_losses = max(max_consecutive_losses, current_consecutive_losses)
+            if pos.realized_pnl_pct is not None:
+                total_pnl_pct += float(pos.realized_pnl_pct)
 
     valid_count = wins + losses
     win_rate = round(wins / valid_count * 100, 2) if valid_count > 0 else None
@@ -340,17 +377,33 @@ async def get_trade_stats(
                 by_strategy[sname]["wins"] += 1
             else:
                 by_strategy[sname]["losses"] += 1
+    for pos in trend_positions:
+        sid = pos.strategy_id
+        sname = strategies[sid].name if sid and sid in strategies else "unknown"
+        if sname not in by_strategy:
+            by_strategy[sname] = {"wins": 0, "losses": 0, "pnl_jpy": 0.0, "trades": 0}
+        by_strategy[sname]["trades"] += 1
+        pnl = float(pos.realized_pnl_jpy) if pos.realized_pnl_jpy is not None else None
+        if pnl is not None:
+            by_strategy[sname]["pnl_jpy"] += pnl
+            if pnl > 0:
+                by_strategy[sname]["wins"] += 1
+            else:
+                by_strategy[sname]["losses"] += 1
 
     for s_data in by_strategy.values():
         sv = s_data["wins"] + s_data["losses"]
         s_data["win_rate"] = round(s_data["wins"] / sv * 100, 2) if sv > 0 else None
         s_data["pnl_jpy"] = round(s_data["pnl_jpy"], 2)
 
+    total_wins_jpy = round(sum(p for p in pnl_list if p > 0), 2)
+    total_losses_jpy = round(sum(p for p in pnl_list if p <= 0), 2)
+
     return {
         "success": True,
         "pair": pair,
         "days": days,
-        "total_trades": len(trades),
+        "total_trades": len(trades) + len(trend_positions),
         "buy_trades": len(buy_trades),
         "sell_trades": total,
         "valid_sell_trades": valid_count,
@@ -360,6 +413,8 @@ async def get_trade_stats(
         "avg_pnl_jpy": avg_pnl,
         "avg_pnl_pct": avg_pnl_pct,
         "total_pnl_jpy": round(total_pnl, 2),
+        "total_wins_jpy": total_wins_jpy,
+        "total_losses_jpy": total_losses_jpy,
         "avg_win_jpy": avg_win,
         "avg_loss_jpy": avg_loss,
         "expected_value_jpy": expected_value,

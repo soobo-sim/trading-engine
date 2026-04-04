@@ -15,6 +15,7 @@ from adapters.database.models import (
     create_candle_model,
     create_insight_model,
     create_strategy_model,
+    create_strategy_snapshot_model,
     create_summary_model,
     create_trade_model,
     create_trend_position_model,
@@ -115,3 +116,50 @@ def test_all_factories_return_classes_for_bf() -> None:
     assert "product_code" in BfBox.__table__.columns
     assert "product_code" in BfBoxPos.__table__.columns
     assert "pair" in BfTrendPos.__table__.columns  # BUG-011: trend_position은 항상 pair
+
+
+# ──────────────────────────────────────────────────────────────
+# create_strategy_snapshot_model (P-1 동적 전략 스위칭)
+# ──────────────────────────────────────────────────────────────
+
+def test_strategy_snapshot_gmo_tablename() -> None:
+    """GMO prefix: __tablename__ == 'gmo_strategy_snapshots'."""
+    GmoSnapshot = create_strategy_snapshot_model("gmo")
+    assert GmoSnapshot.__tablename__ == "gmo_strategy_snapshots"
+
+
+def test_strategy_snapshot_bf_tablename() -> None:
+    """BF prefix: __tablename__ == 'bf_strategy_snapshots'."""
+    BfSnapshot = create_strategy_snapshot_model("bf")
+    assert BfSnapshot.__tablename__ == "bf_strategy_snapshots"
+
+
+def test_strategy_snapshot_required_columns() -> None:
+    """필수 컬럼 존재 확인: strategy_id, pair, trading_style, trigger_type, snapshot_time, score."""
+    GmoSnapshot = create_strategy_snapshot_model("gmo")
+    cols = GmoSnapshot.__table__.columns
+    for col_name in ("strategy_id", "pair", "trading_style", "trigger_type", "snapshot_time",
+                     "score", "readiness", "edge", "regime_fit", "regime", "confidence",
+                     "has_position", "current_price", "detail", "created_at"):
+        assert col_name in cols, f"컬럼 누락: {col_name}"
+
+
+def test_strategy_snapshot_detail_is_json() -> None:
+    """detail 컬럼이 JSON 타입이어야 한다."""
+    from sqlalchemy import JSON
+    GmoSnapshot = create_strategy_snapshot_model("gmo")
+    col = GmoSnapshot.__table__.columns["detail"]
+    assert isinstance(col.type, JSON)
+
+
+def test_strategy_snapshot_class_name() -> None:
+    """클래스명에 prefix 반영 확인."""
+    GmoSnapshot = create_strategy_snapshot_model("gmo")
+    assert GmoSnapshot.__name__ == "GmoStrategySnapshot"
+
+
+def test_strategy_snapshot_has_position_default_false() -> None:
+    """has_position의 server_default가 'false'."""
+    GmoSnapshot = create_strategy_snapshot_model("gmo")
+    col = GmoSnapshot.__table__.columns["has_position"]
+    assert str(col.server_default.arg) == "false"

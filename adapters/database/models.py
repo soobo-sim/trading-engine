@@ -30,6 +30,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
+from sqlalchemy.dialects.postgresql import ARRAY as PgArray
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
@@ -132,12 +133,15 @@ def create_strategy_model(prefix: str):
     return Strategy
 
 
-def create_trade_model(prefix: str, order_id_length: int = 40):
+def create_trade_model(prefix: str, order_id_length: int = 40, pair_column: str = "pair"):
     """
     거래 ORM 모델 팩토리.
 
     create_trade_model("ck", 25) → table: ck_trades, order_id VARCHAR(25)
-    create_trade_model("bf", 40) → table: bf_trades, order_id VARCHAR(40)
+    create_trade_model("bf", 40, pair_column="product_code") → table: bf_trades, DB 컬럼=product_code
+
+    pair_column: 실제 DB 컬럼명 (BF: "product_code", GMO/CK: "pair").
+    Python 속성명은 항상 `pair`.
     """
     _table = f"{prefix}_trades"
     _strategies_table = f"{prefix}_strategies"
@@ -161,14 +165,15 @@ def create_trade_model(prefix: str, order_id_length: int = 40):
         __tablename__ = _table
         __table_args__ = (
             Index(f"idx_{prefix}_trade_created_status", "created_at", "status"),
-            Index(f"idx_{prefix}_trade_pair_created", "pair", "created_at"),
+            Index(f"idx_{prefix}_trade_pair_created", pair_column, "created_at"),
             {"extend_existing": True},
         )
 
         id = Column(Integer, primary_key=True, index=True)
         order_id = Column(String(order_id_length), unique=True, nullable=False, index=True)
 
-        pair = Column(String(20), nullable=False, index=True)
+        # pair 속성은 항상 이 이름으로 접근. DB 컬럼명은 pair_column (BF: product_code).
+        pair = Column(pair_column, String(20), nullable=False, index=True)
         order_type = Column(order_type_enum, nullable=False)
         amount = Column(Float, nullable=False)
         price = Column(Float, nullable=True)
@@ -192,6 +197,16 @@ def create_trade_model(prefix: str, order_id_length: int = 40):
         executed_at = Column(DateTime(timezone=True), nullable=True)
         closed_at = Column(DateTime(timezone=True), nullable=True)
         updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+        @property
+        def pnl_jpy(self) -> float | None:
+            """analysis_service.py 호환 alias → profit_loss."""
+            return self.profit_loss
+
+        @property
+        def pnl_pct(self) -> float | None:
+            """analysis_service.py 호환 alias → profit_loss_percentage."""
+            return self.profit_loss_percentage
 
         def __repr__(self) -> str:
             return f"<{self.__class__.__name__}(id={self.id}, order_id={self.order_id!r})>"
@@ -348,12 +363,14 @@ def create_box_model(prefix: str, pair_column: str = "pair"):
         "__table_args__": (
             Index(f"idx_{prefix}_boxes_{pair_column}_status", pair_column, "status"),
             Index(f"idx_{prefix}_boxes_created", pair_column, "created_at"),
+            Index(f"idx_{prefix}_boxes_strategy", "strategy_id"),
             CheckConstraint("status IN ('active','invalidated')", name=f"{prefix}_boxes_status_check"),
             CheckConstraint("upper_bound > lower_bound", name=f"{prefix}_boxes_bounds_check"),
             {"extend_existing": True},
         ),
         pair_column: Column(String(20), nullable=False),
         "id": Column(Integer, primary_key=True, autoincrement=True),
+        "strategy_id": Column(Integer, nullable=True),
         "upper_bound": Column(Numeric(18, 8), nullable=False),
         "lower_bound": Column(Numeric(18, 8), nullable=False),
         "upper_touch_count": Column(Integer, nullable=False, default=0),
@@ -409,6 +426,8 @@ def create_box_position_model(prefix: str, pair_column: str = "pair", order_id_l
         "status": Column(String(20), nullable=False, default="open"),
         "created_at": Column(DateTime(timezone=True), server_default=func.now(), nullable=False),
         "closed_at": Column(DateTime(timezone=True), nullable=True),
+        # 정신차리자 보고 자동화 (BUG-025)
+        "loss_webhook_sent": Column(Boolean, nullable=False, server_default="false"),
         "__repr__": lambda self: (
             f"<{self.__class__.__name__}(box={self.box_id} status={self.status})>"
         ),
@@ -544,8 +563,13 @@ CAUSE_CODES = (
     "ENTRY_TIMING", "EXIT_TIMING", "REGIME_MISMATCH", "PARAM_SUBOPTIMAL",
     "SIZE_EXCESS", "EXECUTION_GAP", "BLACK_SWAN", "SIGNAL_CONFLICT",
 )
+ROOT_CAUSE_CODES = (
+    "NO_GRID_SEARCH", "NARROW_RANGE", "NO_WF", "STALE_PARAMS",
+    "REGIME_BLIND", "OVERFITTED", "MANUAL_OVERRIDE", "DATA_GAP",
+)
 REVIEW_STATUSES = (
-    "draft", "alice_submitted", "samantha_approved", "samantha_rejected", "rachel_decided",
+    "draft", "pending_pipeline", "alice_submitted",
+    "samantha_approved", "samantha_rejected", "rachel_decided",
 )
 SIMULATION_VERDICTS = ("justified", "premature", "lucky_hold", "reentry_opportunity")
 OVERFIT_RISKS = ("low", "medium", "high")
@@ -561,8 +585,8 @@ class WakeUpReview(Base):
             name="wur_cause_code_check",
         ),
         CheckConstraint(
-            "review_status IN ('draft','alice_submitted','samantha_approved',"
-            "'samantha_rejected','rachel_decided')",
+            "review_status IN ('draft','pending_pipeline','alice_submitted',"
+            "'samantha_approved','samantha_rejected','rachel_decided')",
             name="wur_review_status_check",
         ),
         CheckConstraint(
@@ -578,18 +602,21 @@ class WakeUpReview(Base):
             "rachel_verdict IS NULL OR rachel_verdict IN ('maintain','modify','archive')",
             name="wur_rachel_verdict_check",
         ),
+        CheckConstraint(
+            "optimal_overfit_risk IS NULL OR optimal_overfit_risk IN ('low','medium','high')",
+            name="wur_optimal_overfit_risk_check",
+        ),
         Index("idx_wur_cause", "strategy_id", "pair", "cause_code", "created_at"),
         Index("idx_wur_position", "position_id"),
         {"extend_existing": True},
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    position_id = Column(
-        Integer, ForeignKey("bf_trend_positions.id", ondelete="SET NULL"), nullable=True
-    )
-    strategy_id = Column(
-        Integer, ForeignKey("bf_strategies.id", ondelete="SET NULL"), nullable=True
-    )
+    # FK 제거: bf 하드코딩 → exchange + position_type 논리 참조 (BUG-025)
+    position_id = Column(Integer, nullable=True)
+    strategy_id = Column(Integer, nullable=True)
+    exchange = Column(String(10), nullable=True)       # bf / gmo
+    position_type = Column(String(20), nullable=True)  # trend / box
     pair = Column(String(20), nullable=False)
     entry_price = Column(Numeric(18, 8), nullable=False)
     exit_price = Column(Numeric(18, 8), nullable=False)
@@ -626,6 +653,40 @@ class WakeUpReview(Base):
     stop_loss_price = Column(Numeric(18, 8), nullable=True)
     actual_stop_hit_price = Column(Numeric(18, 8), nullable=True)
     rejection_count = Column(Integer, nullable=False, server_default="0")
+
+    # ── Section I: 최적 파라미터 역산 ─────────────────────────────────────────
+    optimal_params = Column(JSON, nullable=True)
+    optimal_pnl = Column(Numeric(18, 2), nullable=True)
+    optimal_pnl_pct = Column(Numeric(8, 4), nullable=True)
+    actual_vs_optimal_diff_pct = Column(Numeric(8, 4), nullable=True)
+    optimal_long_term_ev = Column(Numeric(8, 4), nullable=True)
+    optimal_long_term_wr = Column(Numeric(8, 4), nullable=True)
+    optimal_long_term_sharpe = Column(Numeric(8, 4), nullable=True)
+    optimal_long_term_trades = Column(Integer, nullable=True)
+    optimal_overfit_risk = Column(String(10), nullable=True)   # low|medium|high
+    optimal_entry_timing = Column(String(20), nullable=True)   # 동일|더 일찍|더 늦게|미진입
+    optimal_exit_timing = Column(String(20), nullable=True)    # 더 일찍|더 늦게|안 나감
+    optimal_key_diff = Column(Text, nullable=True)
+
+    # ── Section J: 근본 원인 ───────────────────────────────────────────────────
+    root_cause_codes = Column(PgArray(Text), nullable=True)    # ROOT_CAUSE_CODES 배열
+    root_cause_detail = Column(Text, nullable=True)
+    decision_date = Column(Date, nullable=True)
+    decision_by = Column(String(30), nullable=True)            # alice|rachel|soobo
+    info_gap_had = Column(Text, nullable=True)
+    info_gap_new = Column(Text, nullable=True)
+
+    # ── Section K: 액션 아이템 ─────────────────────────────────────────────────
+    action_items = Column(JSON, nullable=True)
+    prevention_checklist = Column(JSON, nullable=True)
+    review_quality_score = Column(Numeric(4, 2), nullable=True)
+
+    # ── 파이프라인 추적 (BUG-025) ──────────────────────────────────────────────
+    # pipeline_status: pending_pipeline → triggered → completed / failed
+    pipeline_status = Column(String(30), nullable=True)
+    scheduled_at = Column(DateTime(timezone=True), nullable=True)      # 24h 후 발동 예정
+    pipeline_started_at = Column(DateTime(timezone=True), nullable=True)
+    pipeline_completed_at = Column(DateTime(timezone=True), nullable=True)
 
     def __repr__(self) -> str:
         return (
@@ -907,3 +968,108 @@ class PaperTrade(Base):
             f"pair={self.pair!r}, direction={self.direction!r}, "
             f"pnl_pct={self.paper_pnl_pct})>"
         )
+
+
+# ──────────────────────────────────────────────────────────────
+# 전략 스냅샷 (P-1 동적 전략 스위칭)
+# 설계서: solution-design/DYNAMIC_STRATEGY_SWITCHING.md §4
+# ──────────────────────────────────────────────────────────────
+
+def create_strategy_snapshot_model(prefix: str):
+    """
+    전략 상태 스냅샷 ORM 모델 팩토리 (P-1 동적 전략 스위칭 시스템).
+
+    매 4H봉 확정 또는 포지션 이벤트 시 전 전략(active+paper)의
+    Score + 체제 + 상세 상태를 기록.
+
+    create_strategy_snapshot_model("gmo") → table: gmo_strategy_snapshots
+    create_strategy_snapshot_model("bf")  → table: bf_strategy_snapshots
+    """
+    _table = f"{prefix}_strategy_snapshots"
+    _strategies_table = f"{prefix}_strategies"
+    cls_name = f"{prefix.capitalize()}StrategySnapshot"
+
+    attrs: dict = {
+        "__tablename__": _table,
+        "__table_args__": (
+            Index(f"idx_{prefix}_snapshots_strategy_time", "strategy_id", "snapshot_time"),
+            Index(f"idx_{prefix}_snapshots_pair_time", "pair", "snapshot_time"),
+            {"extend_existing": True},
+        ),
+        "id": Column(Integer, primary_key=True, autoincrement=True),
+        "strategy_id": Column(
+            Integer,
+            ForeignKey(f"{_strategies_table}.id", ondelete="CASCADE"),
+            nullable=False,
+        ),
+        "pair": Column(String(20), nullable=False),
+        "trading_style": Column(String(30), nullable=False),
+        # trigger_type: '4h_candle' | 'position_open' | 'position_close' | 'switch_eval'
+        "trigger_type": Column(String(30), nullable=False),
+        "snapshot_time": Column(DateTime(timezone=True), nullable=False),
+        "score": Column(Numeric(6, 4), nullable=True),
+        "readiness": Column(Numeric(6, 4), nullable=True),
+        "edge": Column(Numeric(6, 4), nullable=True),
+        "regime_fit": Column(Numeric(6, 4), nullable=True),
+        "regime": Column(String(20), nullable=True),       # 'ranging' | 'trending' | 'unclear'
+        "confidence": Column(String(10), nullable=True),   # 'high' | 'medium' | 'low' | 'none'
+        "has_position": Column(Boolean, nullable=False, server_default="false"),
+        "current_price": Column(Numeric(18, 8), nullable=True),
+        "detail": Column(JSON, nullable=True),             # 전략별 상세 (박스 상태, 추세 시그널 등)
+        "created_at": Column(DateTime(timezone=True), server_default=func.now(), nullable=False),
+        "__repr__": lambda self: (
+            f"<{self.__class__.__name__}(strategy_id={self.strategy_id}, "
+            f"score={self.score}, trigger={self.trigger_type!r})>"
+        ),
+    }
+    return type(cls_name, (Base,), attrs)
+
+
+# ──────────────────────────────────────────────────────────────
+# 스위칭 추천 (P-1 Step 3/4)
+# 설계서: solution-design/DYNAMIC_STRATEGY_SWITCHING.md §4
+# ──────────────────────────────────────────────────────────────
+
+def create_switch_recommendation_model(prefix: str):
+    """
+    전략 스위칭 추천 이력 ORM 모델 팩토리 (P-1 동적 전략 스위칭 시스템).
+
+    create_switch_recommendation_model("gmo") → table: gmo_switch_recommendations
+    create_switch_recommendation_model("bf")  → table: bf_switch_recommendations
+    """
+    _table = f"{prefix}_switch_recommendations"
+    _strategies_table = f"{prefix}_strategies"
+    cls_name = f"{prefix.capitalize()}SwitchRecommendation"
+
+    attrs: dict = {
+        "__tablename__": _table,
+        "__table_args__": (
+            Index(f"idx_{prefix}_switch_rec_decision", "decision", "created_at"),
+            Index(f"idx_{prefix}_switch_rec_created", "created_at"),
+            {"extend_existing": True},
+        ),
+        "id": Column(Integer, primary_key=True, autoincrement=True),
+        "trigger_type": Column(String(30), nullable=False),       # T1_position_close | T2_candle_close
+        "triggered_at": Column(DateTime(timezone=True), nullable=False),
+        "current_strategy_id": Column(
+            Integer, ForeignKey(f"{_strategies_table}.id", ondelete="SET NULL"), nullable=True
+        ),
+        "current_score": Column(Numeric(6, 4), nullable=True),
+        "recommended_strategy_id": Column(
+            Integer, ForeignKey(f"{_strategies_table}.id", ondelete="SET NULL"), nullable=True
+        ),
+        "recommended_score": Column(Numeric(6, 4), nullable=True),
+        "score_ratio": Column(Numeric(6, 4), nullable=True),      # recommended / current
+        "confidence": Column(String(10), nullable=True),           # high | medium | low | none
+        "reason": Column(Text, nullable=True),
+        "decision": Column(String(10), nullable=False, server_default="'pending'"),  # pending|approved|rejected|expired
+        "decided_at": Column(DateTime(timezone=True), nullable=True),
+        "decided_by": Column(String(20), nullable=True),          # rachel | soobo
+        "reject_reason": Column(Text, nullable=True),
+        "created_at": Column(DateTime(timezone=True), server_default=func.now(), nullable=False),
+        "__repr__": lambda self: (
+            f"<{self.__class__.__name__}(id={self.id}, "
+            f"decision={self.decision!r}, ratio={self.score_ratio})>"
+        ),
+    }
+    return type(cls_name, (Base,), attrs)

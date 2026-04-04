@@ -241,15 +241,18 @@ class TestTradeStats:
 
     @pytest.mark.asyncio
     async def test_combined_stats(self, setup):
-        """포지션 시드 후 box-history에서 통합 거래 검증."""
+        """포지션 시드 후 trade-stats에서 trend_positions 포함 검증 (BUG-027)."""
         client, factory = setup
         await _seed_positions(factory)
 
-        # trade-stats는 Trade 모델 기반이므로 position 시드 무관하게 0
+        # trade-stats는 Trade 테이블 + trend_positions 모두 집계 (BUG-027 수정)
         resp = await client.get("/api/analysis/trade-stats?pair=xrp_jpy&days=365")
         assert resp.status_code == 200
         data = resp.json()
-        assert data["total_trades"] == 0  # Trade 테이블에 데이터 없음
+        # trend_positions 2건 시드됨 (승2, 패0)
+        assert data["total_trades"] == 2
+        assert data["wins"] == 2
+        assert data["losses"] == 0
 
         # 포지션 통합 검증은 box-history 엔드포인트
         resp = await client.get("/api/analysis/box-history?pair=xrp_jpy&days=30")

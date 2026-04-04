@@ -49,7 +49,7 @@ from core.analysis.session_filter import is_allowed_session, is_london_open_blac
 from core.analysis.event_filter import EventFilter
 from core.analysis.intermarket import IntermarketClient
 from core.strategy.box_signals import classify_price_in_box, check_box_invalidation, linear_slope
-from core.execution.executor import IExecutor, RealExecutor
+from core.execution.executor import IExecutor, PaperExecutor, RealExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +85,7 @@ class BoxMeanReversionManager:
         event_filter: Optional[EventFilter] = None,
         executor: Optional[IExecutor] = None,
         intermarket_client: Optional[IntermarketClient] = None,
+        snapshot_collector: Optional[Any] = None,
     ) -> None:
         self._adapter = adapter
         self._supervisor = supervisor
@@ -96,6 +97,13 @@ class BoxMeanReversionManager:
         self._event_filter: Optional[EventFilter] = event_filter
         self._intermarket_client: Optional[IntermarketClient] = intermarket_client
         self._executor: IExecutor = executor if executor is not None else RealExecutor()
+        self._snapshot_collector: Optional[Any] = snapshot_collector  # P-1 트리거 훅
+        # pair → PaperExecutor (proposed 전략 전용). active 전략은 이 dict에 없음.
+        self._paper_executors: Dict[str, PaperExecutor] = {}
+
+        # pair → strategy_id (None = active 전략, N = paper/proposed 전략)
+        # _get_active_box / _detect_and_create_box에서 박스 격리에 사용
+        self._strategy_id_map: Dict[str, Optional[int]] = {}
 
         # pair별 상태
         self._params: Dict[str, Dict] = {}
@@ -113,9 +121,24 @@ class BoxMeanReversionManager:
     # 시작 / 종료
     # ──────────────────────────────────────────
 
+    def register_paper_pair(self, pair: str, strategy_id: int) -> None:
+        """proposed 전략의 pair를 Paper 실행으로 등록. 해당 pair에만 PaperExecutor 바인딩."""
+        self._paper_executors[pair] = PaperExecutor(self._session_factory, strategy_id)
+        logger.info(f"[BoxMgr] {pair}: PaperExecutor 등록 strategy_id={strategy_id}")
+
+    def unregister_paper_pair(self, pair: str) -> None:
+        """Paper 등록 해제. 추천 승인/pair 전환 시 호출."""
+        self._paper_executors.pop(pair, None)
+        logger.info(f"[BoxMgr] {pair}: PaperExecutor 해제")
+
+    def _get_executor(self, pair: str) -> IExecutor:
+        """pair에 해당하는 executor 반환. paper pair면 PaperExecutor, 아니면 공유 executor."""
+        return self._paper_executors.get(pair, self._executor)
+
     async def start(self, pair: str, params: Dict) -> None:
         """pair에 대한 박스 역추세 태스크 2개 등록."""
         self._params[pair] = params
+        self._strategy_id_map[pair] = params.get("strategy_id")
         self._last_seen_open_time[pair] = None
 
         # 재시작 시 prev_state 초기화
@@ -152,10 +175,12 @@ class BoxMeanReversionManager:
         """pair에 대한 태스크 종료."""
         await self._supervisor.stop_group(pair)
         self._params.pop(pair, None)
+        self._strategy_id_map.pop(pair, None)
         self._last_seen_open_time.pop(pair, None)
         self._prev_box_state.pop(pair, None)
         self._cached_position.pop(pair, None)
         self._last_invalidation_time.pop(pair, None)
+        self._paper_executors.pop(pair, None)
         logger.info(f"[BoxMgr] {pair}: 박스 인프라 태스크 종료")
 
     def is_running(self, pair: str) -> bool:
@@ -198,56 +223,69 @@ class BoxMeanReversionManager:
 
         while True:
             await asyncio.sleep(_BOX_MONITOR_INTERVAL)
+            await self._run_one_box_monitor_cycle(pair)
 
-            params = self._params.get(pair, {})
-            basis_tf = params.get("basis_timeframe", "4h")
+    async def _run_one_box_monitor_cycle(self, pair: str) -> None:
+        """_box_monitor 한 사이클 실행 (테스트·리팩토링 공유용)."""
+        params = self._params.get(pair, {})
+        basis_tf = params.get("basis_timeframe", "4h")
 
-            # ── 주말 자동 청산 (FX 전용) ───────────────────
-            is_fx = getattr(self._adapter, "is_margin_trading", False)
-            if is_fx and should_close_for_weekend():
-                pos = await self._get_open_position(pair)
-                if pos:
-                    mins = minutes_until_market_close()
-                    logger.warning(
-                        f"[BoxMgr] {pair}: 주말 마감 임박 (잔여 {mins}분) → 자동 청산"
+        # ── 주말 자동 청산 (FX 전용) ───────────────────
+        is_fx = getattr(self._adapter, "is_margin_trading", False)
+        if is_fx and should_close_for_weekend():
+            pos = await self._get_open_position(pair)
+            if pos:
+                mins = minutes_until_market_close()
+                logger.warning(
+                    f"[BoxMgr] {pair}: 주말 마감 임박 (잔여 {mins}분) → 자동 청산"
+                )
+                await self._close_position_market(pair, pos, "weekend_close")
+            return  # 주말에는 캔들/박스 감지 불필요
+
+        # ── FX 시장 휴장 시 스킵 ──────────────────────
+        if is_fx and not is_fx_market_open():
+            return
+
+        try:
+            open_time = await self._get_latest_candle_open_time(pair, basis_tf)
+        except Exception as e:
+            logger.warning(f"[BoxMgr] {pair}: 캔들 조회 실패 — {e}")
+            return
+
+        if open_time is None:
+            return
+
+        last_seen = self._last_seen_open_time.get(pair)
+        if open_time == last_seen:
+            return
+
+        logger.info(f"[BoxMgr] {pair}: 새 {basis_tf} 캔들 감지 open_time={open_time}")
+        self._last_seen_open_time[pair] = open_time
+
+        # 유효성 검사 (항상)
+        reason = await self._validate_active_box(pair, params)
+        if reason:
+            logger.info(f"[BoxMgr] {pair}: 박스 무효화 ({reason})")
+            pos = await self._get_open_position(pair)
+            if pos:
+                await self._close_position_market(pair, pos, reason)
+
+        # 신규 박스 감지
+        box = await self._detect_and_create_box(pair, params)
+        if box:
+            logger.info(
+                f"[BoxMgr] {pair}: 신규 박스 id={box.id} "
+                f"상단={box.upper_bound} 하단={box.lower_bound}"
+            )
+
+        # T2 트리거: 새 4H봉 + 무포지션 → 全 전략 Score 스냅샷 수집 (P-1)
+        if self._snapshot_collector is not None:
+            pos = await self._get_open_position(pair)
+            if pos is None:
+                asyncio.create_task(
+                    self._snapshot_collector.collect_all_snapshots(
+                        "T2_candle_close", pair
                     )
-                    await self._close_position_market(pair, pos, "weekend_close")
-                continue  # 주말에는 캔들/박스 감지 불필요
-
-            # ── FX 시장 휴장 시 스킵 ──────────────────────
-            if is_fx and not is_fx_market_open():
-                continue
-
-            try:
-                open_time = await self._get_latest_candle_open_time(pair, basis_tf)
-            except Exception as e:
-                logger.warning(f"[BoxMgr] {pair}: 캔들 조회 실패 — {e}")
-                continue
-
-            if open_time is None:
-                continue
-
-            last_seen = self._last_seen_open_time.get(pair)
-            if open_time == last_seen:
-                continue
-
-            logger.info(f"[BoxMgr] {pair}: 새 {basis_tf} 캔들 감지 open_time={open_time}")
-            self._last_seen_open_time[pair] = open_time
-
-            # 유효성 검사 (항상)
-            reason = await self._validate_active_box(pair, params)
-            if reason:
-                logger.info(f"[BoxMgr] {pair}: 박스 무효화 ({reason})")
-                pos = await self._get_open_position(pair)
-                if pos:
-                    await self._close_position_market(pair, pos, reason)
-
-            # 신규 박스 감지
-            box = await self._detect_and_create_box(pair, params)
-            if box:
-                logger.info(
-                    f"[BoxMgr] {pair}: 신규 박스 id={box.id} "
-                    f"상단={box.upper_bound} 하단={box.lower_bound}"
                 )
 
     # ──────────────────────────────────────────
@@ -488,6 +526,7 @@ class BoxMeanReversionManager:
         pair_col = self._pair_column
         box = BoxModel()
         setattr(box, pair_col, pair)
+        box.strategy_id = self._strategy_id_map.get(pair)
         box.upper_bound = Decimal(str(upper))
         box.lower_bound = Decimal(str(lower))
         box.upper_touch_count = upper_count
@@ -669,7 +708,7 @@ class BoxMeanReversionManager:
                     )
                     return
                 order_type = OrderType.MARKET_BUY if direction == "long" else OrderType.MARKET_SELL
-                order = await self._executor.place_order(
+                order = await self._get_executor(pair).place_order(
                     self._adapter, order_type, pair, float(order_size),
                 )
                 exec_price = order.price or price
@@ -680,7 +719,7 @@ class BoxMeanReversionManager:
 
                 # 페이퍼 진입 기록 (PaperExecutor 시)
                 strategy_id = params.get("strategy_id", 0)
-                paper_id = await self._executor.record_paper_entry(
+                paper_id = await self._get_executor(pair).record_paper_entry(
                     strategy_id=strategy_id,
                     pair=pair,
                     direction=direction,
@@ -702,7 +741,7 @@ class BoxMeanReversionManager:
                 )
             else:
                 # 현물: 항상 롱(MARKET_BUY). is_margin=False 시 direction=long 강제.
-                order = await self._executor.place_order(
+                order = await self._get_executor(pair).place_order(
                     self._adapter, OrderType.MARKET_BUY, pair, invest_jpy,
                 )
                 exec_price = order.price or price
@@ -712,7 +751,7 @@ class BoxMeanReversionManager:
 
                 # 페이퍼 진입 기록 (PaperExecutor 시)
                 strategy_id = params.get("strategy_id", 0)
-                paper_id = await self._executor.record_paper_entry(
+                paper_id = await self._get_executor(pair).record_paper_entry(
                     strategy_id=strategy_id,
                     pair=pair,
                     direction="long",
@@ -758,7 +797,7 @@ class BoxMeanReversionManager:
                 except Exception:
                     exit_price = entry_price
                 if paper_id:
-                    await self._executor.record_paper_exit(
+                    await self._get_executor(pair).record_paper_exit(
                         paper_trade_id=paper_id,
                         exit_price=exit_price,
                         exit_reason=reason,
@@ -779,6 +818,14 @@ class BoxMeanReversionManager:
                 await self._close_position_market_fx(pair, pos, reason)
             else:
                 await self._close_position_market_spot(pair, pos, reason)
+
+            # T1 트리거: real 청산 완료 직후 全 전략 Score 스냅샷 수집 (P-1)
+            if self._snapshot_collector is not None:
+                asyncio.create_task(
+                    self._snapshot_collector.collect_all_snapshots(
+                        "T1_position_close", pair
+                    )
+                )
         except Exception as e:
             logger.error(f"[BoxMgr] {pair}: 청산 주문 오류 — {e}", exc_info=True)
 
@@ -802,7 +849,7 @@ class BoxMeanReversionManager:
         fee_rate = float(self._params.get(pair, {}).get("trading_fee_rate", 0.002))
         sell_amount = math.floor(coin_available / (1 + fee_rate) * 1e8) / 1e8
 
-        order = await self._executor.place_order(
+        order = await self._get_executor(pair).place_order(
             self._adapter, OrderType.MARKET_SELL, pair, sell_amount,
         )
 
@@ -1066,13 +1113,18 @@ class BoxMeanReversionManager:
     # ──────────────────────────────────────────
 
     async def _get_active_box(self, pair: str) -> Optional[Any]:
-        """현재 active 박스 반환."""
+        """현재 active 박스 반환. strategy_id로 격리 (None = active 전략, N = paper 전략)."""
         BoxModel = self._box_model
         pair_col_attr = getattr(BoxModel, self._pair_column)
+        strategy_id = self._strategy_id_map.get(pair)
         async with self._session_factory() as db:
+            if strategy_id is None:
+                sid_filter = BoxModel.strategy_id.is_(None)
+            else:
+                sid_filter = BoxModel.strategy_id == strategy_id
             result = await db.execute(
                 select(BoxModel)
-                .where(and_(pair_col_attr == pair, BoxModel.status == "active"))
+                .where(and_(pair_col_attr == pair, BoxModel.status == "active", sid_filter))
                 .order_by(desc(BoxModel.created_at))
                 .limit(1)
             )

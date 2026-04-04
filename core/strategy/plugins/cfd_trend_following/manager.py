@@ -45,6 +45,7 @@ class CfdTrendFollowingManager(BaseTrendManager):
         candle_model: Type,
         cfd_position_model: Type,
         pair_column: str = "product_code",
+        snapshot_collector: Optional[Any] = None,
     ) -> None:
         super().__init__(
             adapter=adapter,
@@ -53,6 +54,7 @@ class CfdTrendFollowingManager(BaseTrendManager):
             candle_model=candle_model,
             position_model=cfd_position_model,
             pair_column=pair_column,
+            snapshot_collector=snapshot_collector,
         )
         # keep_rate 캐시 (캔들 사이클 내에서 진입 시 참조)
         self._last_keep_rate: Dict[str, Optional[float]] = {}

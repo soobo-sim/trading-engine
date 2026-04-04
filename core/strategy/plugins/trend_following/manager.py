@@ -51,6 +51,7 @@ class TrendFollowingManager(BaseTrendManager):
         candle_model: Type,
         trend_position_model: Type,
         pair_column: str = "pair",
+        snapshot_collector: Optional[Any] = None,
     ) -> None:
         super().__init__(
             adapter=adapter,
@@ -60,6 +61,7 @@ class TrendFollowingManager(BaseTrendManager):
             position_model=trend_position_model,
             pair_column=pair_column,
             position_pair_column="pair",  # TrendPosition always has "pair" column
+            snapshot_collector=snapshot_collector,
         )
         # SF-10: 최근 RSI 캐시 (헬스체크용)
         self._last_rsi: Dict[str, Optional[float]] = {}
