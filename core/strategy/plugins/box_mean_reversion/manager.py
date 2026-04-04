@@ -45,11 +45,18 @@ from core.exchange.session import is_fx_market_open, should_close_for_weekend, m
 from core.exchange.types import OrderType
 from core.task.supervisor import TaskSupervisor
 from core.analysis.box_detector import find_cluster, find_cluster_percentile
+from core.analysis.session_filter import is_allowed_session, is_london_open_blackout
+from core.analysis.event_filter import EventFilter
+from core.analysis.intermarket import IntermarketClient
 from core.strategy.box_signals import classify_price_in_box, check_box_invalidation, linear_slope
+from core.execution.executor import IExecutor, RealExecutor
 
 logger = logging.getLogger(__name__)
 
 _BOX_MONITOR_INTERVAL = 60  # 초
+
+# 무효화 후 신규 박스 재감지 금지 기간 (4H 캔들 수 = 32시간)
+_BOX_COOLDOWN_CANDLES = 8
 
 
 class BoxMeanReversionManager:
@@ -75,6 +82,9 @@ class BoxMeanReversionManager:
         box_model: Type,
         box_position_model: Type,
         pair_column: str = "pair",
+        event_filter: Optional[EventFilter] = None,
+        executor: Optional[IExecutor] = None,
+        intermarket_client: Optional[IntermarketClient] = None,
     ) -> None:
         self._adapter = adapter
         self._supervisor = supervisor
@@ -83,6 +93,9 @@ class BoxMeanReversionManager:
         self._box_model = box_model
         self._box_position_model = box_position_model
         self._pair_column = pair_column
+        self._event_filter: Optional[EventFilter] = event_filter
+        self._intermarket_client: Optional[IntermarketClient] = intermarket_client
+        self._executor: IExecutor = executor if executor is not None else RealExecutor()
 
         # pair별 상태
         self._params: Dict[str, Dict] = {}
@@ -93,6 +106,8 @@ class BoxMeanReversionManager:
         # dict[pair] is None → 포지션 없음 (확인됨)
         # dict[pair] is not None → 포지션 있음 (ORM 객체)
         self._cached_position: Dict[str, Optional[Any]] = {}
+        # 박스 무효화 후 쿨다운 추적 (pair → 무효화 UTC 시각)
+        self._last_invalidation_time: Dict[str, Optional[datetime]] = {}
 
     # ──────────────────────────────────────────
     # 시작 / 종료
@@ -140,6 +155,7 @@ class BoxMeanReversionManager:
         self._last_seen_open_time.pop(pair, None)
         self._prev_box_state.pop(pair, None)
         self._cached_position.pop(pair, None)
+        self._last_invalidation_time.pop(pair, None)
         logger.info(f"[BoxMgr] {pair}: 박스 인프라 태스크 종료")
 
     def is_running(self, pair: str) -> bool:
@@ -274,6 +290,36 @@ class BoxMeanReversionManager:
                     self._prev_box_state[pair] = box_state
                     continue
 
+                # ── 세션 필터 (FX 전용) ─────────────────────
+                if is_fx and not is_allowed_session(params):
+                    self._prev_box_state[pair] = box_state
+                    continue
+                if is_fx and is_london_open_blackout(params):
+                    logger.debug(f"[BoxMgr] {pair}: 런던 오픈 블랙아웃 차단")
+                    self._prev_box_state[pair] = box_state
+                    continue
+
+                # ── 이벤트 차단 (FX 전용, near_lower/upper 시간에만 확인) ──
+                if is_fx and self._event_filter and box_state in ("near_lower", "near_upper"):
+                    try:
+                        blocked, reason = await self._event_filter.is_event_blackout(pair, params)
+                        if blocked:
+                            logger.info(f"[BoxMgr] {pair}: 이벤트 차단 — {reason}")
+                            self._prev_box_state[pair] = box_state
+                            continue
+                    except Exception as e:
+                        logger.debug(f"[BoxMgr] {pair}: 이벤트 필터 오류 ({e}) — 무시")
+
+                # ── 매크로 스트레스 차단 (FX 전용) ─────────────────────────
+                if is_fx and self._intermarket_client and box_state in ("near_lower", "near_upper"):
+                    try:
+                        if await self._intermarket_client.is_macro_stress(params):
+                            logger.info(f"[BoxMgr] {pair}: 매크로 스트레스(VIX) 차단")
+                            self._prev_box_state[pair] = box_state
+                            continue
+                    except Exception as e:
+                        logger.debug(f"[BoxMgr] {pair}: 인터마켓 스트레스 오류 ({e}) — 무시")
+
                 # ── direction_mode 결정: 현물이면 무조건 long_only ──
                 if not is_fx:
                     direction_mode = "long_only"
@@ -300,9 +346,12 @@ class BoxMeanReversionManager:
                     if direction_mode in ("long_only", "both") and pos is None:
                         box = await self._get_active_box(pair)
                         if box:
-                            await self._open_position_market(
-                                pair, box, price, params, direction="long"
-                            )
+                            # 방향 바이어스 체크 (bearish면 사이즈 축소 또는 스킵)
+                            entry_params = await self._apply_bias(pair, params, "long")
+                            if entry_params is not None:
+                                await self._open_position_market(
+                                    pair, box, price, entry_params, direction="long"
+                                )
 
                 # ── near_upper 도달 ──────────────────────
                 elif box_state == "near_upper" and prev_state != "near_upper":
@@ -324,9 +373,12 @@ class BoxMeanReversionManager:
                     if direction_mode in ("both", "short_only") and pos is None:
                         box = await self._get_active_box(pair)
                         if box:
-                            await self._open_position_market(
-                                pair, box, price, params, direction="short"
-                            )
+                            # 방향 바이어스 체크 (bullish면 사이즈 축소 또는 스킵)
+                            entry_params = await self._apply_bias(pair, params, "short")
+                            if entry_params is not None:
+                                await self._open_position_market(
+                                    pair, box, price, entry_params, direction="short"
+                                )
 
                 # ── 가격 기반 손절: 마지막 방어선 (매 tick 체크, 방향별) ──
                 pos = await self._get_open_position(pair)
@@ -370,6 +422,21 @@ class BoxMeanReversionManager:
         lookback = int(params.get("box_lookback_candles", 60))
         basis_tf = params.get("basis_timeframe", "4h")
         cluster_percentile = float(params.get("box_cluster_percentile", 100.0))
+
+        # 쿨다운 체크: 무효화 직후 노이즈성 재형성 방지 (32시간)
+        last_inv = self._last_invalidation_time.get(pair)
+        if last_inv is not None:
+            elapsed_candles = (datetime.now(timezone.utc) - last_inv).total_seconds() / (4 * 3600)
+            if elapsed_candles < _BOX_COOLDOWN_CANDLES:
+                logger.debug(
+                    f"[BoxMgr] {pair}: 쿨다운 중 ({elapsed_candles:.1f}/{_BOX_COOLDOWN_CANDLES}캔들)"
+                )
+                return None
+
+        # 포지션 가드: 포지션 보유 중 신규 박스 생성 금지
+        if await self._has_open_position(pair):
+            logger.info(f"[BoxMgr] {pair}: 포지션 보유 중 — 신규 박스 생성 금지")
+            return None
 
         existing = await self._get_active_box(pair)
         if existing:
@@ -455,7 +522,7 @@ class BoxMeanReversionManager:
                 cp = float(current_price)
                 is_outside = cp < lower * (1 - tol) or cp > upper * (1 + tol)
                 if is_outside:
-                    await self._invalidate_box(box.id, "created_outside_price")
+                    await self._invalidate_box(box.id, "created_outside_price", pair=pair)
                     logger.info(
                         f"[BoxMgr] {pair}: 박스 생성 직후 현재가 outside → 즉시 무효화 "
                         f"(price={cp:.4f} box=[{lower:.4f}, {upper:.4f}])"
@@ -503,7 +570,7 @@ class BoxMeanReversionManager:
             reason = await self._check_converging_triangle(pair, box, params)
 
         if reason:
-            await self._invalidate_box(box.id, reason)
+            await self._invalidate_box(box.id, reason, pair=pair)
             logger.info(
                 f"[BoxMgr] 박스 무효화: {pair} id={box.id} reason={reason} "
                 f"close={close} upper={upper} lower={lower}"
@@ -602,14 +669,26 @@ class BoxMeanReversionManager:
                     )
                     return
                 order_type = OrderType.MARKET_BUY if direction == "long" else OrderType.MARKET_SELL
-                order = await self._adapter.place_order(
-                    order_type, pair, float(order_size),
+                order = await self._executor.place_order(
+                    self._adapter, order_type, pair, float(order_size),
                 )
                 exec_price = order.price or price
                 exec_amount = order.amount or float(order_size)
 
                 # positionId 확보: get_positions()로 직후 조회
                 exchange_position_id = await self._find_exchange_position_id(pair)
+
+                # 페이퍼 진입 기록 (PaperExecutor 시)
+                strategy_id = params.get("strategy_id", 0)
+                paper_id = await self._executor.record_paper_entry(
+                    strategy_id=strategy_id,
+                    pair=pair,
+                    direction=direction,
+                    entry_price=exec_price,
+                )
+                if paper_id is not None:
+                    self._cached_position[pair] = {"paper_trade_id": paper_id, "entry_price": exec_price, "invest_jpy": invest_jpy, "direction": direction}
+                    return  # 페이퍼: DB box_position 기록 스킵
 
                 await self._record_open_position(
                     pair=pair,
@@ -623,13 +702,25 @@ class BoxMeanReversionManager:
                 )
             else:
                 # 현물: 항상 롱(MARKET_BUY). is_margin=False 시 direction=long 강제.
-                order = await self._adapter.place_order(
-                    OrderType.MARKET_BUY, pair, invest_jpy,
+                order = await self._executor.place_order(
+                    self._adapter, OrderType.MARKET_BUY, pair, invest_jpy,
                 )
                 exec_price = order.price or price
                 exec_amount = order.amount
                 if exec_amount == 0 and exec_price > 0:
                     exec_amount = invest_jpy / exec_price
+
+                # 페이퍼 진입 기록 (PaperExecutor 시)
+                strategy_id = params.get("strategy_id", 0)
+                paper_id = await self._executor.record_paper_entry(
+                    strategy_id=strategy_id,
+                    pair=pair,
+                    direction="long",
+                    entry_price=exec_price,
+                )
+                if paper_id is not None:
+                    self._cached_position[pair] = {"paper_trade_id": paper_id, "entry_price": exec_price, "invest_jpy": invest_jpy, "direction": "long"}
+                    return  # 페이퍼: DB box_position 기록 스킵
 
                 await self._record_open_position(
                     pair=pair,
@@ -654,6 +745,34 @@ class BoxMeanReversionManager:
     ) -> None:
         """자동 청산. 현물은 MARKET_SELL, FX는 closeOrder(positionId)."""
         try:
+            # 페이퍼 트레이드: DB box_position 없이 paper_trades만 갱신
+            cached = self._cached_position.get(pair)
+            if isinstance(cached, dict) and "paper_trade_id" in cached:
+                paper_id = cached["paper_trade_id"]
+                entry_price = cached.get("entry_price", 0.0)
+                invest_jpy = cached.get("invest_jpy", 0.0)
+                direction = cached.get("direction", "long")
+                try:
+                    ticker = await self._adapter.get_ticker(pair)
+                    exit_price = ticker.last
+                except Exception:
+                    exit_price = entry_price
+                if paper_id:
+                    await self._executor.record_paper_exit(
+                        paper_trade_id=paper_id,
+                        exit_price=exit_price,
+                        exit_reason=reason,
+                        entry_price=entry_price,
+                        invest_jpy=invest_jpy,
+                        direction=direction,
+                    )
+                self._cached_position[pair] = None
+                logger.info(
+                    f"[BoxMgr] {pair}: 페이퍼 청산 완료 "
+                    f"reason={reason} exit_price={exit_price}"
+                )
+                return
+
             is_margin = getattr(self._adapter, "is_margin_trading", False)
 
             if is_margin:
@@ -683,8 +802,8 @@ class BoxMeanReversionManager:
         fee_rate = float(self._params.get(pair, {}).get("trading_fee_rate", 0.002))
         sell_amount = math.floor(coin_available / (1 + fee_rate) * 1e8) / 1e8
 
-        order = await self._adapter.place_order(
-            OrderType.MARKET_SELL, pair, sell_amount,
+        order = await self._executor.place_order(
+            self._adapter, OrderType.MARKET_SELL, pair, sell_amount,
         )
 
         exec_price = order.price or 0.0
@@ -886,6 +1005,63 @@ class BoxMeanReversionManager:
         return pos
 
     # ──────────────────────────────────────────
+    # 인터마켓 바이어스 적용
+    # ──────────────────────────────────────────
+
+    async def _apply_bias(
+        self, pair: str, params: dict, direction: str
+    ) -> Optional[dict]:
+        """
+        방향 바이어스를 확인하고 진입 파라미터를 조정한다.
+
+        - intermarket_bias_enabled=False(기본) → params 그대로 반환 (기능 비활성)
+        - bias가 진입 방향에 반하면 bias_action에 따라:
+            "skip"        → None 반환 (진입 취소)
+            "reduce_size" → position_size_pct 축소 후 반환
+        - API 실패 또는 neutral → params 그대로 반환
+
+        Returns:
+            None  → 진입 취소
+            dict  → 사용할 params (사이즈 조정 포함 가능)
+        """
+        if not self._intermarket_client or not params.get("intermarket_bias_enabled", False):
+            return params
+
+        try:
+            bias, confidence, reasons = await self._intermarket_client.get_direction_bias(
+                pair, params
+            )
+        except Exception as e:
+            logger.debug(f"[BoxMgr] {pair}: 인터마켓 바이어스 조회 실패 ({e}) — 진입 허용")
+            return params
+
+        # 바이어스가 진입 방향에 반하는지 판단
+        opposed = (direction == "long" and bias == "bearish") or (
+            direction == "short" and bias == "bullish"
+        )
+        if not opposed:
+            return params
+
+        action = params.get("bias_action", "reduce_size")
+        logger.info(
+            f"[BoxMgr] {pair}: 바이어스 반대 ({bias} vs {direction}) "
+            f"confidence={confidence:.2f} reasons={reasons[:2]} action={action}"
+        )
+
+        if action == "skip":
+            return None
+
+        # reduce_size
+        factor = float(params.get("bias_size_factor", 0.5))
+        adjusted = dict(params)
+        original_size = float(params.get("position_size_pct", 50.0))
+        adjusted["position_size_pct"] = round(original_size * factor, 1)
+        logger.info(
+            f"[BoxMgr] {pair}: 사이즈 축소 {original_size}% → {adjusted['position_size_pct']}%"
+        )
+        return adjusted
+
+    # ──────────────────────────────────────────
     # DB: 박스 조회/관리
     # ──────────────────────────────────────────
 
@@ -902,8 +1078,8 @@ class BoxMeanReversionManager:
             )
             return result.scalar_one_or_none()
 
-    async def _invalidate_box(self, box_id: int, reason: str) -> None:
-        """박스를 invalidated 처리."""
+    async def _invalidate_box(self, box_id: int, reason: str, pair: Optional[str] = None) -> None:
+        """박스를 invalidated 처리. pair를 넘기면 쿨다운 타이머 시작."""
         BoxModel = self._box_model
         async with self._session_factory() as db:
             await db.execute(
@@ -916,6 +1092,9 @@ class BoxMeanReversionManager:
                 )
             )
             await db.commit()
+        if pair is not None:
+            self._last_invalidation_time[pair] = datetime.now(timezone.utc)
+            logger.info(f"[BoxMgr] {pair}: 쿨다운 시작 ({_BOX_COOLDOWN_CANDLES}캔들 = 32시간)")
 
     # ──────────────────────────────────────────
     # DB: 포지션 조회

@@ -271,6 +271,9 @@ class CfdTrendFollowingManager(BaseTrendManager):
             return
         entry_side = "sell" if signal == "entry_sell" else "buy"
         logger.info(f"[CfdMgr] {pair}: {signal} → {entry_side} 진입 시도")
+        # Paper pair는 실주문 스킵
+        if await self._try_paper_entry(pair, entry_side, current_price, atr, params):
+            return
         await self._open_position(pair, entry_side, current_price, atr, params)
 
     # ──────────────────────────────────────────
@@ -368,7 +371,7 @@ class CfdTrendFollowingManager(BaseTrendManager):
     # 청산
     # ──────────────────────────────────────────
 
-    async def _close_position(self, product_code: str, reason: str) -> None:
+    async def _close_position_impl(self, product_code: str, reason: str) -> None:
         """반대 매매로 CFD 포지션 청산."""
         try:
             pos = self._position.get(product_code)

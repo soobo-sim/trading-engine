@@ -871,3 +871,39 @@ class AgentReflection(Base):
             f"<AgentReflection(id={self.id}, date={self.reflection_date!r}, "
             f"agent={self.agent_name!r}, period={self.period_type!r})>"
         )
+
+
+# ──────────────────────────────────────────────────────────────
+# Paper Trading 기록 (공유 테이블, prefix 없음)
+# 설계서: trader-common/solution-design/ALPHA_FACTORS_PROPOSAL.md §15.3
+# ──────────────────────────────────────────────────────────────
+
+class PaperTrade(Base):
+    """Proposed 전략 가상 매매 기록. 실제 주문 없이 진입/청산 시뮬레이션."""
+
+    __tablename__ = "paper_trades"
+    __table_args__ = (
+        Index("idx_paper_trades_strategy_pair", "strategy_id", "pair"),
+        Index("idx_paper_trades_entry_time", "entry_time"),
+        {"extend_existing": True},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    strategy_id = Column(Integer, nullable=False)           # gmo_strategies.id 등 (FK 없음 — prefix 다름)
+    pair = Column(String(20), nullable=False)               # 'USD_JPY'
+    direction = Column(String(10), nullable=False)          # 'long' | 'short'
+    entry_price = Column(Numeric(16, 6), nullable=True)
+    entry_time = Column(DateTime(timezone=True), nullable=True)
+    exit_price = Column(Numeric(16, 6), nullable=True)
+    exit_time = Column(DateTime(timezone=True), nullable=True)
+    exit_reason = Column(String(50), nullable=True)         # 'near_lower_exit', 'price_stop_loss', ...
+    paper_pnl_pct = Column(Numeric(8, 4), nullable=True)    # 손익률 (%) — 슬리피지 미반영
+    paper_pnl_jpy = Column(Numeric(12, 2), nullable=True)   # 가상 JPY 손익
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    def __repr__(self) -> str:
+        return (
+            f"<PaperTrade(id={self.id}, strategy_id={self.strategy_id}, "
+            f"pair={self.pair!r}, direction={self.direction!r}, "
+            f"pnl_pct={self.paper_pnl_pct})>"
+        )

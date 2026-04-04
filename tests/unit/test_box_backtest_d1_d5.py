@@ -542,3 +542,77 @@ class TestPriceStopLoss:
         result = _run_box_backtest(candles, params, config)
         sl_trades = [t for t in result.trades if t.exit_reason == "price_stop_loss"]
         assert len(sl_trades) == 0, "stop_loss_pct=0 → SL 없어야 함"
+
+
+# ══════════════════════════════════════════════
+# 테스트: 박스 쿨다운 (BOX_LIFECYCLE_POLICY §3.3)
+# ══════════════════════════════════════════════
+
+class TestBoxBacktestCooldown:
+    """무효화 후 8캔들(32시간) 재감지 금지 — 백테스트 실전 정합성."""
+
+    def _make_invalidation_candles(self):
+        """
+        박스 형성 → 무효화 → 즉시 재형성 시도 시나리오.
+        캔들 구성:
+          0~24: 박스 형성용 (upper=110, lower=90)
+          25: 박스 이탈 하향 (close=78 → 무효화)
+          26~33: 무효화 직후 8캔들 (쿨다운 기간)
+          34~60: 쿨다운 종료 후 새 박스 형성용
+        """
+        candles = []
+        base_time = datetime(2025, 1, 6, 0, 0, tzinfo=timezone.utc)  # 월요일
+
+        def _c(close, high=None, low=None, idx=0):
+            return FakeCandle(
+                close=close,
+                high=high if high is not None else close + 1,
+                low=low if low is not None else close - 1,
+                open_time=base_time + timedelta(hours=4 * idx),
+            )
+
+        # 0~24: 박스 형성 (upper≈110, lower≈90)
+        for i in range(25):
+            if i % 2 == 0:
+                candles.append(_c(104.0, high=110.5, low=89.5, idx=i))
+            else:
+                candles.append(_c(96.0, high=110.5, low=89.5, idx=i))
+
+        # 25: 박스 이탈 (하향 이탈 → D-3 무효화)
+        candles.append(_c(75.0, high=90.0, low=74.0, idx=25))
+
+        # 26~33: 쿨다운 기간 (가격 박스 영역 안으로 복귀했어도 재감지 금지)
+        for i in range(26, 34):
+            candles.append(_c(100.0, high=111.0, low=89.0, idx=i))
+
+        # 34~60: 쿨다운 종료 후 새 박스
+        for i in range(34, 61):
+            if i % 2 == 0:
+                candles.append(_c(105.0, high=111.0, low=89.5, idx=i))
+            else:
+                candles.append(_c(95.0, high=110.5, low=89.0, idx=i))
+
+        return candles
+
+    def test_BT_CD01_no_redetection_during_cooldown(self):
+        """T-BT-CD-01: 무효화 후 8캔들 이내 재감지 없음."""
+        candles = self._make_invalidation_candles()
+        config = BacktestConfig(fee_pct=0.15, slippage_pct=0.0)
+        params = {
+            "box_tolerance_pct": 1.5,
+            "box_min_touches": 3,
+            "near_bound_pct": 1.5,
+        }
+        result = _run_box_backtest(candles, params, config)
+
+        # 무효화(idx=25) 후 쿨다운(26~33) 중 진입한 거래가 있으면 안 됨
+        for trade in result.trades:
+            if trade.entry_time is not None:
+                candle_idx = int((trade.entry_time - datetime(2025, 1, 6, 0, 0, tzinfo=timezone.utc)).total_seconds() / (4 * 3600))
+                if trade.exit_reason not in ("near_upper_exit", "near_lower_exit", "price_stop_loss"):
+                    continue
+                # 무효화 직후 8캔들(26~33) 중 진입했으면 실패
+                assert not (26 <= candle_idx <= 33), (
+                    f"쿨다운 중({candle_idx}번 캔들) 진입 감지 — 쿨다운이 작동하지 않음"
+                )
+

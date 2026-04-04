@@ -80,8 +80,11 @@ from adapters.database.models import (
 )
 from adapters.database.session import create_db_engine, create_session_factory
 from api.dependencies import AppState, ModelRegistry
-from api.routes import system, trading, account, strategies, boxes, candles, techniques, analysis, monitoring, cfd, performance, wake_up_reviews, strategy_changes, strategy_analysis
+from api.routes import system, trading, account, strategies, boxes, candles, techniques, analysis, monitoring, cfd, performance, wake_up_reviews, strategy_changes, strategy_analysis, paper_trades
 from core.monitoring.health import HealthChecker
+from core.analysis.event_filter import create_event_filter
+from core.analysis.intermarket import create_intermarket_client
+from core.execution.executor import PaperExecutor
 from core.strategy.box_mean_reversion import BoxMeanReversionManager
 from core.strategy.cfd_trend_following import CfdTrendFollowingManager
 from core.strategy.trend_following import TrendFollowingManager
@@ -200,6 +203,8 @@ async def lifespan(app: FastAPI):
         box_model=models.box,
         box_position_model=models.box_position,
         pair_column=pair_column,
+        event_filter=create_event_filter(),
+        intermarket_client=create_intermarket_client(),
     )
     cfd_manager = CfdTrendFollowingManager(
         adapter=adapter,
@@ -244,15 +249,20 @@ async def lifespan(app: FastAPI):
     )
     app.state.app_state = state
 
-    # 8. 활성 전략 자동 기동
+    # 8. 활성 + Proposed 전략 자동 기동
     try:
-        from sqlalchemy import select
+        from sqlalchemy import select, or_
         async with session_factory() as db:
-            stmt = select(models.strategy).where(models.strategy.status == "active")
+            stmt = select(models.strategy).where(
+                or_(models.strategy.status == "active", models.strategy.status == "proposed")
+            )
             result = await db.execute(stmt)
-            active_strategies = result.scalars().all()
+            all_strategies = result.scalars().all()
 
-        for strategy in active_strategies:
+        proposed_count = 0
+        _PAPER_TRADING_HARDCAP = 3  # proposed 동시 실행 최대 수
+
+        for strategy in all_strategies:
             params = strategy.parameters or {}
             # CK: "pair" 키 (소문자 "xrp_jpy"), BF: "product_code" 키 (대문자 "BTC_JPY")
             # DB 캔들 pair 컬럼과 대소문자가 일치해야 한다
@@ -262,6 +272,28 @@ async def lifespan(app: FastAPI):
             pair = state.normalize_pair(pair)
             style = params.get("trading_style")
             start_params = {**params, "strategy_id": strategy.id}
+
+            is_proposed = strategy.status == "proposed"
+            if is_proposed:
+                if proposed_count >= _PAPER_TRADING_HARDCAP:
+                    logger.warning(
+                        f"Paper trading 하드캡({_PAPER_TRADING_HARDCAP}) 초과 — "
+                        f"strategy_id={strategy.id} ({pair}) 기동 스킵"
+                    )
+                    continue
+                # 전략 스타일별 매니저에 PaperExecutor 바인딩 (pair 레벨 분리)
+                if style == "box_mean_reversion":
+                    box_manager._executor = PaperExecutor(session_factory, strategy.id)
+                elif style == "trend_following":
+                    trend_manager.register_paper_pair(pair, strategy.id)
+                elif style == "cfd_trend_following":
+                    cfd_manager.register_paper_pair(pair, strategy.id)
+                proposed_count += 1
+                logger.info(
+                    f"Paper trading 시작: strategy_id={strategy.id} pair={pair} style={style} "
+                    f"({proposed_count}/{_PAPER_TRADING_HARDCAP})"
+                )
+
             if not await strategy_registry.start_strategy(style, pair, start_params):
                 logger.warning(f"미등록 전략 스타일: {style} (pair={pair})")
     except Exception as e:
@@ -315,3 +347,4 @@ app.include_router(performance.router)
 app.include_router(wake_up_reviews.router)
 app.include_router(strategy_changes.router)
 app.include_router(strategy_analysis.router)
+app.include_router(paper_trades.router)

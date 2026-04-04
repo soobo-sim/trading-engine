@@ -14,6 +14,7 @@ FastAPI에 의존하지 않는다. api/routes/system.py가 이 클래스를 호�
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional, Type
@@ -22,6 +23,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from core.exchange.base import ExchangeAdapter
+from core.monitoring.maintenance import is_maintenance_window
 from core.task.supervisor import TaskSupervisor
 from .safety_checks import SafetyChecksMixin
 
@@ -212,8 +214,12 @@ class HealthChecker(SafetyChecksMixin):
         1% 이상 차이가 있으면 discrepancy로 보고.
         BUG-006의 독립 검증 레이어.
         BUG-016: dust 무시 + 진입 직후 grace period.
-        API 키 미설정 시 스킵.
+        API 키 미설정 / 메인터넌스 중 시 스킵.
         """
+        # 정기 메인터넌스 중 → get_balance 호출 시 timeout 대기 → 스킵
+        if is_maintenance_window(os.getenv("EXCHANGE", "")):
+            return []
+
         # API 키 미설정 시 잔고 조회 불가 → 스킵
         if hasattr(self._adapter, "has_credentials") and not self._adapter.has_credentials():
             return []

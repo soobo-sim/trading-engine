@@ -500,6 +500,7 @@ def _run_box_backtest(
     current_position: Optional[BacktestTrade] = None
     active_box: Optional[dict] = None  # {"upper": float, "lower": float}
     prev_box_state: Optional[str] = None  # 실전 _prev_box_state 미러링
+    last_invalidation_idx: Optional[int] = None  # 쿨다운 추적
 
     # ── 3-layer direction filter state ──
     slope_threshold = float(params.get("direction_slope_threshold", 0.1))
@@ -588,6 +589,7 @@ def _run_box_backtest(
                 current_position = None
                 active_box = None
                 prev_box_state = None
+                last_invalidation_idx = i
                 continue
 
         # ── D-5: FX 주말 진입 차단 ──
@@ -624,6 +626,7 @@ def _run_box_backtest(
                     current_position = None
                 active_box = None
                 prev_box_state = None
+                last_invalidation_idx = i
                 continue
 
         if current_position is not None:
@@ -724,6 +727,12 @@ def _run_box_backtest(
 
             # 활성 박스 없으면 새로 감지
             if active_box is None:
+                # 쿨다운 체크: 무효화 직후 8캔들(32시간) 재감지 금지
+                _BOX_COOLDOWN_CANDLES = 8
+                if last_invalidation_idx is not None and (i - last_invalidation_idx) < _BOX_COOLDOWN_CANDLES:
+                    prev_box_state = None
+                    continue
+
                 window = candles[max(0, i - box_window):i]
                 highs = [float(c.high) for c in window]
                 lows = [float(c.low) for c in window]

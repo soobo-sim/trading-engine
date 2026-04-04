@@ -8,13 +8,19 @@ BaseTrendManager — 추세추종 전략 공통 베이스 클래스.
     - _detect_existing_position
     - _sync_position_state
     - _open_position
-    - _close_position
+    - _close_position_impl  ← (구: _close_position)
     - _apply_stop_tightening
     - _record_open
     - _record_close
     - _on_candle_extra_checks (보유시간/keep_rate 등)
     - _get_entry_side (진입 시그널에서 side 결정)
     - _is_stop_triggered (스탑로스 방향 체크)
+
+Paper Trading 지원:
+    - register_paper_pair(pair, strategy_id): proposed pair 등록 → PaperExecutor 바인딩
+    - _try_paper_entry(): 진입 전 paper 분기 (True 반환 시 실주문 스킵)
+    - _close_position(): concrete wrapper — paper pair면 paper exit 처리 후 return
+    - active pair는 _paper_executors에 없으므로 기존 동작 100% 유지
 """
 from __future__ import annotations
 
@@ -35,6 +41,7 @@ from core.strategy.signals import (
     compute_trend_signal,
     detect_bearish_divergences,
 )
+from core.analysis.session_filter import is_allowed_session, is_london_open_blackout
 from core.task.supervisor import TaskSupervisor
 
 logger = logging.getLogger(__name__)
@@ -80,6 +87,10 @@ class BaseTrendManager(ABC):
         self._close_fail_until: Dict[str, float] = {}
         # 정합성 검사 카운터 (5사이클=5분마다)
         self._sync_counter: Dict[str, int] = {}
+
+        # Paper Trading — pair 레벨 분리 (active pair 영향 0)
+        self._paper_executors: Dict[str, Any] = {}   # pair → PaperExecutor
+        self._paper_positions: Dict[str, dict] = {}  # pair → {paper_trade_id, entry_price, direction}
 
     # ──────────────────────────────────────────
     # Public API
@@ -146,6 +157,60 @@ class BaseTrendManager(ABC):
 
     def running_pairs(self) -> list[str]:
         return [p for p in self._params if self.is_running(p)]
+
+    def register_paper_pair(self, pair: str, strategy_id: int) -> None:
+        """proposed pair에 PaperExecutor를 바인딩한다. active pair에는 호출하지 않는다."""
+        from core.execution.executor import PaperExecutor
+        self._paper_executors[pair] = PaperExecutor(self._session_factory, strategy_id)
+        logger.info(
+            f"{self._log_prefix} {pair}: PaperExecutor 등록 (strategy_id={strategy_id})"
+        )
+
+    async def _try_paper_entry(
+        self, pair: str, direction: str, current_price: float,
+        atr: Optional[float], params: Dict,
+    ) -> bool:
+        """Paper 모드 진입 처리. paper pair가 아니면 False 반환(실주문 진행).
+
+        True 반환 시 _open_position 호출 스킵.
+        인메모리 Position을 생성해 stop_loss_monitor가 동작하도록 유지한다.
+        """
+        paper_exec = self._paper_executors.get(pair)
+        if paper_exec is None:
+            return False
+
+        strategy_id = params.get("strategy_id", 0)
+        paper_id = await paper_exec.record_paper_entry(
+            strategy_id=strategy_id,
+            pair=pair,
+            direction=direction,
+            entry_price=current_price,
+        )
+        if paper_id is None:
+            return False  # 기록 실패 시 실주문 진행 (안전 방향)
+
+        # 인메모리 포지션 생성 (스탑로스 모니터 유지 + 트레일링 스탑 동작)
+        atr_mult = float(params.get("atr_multiplier_stop", 2.0))
+        if direction == "sell":
+            initial_sl = round(current_price + atr * atr_mult, 6) if atr else None
+        else:
+            initial_sl = round(current_price - atr * atr_mult, 6) if atr else None
+        self._position[pair] = Position(
+            pair=pair,
+            entry_price=current_price,
+            entry_amount=0.0,  # paper: 실수량 없음
+            stop_loss_price=initial_sl,
+        )
+        self._paper_positions[pair] = {
+            "paper_trade_id": paper_id,
+            "entry_price": current_price,
+            "direction": direction,
+        }
+        logger.info(
+            f"{self._log_prefix} {pair}: Paper 진입 기록 id={paper_id} "
+            f"direction={direction} price={current_price}"
+        )
+        return True
 
     def get_position(self, pair: str) -> Optional[Position]:
         return self._position.get(pair)
@@ -334,7 +399,8 @@ class BaseTrendManager(ABC):
             if pos is not None:
                 cnt = self._sync_counter.get(pair, 0) + 1
                 self._sync_counter[pair] = cnt
-                if cnt % 5 == 0:
+                # Paper pair는 실잔고 조회 스킵 (entry_amount=0 → ZeroDivisionError 방지)
+                if cnt % 5 == 0 and pair not in self._paper_executors:
                     await self._sync_position_state(pair)
 
             # 서브클래스 추가 체크 (keep_rate, 보유시간 등)
@@ -505,8 +571,22 @@ class BaseTrendManager(ABC):
         atr: Optional[float], params: Dict, signal_data: dict
     ) -> None:
         """진입 시그널 처리. 기본: entry_ok → buy 진입."""
-        if signal == "entry_ok":
+        if signal == "entry_ok":            # ── 세션 필터 (FX 전용) ───────────────────────────
+            is_fx = getattr(self._adapter, "is_margin_trading", False)
+            if is_fx and not is_allowed_session(params):
+                logger.debug(
+                    f"{self._log_prefix} {pair}: 세션 필터 — 센션 차단"
+                )
+                return
+            if is_fx and is_london_open_blackout(params):
+                logger.debug(
+                    f"{self._log_prefix} {pair}: 런던 오픈 블랙아웃 — 진입 대기"
+                )
+                return
             logger.info(f"{self._log_prefix} {pair}: entry_ok @ ¥{current_price} → 진입 시도")
+            # Paper pair는 실주문 스킵
+            if await self._try_paper_entry(pair, "long", current_price, atr, params):
+                return
             await self._open_position(pair, current_price, atr, params, signal_data=signal_data)
 
     def _is_stop_triggered(self, pos: Position, price: float, stop_loss_price: float) -> bool:
@@ -532,9 +612,33 @@ class BaseTrendManager(ABC):
         """진입 주문 실행."""
         ...
 
-    @abstractmethod
     async def _close_position(self, pair: str, reason: str) -> None:
-        """청산 주문 실행."""
+        """청산 wrapper. paper pair면 paper exit 처리 후 return. 그 외 _close_position_impl 위임."""
+        paper_info = self._paper_positions.pop(pair, None)
+        paper_exec = self._paper_executors.get(pair)
+        if paper_exec is not None and paper_info is not None:
+            exit_price = self._latest_price.get(pair, paper_info["entry_price"])
+            try:
+                await paper_exec.record_paper_exit(
+                    paper_trade_id=paper_info["paper_trade_id"],
+                    exit_price=exit_price,
+                    exit_reason=reason,
+                    entry_price=paper_info["entry_price"],
+                    invest_jpy=100_000.0,  # 가상 투입금: PnL% 계산용
+                    direction=paper_info["direction"],
+                )
+            except Exception as e:
+                logger.error(f"{self._log_prefix} {pair}: Paper exit 기록 실패 — {e}")
+            self._position[pair] = None
+            logger.info(
+                f"{self._log_prefix} {pair}: Paper 청산 기록 reason={reason} exit_price={exit_price}"
+            )
+            return
+        await self._close_position_impl(pair, reason)
+
+    @abstractmethod
+    async def _close_position_impl(self, pair: str, reason: str) -> None:
+        """실거래소 청산 주문 실행. (구: _close_position)"""
         ...
 
     @abstractmethod

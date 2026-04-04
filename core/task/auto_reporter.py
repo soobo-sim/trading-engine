@@ -21,6 +21,8 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from core.monitoring.maintenance import is_maintenance_window
+
 logger = logging.getLogger(__name__)
 
 JST = timezone(timedelta(hours=9))
@@ -135,6 +137,17 @@ class AutoReporter:
 
     async def _run_once(self) -> None:
         """활성 전략 전체에 대해 보고 생성 → Telegram 전송 + 손실 포지션 감지."""
+        # 정기 메인터넌스 중: API 호출 없이 간소 보고만 전송
+        exchange = os.getenv("EXCHANGE", "")
+        if is_maintenance_window(exchange):
+            text = "🔧 정기 메인터넌스 중\n\n거래소 API/WS 일시 중단. 메인터넌스 종료 후 자동 복구됩니다."
+            await send_telegram_message(
+                self._bot_token, self._chat_id, text,
+                client=self._http_client,
+            )
+            logger.info("[AutoReporter] 메인터넌스 모드 — 간소 보고 전송")
+            return
+
         state = self._state
         async with self._session_factory() as db:
             # 손실 포지션 감지 (WAKE_UP_REVIEW_AUTO)

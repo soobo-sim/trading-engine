@@ -1354,3 +1354,83 @@ class TestTriggerRachelTestMode:
             await _trigger_rachel_analysis("BTC_JPY", alert)
 
         assert mock_client.post.call_count == 2
+
+
+# ══════════════════════════════════════════════
+# 테스트: 박스 수명 경고 (BOX_LIFECYCLE_POLICY)
+# ══════════════════════════════════════════════
+
+class TestCheckBoxAgeWarning:
+    """check_box_age_warning 유틸 함수 — 엣지 케이스 포함."""
+
+    def test_naive_datetime_treated_as_utc(self):
+        """T-AGE-NA-01: tzinfo 없는 naive datetime → UTC로 간주하여 정상 계산."""
+        from api.services.monitoring.box_report import check_box_age_warning
+        # 21일 전 naive datetime (tzinfo=None)
+        naive_old = (datetime.now(timezone.utc) - timedelta(days=21)).replace(tzinfo=None)
+        assert naive_old.tzinfo is None, "사전조건: naive datetime이어야 함"
+        result = check_box_age_warning(naive_old)
+        assert result is not None
+        assert "⚠️" in result
+
+    def test_aware_datetime_works_correctly(self):
+        """T-AGE-NA-02: timezone-aware datetime → 정상 처리."""
+        from api.services.monitoring.box_report import check_box_age_warning
+        aware_old = datetime.now(timezone.utc) - timedelta(days=21)
+        result = check_box_age_warning(aware_old)
+        assert result is not None
+        assert "21" in result
+
+    def test_recent_box_no_warning(self):
+        """T-AGE-NA-03: 최근 박스 → 경고 없음."""
+        from api.services.monitoring.box_report import check_box_age_warning
+        recent = datetime.now(timezone.utc) - timedelta(hours=1)
+        assert check_box_age_warning(recent) is None
+
+
+class TestBuildBoxTelegramTextAgeWarning:
+    """build_box_telegram_text — age_warning 표시 경로."""
+
+    def _base_data(self, age_warning: str | None = None) -> dict:
+        box = {
+            "id": 5,
+            "upper_bound": 160.0,
+            "lower_bound": 155.0,
+            "box_width_pct": 3.2,
+            "bar_chart": "[━━━●━━━━━━━]",
+        }
+        if age_warning is not None:
+            box["age_warning"] = age_warning
+        return {
+            "health_line": "🟢 WS✅ 태스크2/2✅ 잔고✅",
+            "current_price": 156.5,
+            "box": box,
+            "position_label": "near_lower",
+            "position": None,
+            "jpy_available": 50000,
+            "coin_available": 0.0,
+            "basis_timeframe": "4h",
+            "candle_open_time_jst": "08:00",
+            "is_margin_trading": True,
+        }
+
+    def test_age_warning_included_in_text(self):
+        """T-RPT-AGE-01: age_warning 있을 때 Telegram 텍스트에 포함."""
+        data = self._base_data(age_warning="⚠️ 장기 박스 (25일째)")
+        text = build_box_telegram_text("GMO", "09:00", "usd_jpy", data)
+        assert "⚠️ 장기 박스" in text
+        assert "25일째" in text
+
+    def test_no_age_warning_clean_text(self):
+        """T-RPT-AGE-02: age_warning 없을 때 텍스트에 경고 없음."""
+        data = self._base_data(age_warning=None)
+        text = build_box_telegram_text("GMO", "09:00", "usd_jpy", data)
+        assert "장기 박스" not in text
+
+    def test_age_warning_key_missing_no_error(self):
+        """T-RPT-AGE-03: box dict에 age_warning 키 자체 없어도 에러 없음 (하위 호환)."""
+        data = self._base_data()  # age_warning 키 미포함
+        assert "age_warning" not in data["box"]
+        text = build_box_telegram_text("GMO", "09:00", "usd_jpy", data)
+        assert text  # 에러 없이 텍스트 생성
+        assert "장기 박스" not in text

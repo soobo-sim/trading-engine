@@ -12,6 +12,8 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
+from core.monitoring.maintenance import is_maintenance_window
+
 if TYPE_CHECKING:
     from .health import SafetyCheck
 
@@ -116,6 +118,14 @@ class SafetyChecksMixin:
     def _check_sf03(self, ws_connected: bool) -> "SafetyCheck":
         """SF-03: WebSocket 연결. API 키 미설정 또는 활성 전략 없으면 스킵."""
         from .health import SafetyCheck
+
+        # 정기 메인터넌스 중 → n/a (WS 연결 불가는 정상)
+        if is_maintenance_window(os.getenv("EXCHANGE", "")):
+            return SafetyCheck(
+                id="SF-03", name="WebSocket", status="n/a",
+                severity="critical",
+                detail="정기 메인터넌스 중 — WS 연결 불가 정상",
+            )
 
         # API 키 미설정 시 스킵
         if hasattr(self._adapter, "has_credentials") and not self._adapter.has_credentials():
@@ -251,6 +261,14 @@ class SafetyChecksMixin:
     async def _check_sf06(self) -> "SafetyCheck":
         """SF-06: 거래소 API 응답 가능 여부. API 키 미설정 시 스킵."""
         from .health import SafetyCheck
+
+        # 정기 메인터넌스 중 → n/a (API 응답 불가는 정상)
+        if is_maintenance_window(os.getenv("EXCHANGE", "")):
+            return SafetyCheck(
+                id="SF-06", name="거래소 API", status="n/a",
+                severity="critical",
+                detail="정기 메인터넌스 중 — API 응답 불가 정상",
+            )
 
         # API 키 미설정 시 스킵
         if hasattr(self._adapter, "has_credentials") and not self._adapter.has_credentials():
@@ -432,6 +450,13 @@ class SafetyChecksMixin:
 
     async def _send_safety_telegram_alert(self, checks: list["SafetyCheck"]) -> None:
         """안전장치 이상 시 사람이 읽기 쉬운 형태로 Telegram 경고 전송."""
+        from core.monitoring.maintenance import is_maintenance_window
+
+        exchange_raw = os.getenv("EXCHANGE", "unknown")
+        if is_maintenance_window(exchange_raw):
+            logger.info(f"[Safety] {exchange_raw} 정기 메인터넌스 중 — 경고 스킵")
+            return
+
         bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
         chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
         if not bot_token or not chat_id:

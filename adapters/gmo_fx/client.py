@@ -691,9 +691,16 @@ class GmoFxAdapter:
                 raise
             except (ConnectionClosed, OSError, Exception) as e:
                 self._ws_connected = False
-                logger.warning(f"[GMO FX WS] 끊김: {e}. {delay}초 후 재접속...")
-                await asyncio.sleep(delay)
-                delay = min(delay * 2, 30)
+                from core.monitoring.maintenance import is_maintenance_window, seconds_until_maintenance_end
+                if is_maintenance_window("gmofx"):
+                    wait = seconds_until_maintenance_end("gmofx") or 3600
+                    logger.info(f"[GMO FX WS] 정기 메인터넌스 중 — {wait}초 대기 후 재접속")
+                    await asyncio.sleep(wait)
+                    delay = 1
+                else:
+                    logger.warning(f"[GMO FX WS] 끊김: {e}. {delay}초 후 재접속...")
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 2, 30)
 
     async def _get_ws_auth_token(self) -> str:
         """
@@ -780,9 +787,16 @@ class GmoFxAdapter:
             except asyncio.CancelledError:
                 raise
             except (ConnectionClosed, OSError, Exception) as e:
-                logger.warning(f"[GMO FX Private WS] 끊김: {e}. {delay}초 후 재접속...")
-                await asyncio.sleep(delay)
-                delay = min(delay * 2, 60)
+                from core.monitoring.maintenance import is_maintenance_window, seconds_until_maintenance_end
+                if is_maintenance_window("gmofx"):
+                    wait = seconds_until_maintenance_end("gmofx") or 3600
+                    logger.info(f"[GMO FX Private WS] 정기 메인터넌스 중 — {wait}초 대기 후 재접속")
+                    await asyncio.sleep(wait)
+                    delay = 1
+                else:
+                    logger.warning(f"[GMO FX Private WS] 끊김: {e}. {delay}초 후 재접속...")
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 2, 60)
 
     # ── 내부 변환 헬퍼 (parsers.py 위임) ──────────────────────
 

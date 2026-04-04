@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import and_, desc, select
@@ -18,6 +18,23 @@ from .alerts import (
 )
 
 logger = logging.getLogger(__name__)
+
+# 박스 age 소프트 경고 임계 (~20일, 4H × 120)
+_BOX_AGE_WARNING_CANDLES = 120
+
+
+def check_box_age_warning(created_at: datetime) -> str | None:
+    """박스 생성 후 120캔들(~20일) 경과 시 경고 문자열 반환."""
+    # DB에서 naive datetime으로 반환될 수 있으므로 UTC로 통일
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    age_seconds = (datetime.now(timezone.utc) - created_at).total_seconds()
+    threshold_seconds = _BOX_AGE_WARNING_CANDLES * 4 * 3600
+    if age_seconds > threshold_seconds:
+        age_days = int(age_seconds / 86400)
+        return f"⚠️ 장기 박스 ({age_days}일째)"
+    return None
+
 
 
 def build_bar_chart(price: float, lower: float, upper: float) -> str:
@@ -102,6 +119,8 @@ def build_box_telegram_text(prefix: str, time_str: str, pair: str, data: dict) -
     if box:
         lines.append(f"¥{current_price:,.2f} {data['position_label']} (폭 {box['box_width_pct']:.1f}%)")
         lines.append(f"하단¥{box['lower_bound']:,.2f} {box['bar_chart']} 상단¥{box['upper_bound']:,.2f}")
+        if box.get("age_warning"):
+            lines.append(f"   {box['age_warning']}")
     else:
         lines.append(f"¥{current_price:,.2f} 📭박스 미형성")
         scan_dt = data.get("next_scan_jst")
@@ -347,6 +366,7 @@ async def generate_box_report(
             "box_width_pct": round(box_width_pct, 1),
             "status": box_row.status,
             "bar_chart": bar_chart,
+            "age_warning": check_box_age_warning(box_row.created_at),
         }
     else:
         # 박스 미형성 시 진행 상황 계산

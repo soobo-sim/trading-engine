@@ -207,7 +207,7 @@ class TrendFollowingManager(BaseTrendManager):
     # 청산
     # ──────────────────────────────────────────
 
-    async def _close_position(self, pair: str, reason: str) -> None:
+    async def _close_position_impl(self, pair: str, reason: str) -> None:
         """market_sell 자동 청산. BUG-003 dust, BUG-004 수수료 차감."""
         try:
             balance = await self._adapter.get_balance()
