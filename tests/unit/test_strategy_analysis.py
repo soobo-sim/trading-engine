@@ -48,23 +48,6 @@ def _make_analysis(**kwargs):
     return m
 
 
-def _make_reflection(**kwargs):
-    defaults = dict(
-        id=1, reflection_date=date(2026, 3, 31),
-        agent_name="alice", period_type="short",
-        period_start=date(2026, 3, 24), period_end=date(2026, 3, 31),
-        missed_data=[{"indicator": "RSI divergence", "impact": "진입 2H 지연"}],
-        data_improvement=None, effective_decisions=None,
-        action_items=None, strategy_performance=None,
-        created_at=datetime(2026, 3, 31, 9, 0, tzinfo=timezone.utc),
-    )
-    defaults.update(kwargs)
-    m = MagicMock()
-    for k, v in defaults.items():
-        setattr(m, k, v)
-    return m
-
-
 # ──────────────────────────────────────────────────────────────
 # Pydantic 유효성 검증
 # ──────────────────────────────────────────────────────────────
@@ -121,39 +104,6 @@ def test_p05_all_valid_agent_names_accepted():
         assert obj.agent_name == agent
 
 
-def test_p06_invalid_reflection_agent_name_rejected():
-    from pydantic import ValidationError
-    from api.routes.strategy_analysis import ReflectionCreate
-    with pytest.raises(ValidationError, match="agent_name"):
-        ReflectionCreate(
-            reflection_date=date(2026, 3, 31),
-            agent_name="monica",
-            period_type="short",
-        )
-
-
-def test_p07_invalid_period_type_rejected():
-    from pydantic import ValidationError
-    from api.routes.strategy_analysis import ReflectionCreate
-    with pytest.raises(ValidationError, match="period_type"):
-        ReflectionCreate(
-            reflection_date=date(2026, 3, 31),
-            agent_name="alice",
-            period_type="yearly",
-        )
-
-
-def test_p08_all_valid_period_types_accepted():
-    from api.routes.strategy_analysis import ReflectionCreate
-    for pt in ["short", "medium", "long"]:
-        obj = ReflectionCreate(
-            reflection_date=date(2026, 3, 31),
-            agent_name="alice",
-            period_type=pt,
-        )
-        assert obj.period_type == pt
-
-
 # ──────────────────────────────────────────────────────────────
 # 서비스 — chart_start/chart_end 자동 계산
 # ──────────────────────────────────────────────────────────────
@@ -200,15 +150,6 @@ def test_s05_report_to_dict_with_analyses():
     d = _report_to_dict(r, include_analyses=True)
     assert len(d["analyses"]) == 1
     assert d["analyses"][0]["agent_name"] == "alice"
-
-
-def test_s06_reflection_to_dict():
-    from api.services.strategy_analysis_service import _reflection_to_dict
-    r = _make_reflection()
-    d = _reflection_to_dict(r)
-    assert d["agent_name"] == "alice"
-    assert d["period_type"] == "short"
-    assert d["missed_data"] == [{"indicator": "RSI divergence", "impact": "진입 2H 지연"}]
 
 
 # ──────────────────────────────────────────────────────────────
@@ -340,118 +281,6 @@ async def test_g05_get_report_invalid_id_returns_400():
 
 
 # ──────────────────────────────────────────────────────────────
-# POST /api/strategy-analysis/reflections
-# ──────────────────────────────────────────────────────────────
-
-@pytest.mark.asyncio
-async def test_r01_create_reflection_success():
-    from api.routes.strategy_analysis import create_reflection, ReflectionCreate
-    body = ReflectionCreate(
-        reflection_date=date(2026, 3, 31),
-        agent_name="alice",
-        period_type="short",
-        missed_data=[{"indicator": "RSI divergence", "impact": "진입 2H 지연"}],
-    )
-    mock_db = AsyncMock()
-    expected = {"id": 1, "agent_name": "alice", "period_type": "short"}
-
-    with patch("api.routes.strategy_analysis.svc.create_reflection", new=AsyncMock(return_value=expected)):
-        result = await create_reflection(body=body, db=mock_db)
-
-    assert result["id"] == 1
-    assert result["agent_name"] == "alice"
-
-
-@pytest.mark.asyncio
-async def test_r02_create_reflection_duplicate_returns_409():
-    from api.routes.strategy_analysis import create_reflection, ReflectionCreate
-    from fastapi import HTTPException
-    from sqlalchemy.exc import IntegrityError
-    body = ReflectionCreate(
-        reflection_date=date(2026, 3, 31),
-        agent_name="alice",
-        period_type="short",
-    )
-    mock_db = AsyncMock()
-
-    with patch(
-        "api.routes.strategy_analysis.svc.create_reflection",
-        side_effect=IntegrityError("dup", {}, None),
-    ):
-        with pytest.raises(HTTPException) as exc_info:
-            await create_reflection(body=body, db=mock_db)
-    assert exc_info.value.status_code == 409
-    assert exc_info.value.detail["blocked_code"] == "DUPLICATE_REFLECTION"
-
-
-# ──────────────────────────────────────────────────────────────
-# GET /api/strategy-analysis/reflections
-# ──────────────────────────────────────────────────────────────
-
-@pytest.mark.asyncio
-async def test_r03_list_reflections_invalid_agent_returns_400():
-    from api.routes.strategy_analysis import list_reflections
-    from fastapi import HTTPException
-    mock_db = AsyncMock()
-
-    with pytest.raises(HTTPException) as exc_info:
-        await list_reflections(agent_name="monica", period_type=None, limit=50, db=mock_db)
-    assert exc_info.value.status_code == 400
-    assert exc_info.value.detail["blocked_code"] == "INVALID_AGENT_NAME"
-
-
-@pytest.mark.asyncio
-async def test_r04_list_reflections_invalid_period_returns_400():
-    from api.routes.strategy_analysis import list_reflections
-    from fastapi import HTTPException
-    mock_db = AsyncMock()
-
-    with pytest.raises(HTTPException) as exc_info:
-        await list_reflections(agent_name=None, period_type="yearly", limit=50, db=mock_db)
-    assert exc_info.value.status_code == 400
-    assert exc_info.value.detail["blocked_code"] == "INVALID_PERIOD_TYPE"
-
-
-@pytest.mark.asyncio
-async def test_r05_list_reflections_success():
-    from api.routes.strategy_analysis import list_reflections
-    mock_db = AsyncMock()
-    expected = [{"id": 1, "agent_name": "alice"}]
-
-    with patch("api.routes.strategy_analysis.svc.list_reflections", new=AsyncMock(return_value=expected)):
-        result = await list_reflections(agent_name="alice", period_type="short", limit=10, db=mock_db)
-
-    assert len(result) == 1
-
-
-# ──────────────────────────────────────────────────────────────
-# GET /api/strategy-analysis/reflections/{id}
-# ──────────────────────────────────────────────────────────────
-
-@pytest.mark.asyncio
-async def test_r06_get_reflection_not_found_returns_404():
-    from api.routes.strategy_analysis import get_reflection
-    from fastapi import HTTPException
-    mock_db = AsyncMock()
-
-    with patch("api.routes.strategy_analysis.svc.get_reflection", new=AsyncMock(return_value=None)):
-        with pytest.raises(HTTPException) as exc_info:
-            await get_reflection(reflection_id=999, db=mock_db)
-    assert exc_info.value.status_code == 404
-
-
-@pytest.mark.asyncio
-async def test_r07_get_reflection_invalid_id_returns_400():
-    from api.routes.strategy_analysis import get_reflection
-    from fastapi import HTTPException
-    mock_db = AsyncMock()
-
-    with pytest.raises(HTTPException) as exc_info:
-        await get_reflection(reflection_id=-1, db=mock_db)
-    assert exc_info.value.status_code == 400
-
-
-# ──────────────────────────────────────────────────────────────
 # 보강: 엣지 케이스 + Step 5 통합 검증
 # ──────────────────────────────────────────────────────────────
 
@@ -548,3 +377,214 @@ async def test_c04_create_report_duplicate_no_telegram():
 
     assert exc_info.value.status_code == 409
     mock_task.assert_not_called()
+
+
+# ──────────────────────────────────────────────────────────────
+# 전략 비교 structured_data 계약 검증
+# (REPORTING_SYSTEM_DESIGN.md §3.2.1 §7 strategy_comparison 갱신 반영)
+# ──────────────────────────────────────────────────────────────
+
+class TestStrategyComparisonStructuredData:
+    """주간/월간 보고 structured_data에 strategy_comparison 필드 계약."""
+
+    def _analysis_with(self, data: dict):
+        return _make_analysis(structured_data=data)
+
+    def test_sd01_strategy_comparison_keys_present(self):
+        """strategy_comparison 배열의 각 항목이 필수 키를 포함."""
+        comparison = [
+            {
+                "strategy_id": 4,
+                "status": "active",
+                "pair": "GBP_JPY",
+                "style": "box_mean_reversion",
+                "regime_fit": "✅",
+                "paper_progress": None,
+                "rationale": "횡보장 지속, 박스 유효",
+            },
+            {
+                "strategy_id": 2,
+                "status": "proposed",
+                "pair": "GBP_JPY",
+                "style": "trend_following",
+                "regime_fit": "❌",
+                "paper_progress": "3/20",
+                "rationale": "횡보장에서 손실 예상",
+            },
+        ]
+        data = {
+            "strategy_comparison": comparison,
+            "best_strategy_id": 4,
+            "best_strategy_rationale": "박스역추세가 현 횡보장에서 유일하게 양의 EV",
+            "switch_recommended": False,
+        }
+        a = self._analysis_with(data)
+        sd = a.structured_data
+        assert "strategy_comparison" in sd
+        assert "best_strategy_id" in sd
+        assert "best_strategy_rationale" in sd
+        assert sd["best_strategy_rationale"] != ""
+        assert len(sd["strategy_comparison"]) == 2
+
+    def test_sd02_best_strategy_rationale_is_non_empty_string(self):
+        """best_strategy_rationale은 비어있지 않아야 한다."""
+        data = {
+            "strategy_comparison": [],
+            "best_strategy_id": 4,
+            "best_strategy_rationale": "EMA slope 양전환으로 추세추종이 박스보다 EV 우위",
+            "switch_recommended": False,
+        }
+        a = self._analysis_with(data)
+        rationale = a.structured_data.get("best_strategy_rationale", "")
+        assert isinstance(rationale, str) and len(rationale) > 0
+
+    def test_sd03_rebacktest_weekly_structure(self):
+        """weekly 보고 structured_data에 rebacktest_weekly 키 구조 검증."""
+        rebacktest = [
+            {
+                "strategy_id": 4,
+                "style": "box_mean_reversion",
+                "period": "2026-03-29~04-04",
+                "candles": 42,
+                "pnl": 2850,
+                "win_rate": 42.0,
+                "sharpe": 1.2,
+                "optimal_params": {"stop_loss_pct": 1.5},
+                "vs_live_gap_pct": -5.3,
+                "conclusion": "실전과 괴리 미미, 파라미터 유지",
+            }
+        ]
+        data = {"rebacktest_weekly": rebacktest}
+        a = self._analysis_with(data)
+        rb = a.structured_data["rebacktest_weekly"][0]
+        assert rb["candles"] == 42
+        assert "conclusion" in rb
+        assert "vs_live_gap_pct" in rb
+
+    def test_sd04_rebacktest_monthly_gap_exceeds_threshold(self):
+        """monthly 재백테스팅에서 괴리 15%p+ 시 conclusion에 조정 언급 필수."""
+        rebacktest = [
+            {
+                "strategy_id": 4,
+                "style": "box_mean_reversion",
+                "period": "2026-03-01~04-01",
+                "candles": 180,
+                "pnl": 1000,
+                "win_rate": 35.0,
+                "sharpe": 0.5,
+                "optimal_params": {},
+                "vs_live_gap_pct": -18.5,
+                "conclusion": "괴리 18.5%p → ema_period 15→12 조정 제안",
+            }
+        ]
+        data = {"rebacktest_monthly": rebacktest}
+        a = self._analysis_with(data)
+        rb = a.structured_data["rebacktest_monthly"][0]
+        assert abs(rb["vs_live_gap_pct"]) >= 15.0
+        # 괴리 15p+ 시 conclusion이 비어있으면 안 됨
+        assert rb["conclusion"] != ""
+
+    def test_sd05_strategy_comparison_regime_fit_values(self):
+        """regime_fit은 ✅ 또는 ❌이어야 한다."""
+        valid_fits = {"✅", "❌"}
+        comparison = [
+            {"strategy_id": 1, "status": "active", "pair": "USD_JPY",
+             "style": "trend_following", "regime_fit": "✅",
+             "paper_progress": None, "rationale": "추세 명확"},
+            {"strategy_id": 2, "status": "proposed", "pair": "USD_JPY",
+             "style": "box_mean_reversion", "regime_fit": "❌",
+             "paper_progress": "0/20", "rationale": "추세장 부적합"},
+        ]
+        a = self._analysis_with({"strategy_comparison": comparison})
+        for item in a.structured_data["strategy_comparison"]:
+            assert item["regime_fit"] in valid_fits
+
+
+# ──────────────────────────────────────────────────────────────
+# 정신차리자 structured_data 계약 검증
+# (REPORTING_SYSTEM_DESIGN.md §3.3 / WORKFLOW_4 §A~§K 반영)
+# ──────────────────────────────────────────────────────────────
+
+class TestWakeUpStructuredData:
+    """R-7 정신차리자 alice structured_data 필수 키 계약."""
+
+    def _alice_analysis(self, data: dict):
+        return _make_analysis(agent_name="alice", structured_data=data)
+
+    def test_wu01_optimal_params_and_diff_present(self):
+        """§I 역산: optimal_params / optimal_pnl / actual_vs_optimal_diff_pct 존재."""
+        data = {
+            "cause": "EXIT_TIMING",
+            "confidence": 0.8,
+            "optimal_params": {"stop_loss_pct": 1.5, "trailing_stop_atr_initial": 2.0},
+            "optimal_pnl": 2500,
+            "actual_vs_optimal_diff_pct": -4.3,
+        }
+        a = self._alice_analysis(data)
+        sd = a.structured_data
+        assert "optimal_params" in sd
+        assert "optimal_pnl" in sd
+        assert "actual_vs_optimal_diff_pct" in sd
+        assert isinstance(sd["optimal_params"], dict)
+
+    def test_wu02_root_cause_codes_is_list(self):
+        """§J 근본 원인: root_cause_codes는 리스트, root_cause_detail은 문자열."""
+        data = {
+            "root_cause_codes": ["ENTRY_TIMING", "INFO_GAP"],
+            "root_cause_detail": "EMA 기울기가 약한데 진입. 당시 금리 발표 직전이라 변동성 일시 확대.",
+        }
+        a = self._alice_analysis(data)
+        sd = a.structured_data
+        assert isinstance(sd["root_cause_codes"], list)
+        assert len(sd["root_cause_codes"]) >= 1
+        assert isinstance(sd["root_cause_detail"], str)
+        assert len(sd["root_cause_detail"]) > 10
+
+    def test_wu03_action_items_structure(self):
+        """§K 액션 아이템: who / action / when / done_when / status 필수 키."""
+        required_keys = {"who", "action", "when", "done_when", "status"}
+        data = {
+            "action_items": [
+                {
+                    "who": "파라미터 조정",
+                    "action": "ema_slope_entry_min 0.05→0.10 변경",
+                    "when": "다음 체제 점검",
+                    "done_when": "백테스트 WR +3%p 이상",
+                    "status": "pending",
+                }
+            ]
+        }
+        a = self._alice_analysis(data)
+        for item in a.structured_data["action_items"]:
+            assert required_keys.issubset(item.keys()), f"누락 키: {required_keys - item.keys()}"
+
+    def test_wu04_overfit_risk_valid_values(self):
+        """overfit_risk는 low / medium / high 중 하나."""
+        valid = {"low", "medium", "high"}
+        for risk in valid:
+            data = {"overfit_risk": risk}
+            a = self._alice_analysis(data)
+            assert a.structured_data["overfit_risk"] in valid
+
+    def test_wu05_full_section_ijk_payload_accepted(self):
+        """§I + §J + §K 전체가 한 structured_data에 공존 가능."""
+        data = {
+            "cause": "REGIME_MISMATCH",
+            "confidence": 0.7,
+            "optimal_params": {"ema_period": 12},
+            "optimal_pnl": 1800,
+            "actual_vs_optimal_diff_pct": -3.1,
+            "root_cause_codes": ["REGIME_MISMATCH", "PARAM_SUBOPTIMAL"],
+            "root_cause_detail": "체제 불확실 상태에서 진입. 당시 regime API가 ranging 판정했지만 실제 unclear 구간.",
+            "action_items": [
+                {"who": "앨리스", "action": "체제 confidence 임계값 검토",
+                 "when": "주간 브리핑 전", "done_when": "WF 재검증 완료", "status": "pending"}
+            ],
+            "overfit_risk": "medium",
+        }
+        a = self._alice_analysis(data)
+        sd = a.structured_data
+        # 세 섹션 전부 접근 가능
+        assert sd["optimal_params"] is not None
+        assert len(sd["root_cause_codes"]) >= 1
+        assert len(sd["action_items"]) >= 1

@@ -68,43 +68,4 @@ CREATE INDEX IF NOT EXISTS idx_agent_analysis_report
 CREATE INDEX IF NOT EXISTS idx_agent_analysis_agent
     ON agent_analysis (agent_name);
 
--- 3. agent_reflection — 미활용 데이터 발굴 반성 사이클
-CREATE TABLE IF NOT EXISTS agent_reflection (
-    id              SERIAL PRIMARY KEY,
-    reflection_date DATE        NOT NULL,
-    agent_name      VARCHAR(50) NOT NULL,   -- 'alice', 'samantha', 'rachel'
-    period_type     VARCHAR(20) NOT NULL,   -- 'short' (1주), 'medium' (2주), 'long' (1달)
-    period_start    DATE,
-    period_end      DATE,
-
-    -- 단계 ①: 미고려 데이터 발굴
-    -- [{"indicator": "RSI divergence", "impact": "진입 2H 지연", "pair": "USD_JPY"}, ...]
-    missed_data     JSONB,
-
-    -- 단계 ②: 기존 데이터 가공/활용 개선
-    -- [{"current": "EMA slope 절대값", "proposed": "가속도(2차미분)", "expected_gain": "..."}, ...]
-    data_improvement JSONB,
-
-    -- 단계 ③: 유효했던 판단 고정
-    -- [{"decision": "pct=50 전환", "evidence": "WF 검증 통과", "keep": true}, ...]
-    effective_decisions JSONB,
-
-    -- 다음 액션 (추적용)
-    -- [{"action": "RSI divergence 추가", "deadline": "2026-04-08", "done": false}, ...]
-    action_items    JSONB,
-
-    -- 전략별 성과 평가
-    -- {"trend_following": {"wins": 5, "losses": 2, "pnl_pct": 3.2}, ...}
-    strategy_performance JSONB,
-
-    created_at      TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
-
-    CONSTRAINT uq_agent_reflection UNIQUE (reflection_date, agent_name, period_type)
-);
-
-CREATE INDEX IF NOT EXISTS idx_reflection_date
-    ON agent_reflection (reflection_date DESC);
-CREATE INDEX IF NOT EXISTS idx_reflection_agent
-    ON agent_reflection (agent_name);
-
 COMMIT;

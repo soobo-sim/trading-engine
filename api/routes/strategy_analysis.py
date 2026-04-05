@@ -1,14 +1,10 @@
 """
-Strategy Analysis API — 분석 보고 + 에이전트 분석 + 반성 사이클 CRUD.
+Strategy Analysis API — 분석 보고 + 에이전트 분석 CRUD.
 
 POST   /api/strategy-analysis/reports           — 보고 생성 (analyses 동시 저장)
 GET    /api/strategy-analysis/reports/latest    — 통화별 최신 보고 1건씩
 GET    /api/strategy-analysis/reports           — 보고 목록
 GET    /api/strategy-analysis/reports/{id}      — 보고 상세
-
-POST   /api/strategy-analysis/reflections       — 반성 저장
-GET    /api/strategy-analysis/reflections       — 반성 목록
-GET    /api/strategy-analysis/reflections/{id}  — 반성 상세
 
 설계서: trader-common/solution-design/STRATEGY_ANALYSIS_SYSTEM.md §2~3
 """
@@ -76,33 +72,6 @@ class ReportCreate(BaseModel):
     def validate_final_decision(cls, v: Optional[str]) -> Optional[str]:
         if v is not None and v not in svc.VALID_DECISIONS:
             raise ValueError(f"final_decision must be one of {sorted(svc.VALID_DECISIONS)}")
-        return v
-
-
-class ReflectionCreate(BaseModel):
-    reflection_date: date
-    agent_name: str = Field(..., description="'alice' | 'samantha' | 'rachel'")
-    period_type: str = Field(..., description="'short' | 'medium' | 'long'")
-    period_start: Optional[date] = None
-    period_end: Optional[date] = None
-    missed_data: Optional[list[dict]] = None
-    data_improvement: Optional[list[dict]] = None
-    effective_decisions: Optional[list[dict]] = None
-    action_items: Optional[list[dict]] = None
-    strategy_performance: Optional[dict] = None
-
-    @field_validator("agent_name")
-    @classmethod
-    def validate_agent_name(cls, v: str) -> str:
-        if v not in svc.VALID_AGENT_NAMES:
-            raise ValueError(f"agent_name must be one of {sorted(svc.VALID_AGENT_NAMES)}")
-        return v
-
-    @field_validator("period_type")
-    @classmethod
-    def validate_period_type(cls, v: str) -> str:
-        if v not in svc.VALID_PERIOD_TYPES:
-            raise ValueError(f"period_type must be one of {sorted(svc.VALID_PERIOD_TYPES)}")
         return v
 
 
@@ -196,74 +165,3 @@ async def get_report(
         raise HTTPException(404, {"blocked_code": "REPORT_NOT_FOUND"})
     return data
 
-
-# ──────────────────────────────────────────────────────────────
-# 반성 엔드포인트
-# ──────────────────────────────────────────────────────────────
-
-@router.post("/reflections", status_code=201, summary="반성 사이클 저장")
-async def create_reflection(
-    body: ReflectionCreate,
-    db: AsyncSession = Depends(get_db),
-):
-    try:
-        return await svc.create_reflection(
-            reflection_date=body.reflection_date,
-            agent_name=body.agent_name,
-            period_type=body.period_type,
-            period_start=body.period_start,
-            period_end=body.period_end,
-            missed_data=body.missed_data,
-            data_improvement=body.data_improvement,
-            effective_decisions=body.effective_decisions,
-            action_items=body.action_items,
-            strategy_performance=body.strategy_performance,
-            db=db,
-        )
-    except IntegrityError:
-        await db.rollback()
-        raise HTTPException(
-            409,
-            {
-                "blocked_code": "DUPLICATE_REFLECTION",
-                "detail": "동일 reflection_date/agent_name/period_type 반성이 이미 존재합니다.",
-            },
-        )
-
-
-@router.get("/reflections", summary="반성 목록")
-async def list_reflections(
-    agent_name: Optional[str] = Query(None, description="에이전트 필터: alice|samantha|rachel"),
-    period_type: Optional[str] = Query(None, description="기간 유형 필터: short|medium|long"),
-    limit: int = Query(50, ge=1, le=200),
-    db: AsyncSession = Depends(get_db),
-):
-    if agent_name and agent_name not in svc.VALID_AGENT_NAMES:
-        raise HTTPException(
-            400,
-            {"blocked_code": "INVALID_AGENT_NAME", "valid": sorted(svc.VALID_AGENT_NAMES)},
-        )
-    if period_type and period_type not in svc.VALID_PERIOD_TYPES:
-        raise HTTPException(
-            400,
-            {"blocked_code": "INVALID_PERIOD_TYPE", "valid": sorted(svc.VALID_PERIOD_TYPES)},
-        )
-    return await svc.list_reflections(
-        agent_name=agent_name,
-        period_type=period_type,
-        limit=limit,
-        db=db,
-    )
-
-
-@router.get("/reflections/{reflection_id}", summary="반성 상세")
-async def get_reflection(
-    reflection_id: int,
-    db: AsyncSession = Depends(get_db),
-):
-    if reflection_id <= 0:
-        raise HTTPException(400, {"blocked_code": "INVALID_REFLECTION_ID"})
-    data = await svc.get_reflection(reflection_id=reflection_id, db=db)
-    if data is None:
-        raise HTTPException(404, {"blocked_code": "REFLECTION_NOT_FOUND"})
-    return data

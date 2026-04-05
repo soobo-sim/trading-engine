@@ -902,38 +902,6 @@ class AgentAnalysis(Base):
         )
 
 
-class AgentReflection(Base):
-    """에이전트 미활용 데이터 발굴 반성 사이클 — 단기/중기/장기."""
-
-    __tablename__ = "agent_reflection"
-    __table_args__ = (
-        Index("idx_reflection_date", "reflection_date"),
-        Index("idx_reflection_agent", "agent_name"),
-        UniqueConstraint("reflection_date", "agent_name", "period_type",
-                         name="uq_agent_reflection"),
-        {"extend_existing": True},
-    )
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    reflection_date = Column(Date, nullable=False)
-    agent_name = Column(String(50), nullable=False)         # 'alice', 'samantha', 'rachel'
-    period_type = Column(String(20), nullable=False)        # 'short', 'medium', 'long'
-    period_start = Column(Date, nullable=True)
-    period_end = Column(Date, nullable=True)
-    missed_data = Column(JSON, nullable=True)               # 단계①: 미고려 데이터 발굴
-    data_improvement = Column(JSON, nullable=True)          # 단계②: 기존 데이터 활용 개선
-    effective_decisions = Column(JSON, nullable=True)       # 단계③: 유효 판단 고정
-    action_items = Column(JSON, nullable=True)              # 다음 액션 (추적용)
-    strategy_performance = Column(JSON, nullable=True)      # 전략별 성과 평가
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-
-    def __repr__(self) -> str:
-        return (
-            f"<AgentReflection(id={self.id}, date={self.reflection_date!r}, "
-            f"agent={self.agent_name!r}, period={self.period_type!r})>"
-        )
-
-
 # ──────────────────────────────────────────────────────────────
 # Paper Trading 기록 (공유 테이블, prefix 없음)
 # 설계서: trader-common/solution-design/ALPHA_FACTORS_PROPOSAL.md §15.3

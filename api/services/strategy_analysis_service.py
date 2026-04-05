@@ -13,7 +13,7 @@ from sqlalchemy import desc, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from adapters.database.models import AgentAnalysis, AgentReflection, AnalysisReport
+from adapters.database.models import AgentAnalysis, AnalysisReport
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +22,6 @@ _CHART_OFFSETS: dict[str, int] = {"daily": 7, "weekly": 14, "monthly": 30}
 
 VALID_REPORT_TYPES = frozenset({"daily", "weekly", "monthly"})
 VALID_AGENT_NAMES = frozenset({"alice", "samantha", "rachel"})
-VALID_PERIOD_TYPES = frozenset({"short", "medium", "long"})
 VALID_DECISIONS = frozenset({"approved", "rejected", "conditional", "hold"})
 
 
@@ -60,23 +59,6 @@ def _analysis_to_dict(a: AgentAnalysis) -> dict:
         "structured_data": a.structured_data,
         "full_text": a.full_text,
         "created_at": a.created_at.isoformat() if a.created_at else None,
-    }
-
-
-def _reflection_to_dict(r: AgentReflection) -> dict:
-    return {
-        "id": r.id,
-        "reflection_date": r.reflection_date.isoformat() if isinstance(r.reflection_date, date) else str(r.reflection_date),
-        "agent_name": r.agent_name,
-        "period_type": r.period_type,
-        "period_start": r.period_start.isoformat() if r.period_start else None,
-        "period_end": r.period_end.isoformat() if r.period_end else None,
-        "missed_data": r.missed_data,
-        "data_improvement": r.data_improvement,
-        "effective_decisions": r.effective_decisions,
-        "action_items": r.action_items,
-        "strategy_performance": r.strategy_performance,
-        "created_at": r.created_at.isoformat() if r.created_at else None,
     }
 
 
@@ -240,67 +222,4 @@ async def get_latest_reports(exchange: str, db: AsyncSession) -> list[dict]:
     return [_report_to_dict(r, include_analyses=True) for r in reports]
 
 
-# ──────────────────────────────────────────────────────────────
-# 반성 사이클 (AgentReflection)
-# ──────────────────────────────────────────────────────────────
 
-async def create_reflection(
-    reflection_date: date,
-    agent_name: str,
-    period_type: str,
-    period_start: Optional[date],
-    period_end: Optional[date],
-    missed_data: Optional[list],
-    data_improvement: Optional[list],
-    effective_decisions: Optional[list],
-    action_items: Optional[list],
-    strategy_performance: Optional[dict],
-    db: AsyncSession,
-) -> dict:
-    """반성 사이클 저장."""
-    reflection = AgentReflection(
-        reflection_date=reflection_date,
-        agent_name=agent_name,
-        period_type=period_type,
-        period_start=period_start,
-        period_end=period_end,
-        missed_data=missed_data,
-        data_improvement=data_improvement,
-        effective_decisions=effective_decisions,
-        action_items=action_items,
-        strategy_performance=strategy_performance,
-    )
-    db.add(reflection)
-    await db.commit()
-    await db.refresh(reflection)
-    return _reflection_to_dict(reflection)
-
-
-async def list_reflections(
-    agent_name: Optional[str],
-    period_type: Optional[str],
-    limit: int,
-    db: AsyncSession,
-) -> list[dict]:
-    """반성 목록 (reflection_date DESC)."""
-    stmt = (
-        select(AgentReflection)
-        .order_by(desc(AgentReflection.reflection_date))
-        .limit(limit)
-    )
-    if agent_name:
-        stmt = stmt.where(AgentReflection.agent_name == agent_name)
-    if period_type:
-        stmt = stmt.where(AgentReflection.period_type == period_type)
-
-    result = await db.execute(stmt)
-    return [_reflection_to_dict(r) for r in result.scalars().all()]
-
-
-async def get_reflection(reflection_id: int, db: AsyncSession) -> Optional[dict]:
-    """반성 상세."""
-    result = await db.execute(
-        select(AgentReflection).where(AgentReflection.id == reflection_id)
-    )
-    r = result.scalar_one_or_none()
-    return _reflection_to_dict(r) if r else None
