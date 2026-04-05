@@ -173,12 +173,32 @@ class TestHealthChecker:
         assert report.ws_connected is True
 
     @pytest.mark.asyncio
-    async def test_unhealthy_ws_disconnected(self, app_state, adapter):
-        """WS 끊기면 healthy=False."""
+    async def test_unhealthy_ws_disconnected(self, app_state, adapter, db_session):
+        """활성 전략 있음 + WS 끊김 → healthy=False."""
+        session, factory = db_session
+        st = HlthStrategy(
+            name="active_strategy_for_ws_test",
+            description="WS test",
+            parameters={"pair": "xrp_jpy", "trading_style": "trend_following"},
+            rationale="test",
+            status="active",
+        )
+        session.add(st)
+        await session.commit()
+
         await adapter.close()
         report = await app_state.health_checker.check()
         assert report.healthy is False
         assert any("ws" in i for i in report.issues)
+
+    @pytest.mark.asyncio
+    async def test_ws_disconnected_no_strategy_is_healthy(self, app_state, adapter):
+        """활성 전략 없음 + WS 끊김 → healthy=True, ws_status=n/a."""
+        await adapter.close()
+        report = await app_state.health_checker.check()
+        assert report.healthy is True
+        assert not any("ws: 연결 끊김" in i for i in report.issues)
+        assert report.ws_status == "n/a (no active strategy)"
 
     @pytest.mark.asyncio
     async def test_unhealthy_dead_task(self, app_state):
@@ -260,7 +280,19 @@ class TestSystemRoute:
         assert data["healthy"] is True
 
     @pytest.mark.asyncio
-    async def test_health_503_when_ws_down(self, app_state, adapter):
+    async def test_health_503_when_ws_down(self, app_state, adapter, db_session):
+        """활성 전략 있음 + WS 끊김 → 503."""
+        session, factory = db_session
+        st = HlthStrategy(
+            name="active_strategy_for_503_test",
+            description="503 test",
+            parameters={"pair": "xrp_jpy", "trading_style": "trend_following"},
+            rationale="test",
+            status="active",
+        )
+        session.add(st)
+        await session.commit()
+
         await adapter.close()
         app = _create_test_app(app_state)
         transport = ASGITransport(app=app)
