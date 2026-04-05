@@ -574,7 +574,8 @@ def _run_box_backtest(
         # ── D-5: FX 주말 청산 시뮬레이션 ──
         if is_fx and current_position is not None:
             candle_time = _candle_time(current_candle)
-            if should_close_for_weekend(candle_time):
+            weekend_close_enabled = params.get("weekend_close", True)
+            if weekend_close_enabled and should_close_for_weekend(candle_time):
                 exit_price = _apply_slippage(
                     current_price, "sell" if current_position.side == "buy" else "buy",
                     config.slippage_pct,

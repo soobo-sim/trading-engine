@@ -365,6 +365,61 @@ class GmoFxAdapter:
             raw=data,
         )
 
+    async def close_order_stop(
+        self,
+        symbol: str,
+        side: str,
+        position_id: int,
+        size: int,
+        trigger_price: float,
+    ) -> Order:
+        """
+        역지정(STOP) 결제 주문. 거래소 자체 SL 등록용.
+
+        POST /private/v1/closeOrder
+        executionType=STOP + stopPrice 사용.
+        """
+        payload: dict[str, Any] = {
+            "symbol": symbol.upper(),
+            "side": side.upper(),
+            "executionType": "STOP",
+            "stopPrice": str(trigger_price),
+            "settlePosition": [
+                {"positionId": position_id, "size": str(size)},
+            ],
+        }
+
+        sign_path = "/v1/closeOrder"
+        body_str = json.dumps(payload, separators=(",", ":"))
+        headers = self._get_auth_headers("POST", sign_path, body=body_str)
+        headers["Content-Type"] = "application/json"
+
+        try:
+            response = await self._post_with_rate_limit(
+                f"{self._private_url}{sign_path}", headers, body_str
+            )
+            data = response.json()
+            self._raise_for_exchange_error(response, data)
+        except (AuthenticationError, RateLimitError, ExchangeError):
+            raise
+        except httpx.HTTPError as e:
+            raise ConnectionError(f"GMO FX HTTP 오류: {e}") from e
+
+        result = data.get("data", [])
+        root_order_id = str(result[0].get("rootOrderId", "")) if result else ""
+
+        return Order(
+            order_id=root_order_id,
+            pair=symbol.lower(),
+            order_type=OrderType.SELL if side.upper() == "SELL" else OrderType.BUY,
+            side=OrderSide.SELL if side.upper() == "SELL" else OrderSide.BUY,
+            price=trigger_price,
+            amount=float(size),
+            status=OrderStatus.OPEN,
+            created_at=datetime.now(timezone.utc),
+            raw=data,
+        )
+
     async def cancel_order(self, order_id: str, pair: str = "") -> bool:
         """
         주문 취소.

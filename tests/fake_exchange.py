@@ -62,6 +62,7 @@ class FakeExchangeAdapter:
             keep_rate=999.0,
         )
         self._fx_positions: list[FxPosition] = []
+        self._stop_orders: dict[str, dict] = {}  # order_id → STOP 주문 정보
 
     # ── 거래소 식별 ─────────────────────────
 
@@ -134,6 +135,9 @@ class FakeExchangeAdapter:
         return order
 
     async def cancel_order(self, order_id: str, pair: str = "") -> bool:
+        if order_id in self._stop_orders:
+            del self._stop_orders[order_id]
+            return True
         if order_id in self._orders:
             old = self._orders[order_id]
             self._orders[order_id] = Order(
@@ -240,6 +244,35 @@ class FakeExchangeAdapter:
     def set_margin_trading(self, enabled: bool) -> None:
         """테스트에서 증거금 거래 모드 전환."""
         self._is_margin_trading = enabled
+
+    async def close_order_stop(
+        self,
+        symbol: str,
+        side: str,
+        position_id: int,
+        size: int,
+        trigger_price: float,
+    ) -> Order:
+        """FX 역지정(STOP) SL 주문 시뮬레이션."""
+        self._order_counter += 1
+        order_id = f"FAKE-STOP-{self._order_counter:06d}"
+        self._stop_orders[order_id] = {
+            "symbol": symbol,
+            "side": side,
+            "position_id": position_id,
+            "size": size,
+            "trigger_price": trigger_price,
+        }
+        return Order(
+            order_id=order_id,
+            pair=symbol.lower(),
+            order_type=OrderType.SELL if side.upper() == "SELL" else OrderType.BUY,
+            side=OrderSide.SELL if side.upper() == "SELL" else OrderSide.BUY,
+            price=None,
+            amount=float(size),
+            status=OrderStatus.OPEN,
+            created_at=datetime.now(timezone.utc),
+        )
 
     async def close_position(
         self, symbol: str, side: str, position_id: int, size: int,

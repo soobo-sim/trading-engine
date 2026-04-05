@@ -2006,3 +2006,523 @@ class TestBoxStrategyIdIsolation:
         box = await manager._get_active_box(pair)
         assert box is None
 
+
+# ══════════════════════════════════════════════
+# 테스트: 거래소 역지정주문 SL (Phase 1, T-1~T-10)
+# ══════════════════════════════════════════════
+
+class TestExchangeStopLoss:
+    """
+    Phase 1: 거래소 역지정주문 SL 이중 안전망 검증.
+
+    T-1: 진입 후 거래소 SL 등록
+    T-2: 서버 SL 발동 → 거래소 SL 취소
+    T-3: 거래소 SL 체결 → 서버 동기화
+    T-9: 이중 체결 방지 (서버 청산 전 SL 취소)
+    T-10: 현물(BF) 어댑터 → 역지정 미등록
+    """
+
+    @pytest_asyncio.fixture
+    async def fx_adapter(self):
+        adapter = FakeExchangeAdapter(initial_balances={"jpy": 1_000_000.0})
+        adapter.set_margin_trading(True)
+        adapter.set_ticker_price(150.0)
+        return adapter
+
+    @pytest_asyncio.fixture
+    async def fx_manager(self, fx_adapter, supervisor, db_session_factory):
+        return BoxMeanReversionManager(
+            adapter=fx_adapter,
+            supervisor=supervisor,
+            session_factory=db_session_factory,
+            candle_model=BxtCandle,
+            box_model=BxtBox,
+            box_position_model=BxtBoxPosition,
+            pair_column="pair",
+        )
+
+    @pytest.mark.asyncio
+    async def test_t1_exchange_sl_registered_after_fx_entry(
+        self, fx_manager, fx_adapter, db_session_factory,
+    ):
+        """T-1: FX 진입 직후 거래소 역지정주문 SL이 등록된다."""
+        from core.exchange.types import FxPosition
+
+        pair = "usd_jpy"
+        box_id = await insert_box(db_session_factory, pair, 155.0, 145.0)
+        box = await fx_manager._get_active_box(pair)
+
+        # get_positions() 응답 설정 (진입 직후 positionId 반환)
+        fx_adapter.set_fx_positions([
+            FxPosition(
+                product_code="USD_JPY", side="BUY", price=150.0, size=3000.0,
+                pnl=0, leverage=0, require_collateral=0,
+                swap_point_accumulate=0, sfd=0, position_id=12345,
+            ),
+        ])
+
+        params = {
+            "position_size_pct": 30.0,
+            "min_order_jpy": 500,
+            "leverage": 1,
+            "lot_unit": 1000,
+            "min_lot_size": 1000,
+            "stop_loss_pct": 1.5,
+        }
+        fx_manager._params[pair] = params
+
+        await fx_manager._open_position_market(pair, box, 150.0, params)
+
+        # 거래소 SL 주문이 등록됐는지 확인
+        assert pair in fx_manager._exchange_sl_orders
+        sl_order_id = fx_manager._exchange_sl_orders[pair]
+        assert sl_order_id is not None
+        assert sl_order_id in fx_adapter._stop_orders
+        # SL 가격 확인: 150 * (1 - 0.015) = 147.75
+        stop_info = fx_adapter._stop_orders[sl_order_id]
+        assert stop_info["trigger_price"] == pytest.approx(147.75, rel=1e-4)
+        assert stop_info["side"] == "SELL"
+        assert stop_info["position_id"] == 12345
+
+    @pytest.mark.asyncio
+    async def test_t2_server_sl_triggers_then_exchange_sl_cancelled(
+        self, fx_manager, fx_adapter, db_session_factory,
+    ):
+        """T-2: 서버 SL 발동(close_position_market) 시 거래소 SL이 취소된다."""
+        from core.exchange.types import FxPosition
+
+        pair = "usd_jpy"
+        box_id = await insert_box(db_session_factory, pair, 155.0, 145.0)
+        await fx_manager._record_open_position(
+            pair=pair, box_id=box_id,
+            entry_order_id="ORD-001", entry_price=150.0,
+            entry_amount=3000.0, entry_jpy=300000.0,
+            exchange_position_id="12345",
+        )
+        pos = await fx_manager._get_open_position(pair)
+        fx_adapter.set_fx_positions([
+            FxPosition(
+                product_code="USD_JPY", side="BUY", price=150.0, size=3000.0,
+                pnl=-4500, leverage=0, require_collateral=0,
+                swap_point_accumulate=0, sfd=0, position_id=12345,
+            ),
+        ])
+
+        # 거래소 SL 수동 등록 (마치 FX 진입 직후처럼)
+        fake_stop = await fx_adapter.close_order_stop(
+            symbol="USD_JPY", side="SELL", position_id=12345,
+            size=3000, trigger_price=147.75,
+        )
+        fx_manager._exchange_sl_orders[pair] = fake_stop.order_id
+        assert fake_stop.order_id in fx_adapter._stop_orders
+
+        fx_manager._params[pair] = {}
+        # 서버 SL 발동 (price_stop_loss)
+        await fx_manager._close_position_market(pair, pos, "price_stop_loss")
+
+        # 포지션 종료 확인
+        assert not await fx_manager._has_open_position(pair)
+        # 거래소 SL 주문이 취소됐는지 확인
+        assert pair not in fx_manager._exchange_sl_orders
+        assert fake_stop.order_id not in fx_adapter._stop_orders
+
+    @pytest.mark.asyncio
+    async def test_t3_exchange_sl_fires_server_syncs(
+        self, fx_manager, fx_adapter, db_session_factory,
+    ):
+        """T-3: 거래소 SL 체결 → 서버 포지션 동기화."""
+        pair = "usd_jpy"
+        box_id = await insert_box(db_session_factory, pair, 155.0, 145.0)
+        await fx_manager._record_open_position(
+            pair=pair, box_id=box_id,
+            entry_order_id="ORD-001", entry_price=150.0,
+            entry_amount=3000.0, entry_jpy=300000.0,
+            exchange_position_id="12345",
+        )
+
+        # 거래소 SL 등록 상태 시뮬레이션
+        fx_manager._exchange_sl_orders[pair] = "FAKE-STOP-000001"
+        # 거래소 포지션 없음 (SL이 이미 체결됨) — get_positions() 빈 목록
+        fx_adapter.set_fx_positions([])
+        fx_adapter.set_ticker_price(147.0)  # SL 체결가 근사
+
+        await fx_manager._sync_exchange_sl_status(pair)
+
+        # 서버 포지션 closed 처리됐는지 확인
+        assert not await fx_manager._has_open_position(pair)
+        assert pair not in fx_manager._exchange_sl_orders
+
+        # DB exit_reason 확인
+        async with db_session_factory() as db:
+            result = await db.execute(
+                select(BxtBoxPosition).where(BxtBoxPosition.status == "closed")
+            )
+            rec = result.scalars().first()
+            assert rec is not None
+            assert rec.exit_reason == "exchange_stop_loss"
+            assert float(rec.exit_price) == pytest.approx(147.0, rel=1e-4)
+
+    @pytest.mark.asyncio
+    async def test_t9_no_double_close_sl_cancelled_before_fx_close(
+        self, fx_manager, fx_adapter, db_session_factory,
+    ):
+        """T-9: 서버 청산 전 거래소 SL 취소 → 이중 체결 방지."""
+        from core.exchange.types import FxPosition
+
+        pair = "usd_jpy"
+        box_id = await insert_box(db_session_factory, pair, 155.0, 145.0)
+        await fx_manager._record_open_position(
+            pair=pair, box_id=box_id,
+            entry_order_id="ORD-001", entry_price=150.0,
+            entry_amount=3000.0, entry_jpy=300000.0,
+            exchange_position_id="12345",
+        )
+        pos = await fx_manager._get_open_position(pair)
+        fx_adapter.set_fx_positions([
+            FxPosition(
+                product_code="USD_JPY", side="BUY", price=150.0, size=3000.0,
+                pnl=1500, leverage=0, require_collateral=0,
+                swap_point_accumulate=0, sfd=0, position_id=12345,
+            ),
+        ])
+
+        # 거래소 SL 등록 상태
+        fake_stop = await fx_adapter.close_order_stop(
+            symbol="USD_JPY", side="SELL", position_id=12345,
+            size=3000, trigger_price=147.75,
+        )
+        fx_manager._exchange_sl_orders[pair] = fake_stop.order_id
+        fx_manager._params[pair] = {}
+
+        # near_upper_exit (익절 청산)
+        await fx_manager._close_position_market(pair, pos, "near_upper_exit")
+
+        assert not await fx_manager._has_open_position(pair)
+        # 거래소 SL이 취소됐는지 확인 (이중 체결 방지)
+        assert fake_stop.order_id not in fx_adapter._stop_orders
+
+    @pytest.mark.asyncio
+    async def test_t10_spot_adapter_no_exchange_sl(
+        self, manager, fake_adapter, db_session_factory,
+    ):
+        """T-10: 현물(BF) 어댑터에서는 거래소 SL 등록이 스킵된다."""
+        pair = "xrp_jpy"
+        box_id = await insert_box(db_session_factory, pair, 110.0, 90.0)
+        box = await manager._get_active_box(pair)
+        params = {
+            "position_size_pct": 10.0,
+            "min_order_jpy": 500,
+            "stop_loss_pct": 1.5,
+        }
+        manager._params[pair] = params
+
+        await manager._open_position_market(pair, box, 91.0, params)
+
+        # 현물이므로 거래소 SL 등록 없음
+        assert manager._exchange_sl_orders.get(pair) is None
+        assert len(fake_adapter._stop_orders) == 0
+
+    @pytest.mark.asyncio
+    async def test_exchange_sl_skipped_when_no_position_id(
+        self, fx_manager, fx_adapter, db_session_factory,
+    ):
+        """T-1 변형: exchange_position_id를 못 받으면 SL 등록 스킵 (graceful)."""
+        pair = "usd_jpy"
+        box_id = await insert_box(db_session_factory, pair, 155.0, 145.0)
+        box = await fx_manager._get_active_box(pair)
+
+        # get_positions() 빈 목록 → _find_exchange_position_id = None
+        fx_adapter.set_fx_positions([])
+        params = {
+            "position_size_pct": 10.0,
+            "min_order_jpy": 500,
+            "leverage": 1,
+            "lot_unit": 1000,
+            "min_lot_size": 1000,
+            "stop_loss_pct": 1.5,
+        }
+        fx_manager._params[pair] = params
+
+        # 오류 없이 진행돼야 함
+        await fx_manager._open_position_market(pair, box, 150.0, params)
+
+        assert fx_manager._exchange_sl_orders.get(pair) is None
+        assert len(fx_adapter._stop_orders) == 0
+
+    @pytest.mark.asyncio
+    async def test_sync_no_sl_order_skips_gracefully(
+        self, fx_manager, db_session_factory,
+    ):
+        """SL 등록 없으면 _sync_exchange_sl_status가 조용히 스킵."""
+        pair = "usd_jpy"
+        assert fx_manager._exchange_sl_orders.get(pair) is None
+        # 오류 없이 완료되어야 함
+        await fx_manager._sync_exchange_sl_status(pair)
+
+    @pytest.mark.asyncio
+    async def test_stop_cleans_exchange_sl_orders(self, fx_manager):
+        """stop() 호출 시 _exchange_sl_orders 정리."""
+        pair = "usd_jpy"
+        fx_manager._exchange_sl_orders[pair] = "FAKE-STOP-000001"
+        fx_manager._supervisor.stop_group = AsyncMock()
+
+        await fx_manager.stop(pair)
+        assert pair not in fx_manager._exchange_sl_orders
+
+    @pytest.mark.asyncio
+    async def test_t4_sl_price_correct_for_short(
+        self, fx_manager, fx_adapter, db_session_factory,
+    ):
+        """T-4: 숏 포지션 SL 가격이 entry_price * (1 + sl_pct/100)으로 등록된다."""
+        from core.exchange.types import FxPosition
+
+        pair = "usd_jpy"
+        box_id = await insert_box(db_session_factory, pair, 155.0, 145.0)
+        box = await fx_manager._get_active_box(pair)
+
+        fx_adapter.set_fx_positions([
+            FxPosition(
+                product_code="USD_JPY", side="SELL", price=155.0, size=2000.0,
+                pnl=0, leverage=0, require_collateral=0,
+                swap_point_accumulate=0, sfd=0, position_id=55555,
+            ),
+        ])
+
+        params = {
+            "position_size_pct": 20.0,
+            "min_order_jpy": 500,
+            "leverage": 1,
+            "lot_unit": 1000,
+            "min_lot_size": 1000,
+            "stop_loss_pct": 2.0,
+            "direction_mode": "both",
+        }
+        fx_manager._params[pair] = params
+        fx_adapter.set_ticker_price(155.0)
+
+        await fx_manager._open_position_market(pair, box, 155.0, params, direction="short")
+
+        sl_order_id = fx_manager._exchange_sl_orders.get(pair)
+        assert sl_order_id is not None
+        stop_info = fx_adapter._stop_orders[sl_order_id]
+        # 숏 SL: 155 * (1 + 0.02) = 158.1, side=BUY
+        assert stop_info["trigger_price"] == pytest.approx(158.1, rel=1e-4)
+        assert stop_info["side"] == "BUY"
+
+    @pytest.mark.asyncio
+    async def test_exchange_sl_register_failure_is_graceful(
+        self, fx_manager, fx_adapter, db_session_factory, caplog,
+    ):
+        """거래소 SL 등록 실패 시 graceful — 포지션은 정상 기록, 경고만 출력."""
+        import logging
+
+        pair = "usd_jpy"
+        box_id = await insert_box(db_session_factory, pair, 155.0, 145.0)
+        await fx_manager._record_open_position(
+            pair=pair, box_id=box_id,
+            entry_order_id="ORD-TEST", entry_price=150.0,
+            entry_amount=1000.0, entry_jpy=150000.0,
+            exchange_position_id="77777",
+        )
+
+        async def _raise(*args, **kwargs):
+            raise RuntimeError("STOP order not supported")
+
+        fx_adapter.close_order_stop = _raise
+
+        with caplog.at_level(logging.WARNING):
+            await fx_manager._register_exchange_stop_loss(
+                pair=pair, direction="long",
+                position_id=77777, size=1000, sl_price=147.75,
+            )
+
+        # 포지션은 여전히 open
+        assert await fx_manager._has_open_position(pair)
+        # 경고 로그 출력됨
+        warn_logs = [r for r in caplog.records if "SL 등록 실패" in r.message]
+        assert len(warn_logs) >= 1
+        # SL 주문 미등록
+        assert fx_manager._exchange_sl_orders.get(pair) is None
+
+
+# ══════════════════════════════════════════════
+# 테스트: weekend_close 파라미터화 (Phase 2, T-5/T-6/T-8)
+# ══════════════════════════════════════════════
+
+class TestWeekendCloseParam:
+    """
+    T-5: weekend_close=false → 금요일 미청산 (포지션 보유)
+    T-6: weekend_close=true  → 금요일 청산 (기존 동작, 하위 호환)
+    T-8: 백테스트 weekend_close 파라미터 동작 검증
+    """
+
+    @pytest_asyncio.fixture
+    async def fx_adapter(self):
+        adapter = FakeExchangeAdapter(initial_balances={"jpy": 1_000_000.0})
+        adapter.set_margin_trading(True)
+        adapter.set_ticker_price(150.0)
+        return adapter
+
+    @pytest_asyncio.fixture
+    async def fx_manager(self, fx_adapter, supervisor, db_session_factory):
+        return BoxMeanReversionManager(
+            adapter=fx_adapter,
+            supervisor=supervisor,
+            session_factory=db_session_factory,
+            candle_model=BxtCandle,
+            box_model=BxtBox,
+            box_position_model=BxtBoxPosition,
+            pair_column="pair",
+        )
+
+    @pytest.mark.asyncio
+    async def test_t5_weekend_close_false_does_not_close_position(
+        self, fx_manager, fx_adapter, db_session_factory,
+    ):
+        """T-5: weekend_close=false 시 금요일 마감에도 포지션 보유 유지."""
+        pair = "usd_jpy"
+        box_id = await insert_box(db_session_factory, pair, 155.0, 145.0)
+        await fx_manager._record_open_position(
+            pair=pair, box_id=box_id,
+            entry_order_id="ORD-001", entry_price=150.0,
+            entry_amount=3000.0,
+        )
+        fx_manager._params[pair] = {"weekend_close": False, "basis_timeframe": "4h"}
+
+        with patch(
+            "core.strategy.plugins.box_mean_reversion.manager.should_close_for_weekend",
+            return_value=True,
+        ), patch(
+            "core.strategy.plugins.box_mean_reversion.manager.is_fx_market_open",
+            return_value=False,
+        ):
+            await fx_manager._run_one_box_monitor_cycle(pair)
+
+        # weekend_close=false → 포지션 유지
+        assert await fx_manager._has_open_position(pair)
+
+    @pytest.mark.asyncio
+    async def test_t6_weekend_close_true_closes_position(
+        self, fx_manager, fx_adapter, db_session_factory,
+    ):
+        """T-6: weekend_close=true → 금요일 마감 시 기존 동작대로 청산."""
+        from core.exchange.types import FxPosition
+
+        pair = "usd_jpy"
+        box_id = await insert_box(db_session_factory, pair, 155.0, 145.0)
+        await fx_manager._record_open_position(
+            pair=pair, box_id=box_id,
+            entry_order_id="ORD-001", entry_price=150.0,
+            entry_amount=3000.0, entry_jpy=300000.0,
+            exchange_position_id="99001",
+        )
+        fx_adapter.set_fx_positions([
+            FxPosition(
+                product_code="USD_JPY", side="BUY", price=150.0, size=3000.0,
+                pnl=0, leverage=0, require_collateral=0,
+                swap_point_accumulate=0, sfd=0, position_id=99001,
+            ),
+        ])
+        fx_manager._params[pair] = {"weekend_close": True, "basis_timeframe": "4h"}
+
+        with patch(
+            "core.strategy.plugins.box_mean_reversion.manager.should_close_for_weekend",
+            return_value=True,
+        ), patch(
+            "core.strategy.plugins.box_mean_reversion.manager.minutes_until_market_close",
+            return_value=60,
+        ):
+            await fx_manager._run_one_box_monitor_cycle(pair)
+
+        # weekend_close=true → 청산됨
+        assert not await fx_manager._has_open_position(pair)
+
+    @pytest.mark.asyncio
+    async def test_t6_weekend_close_default_true(
+        self, fx_manager, fx_adapter, db_session_factory,
+    ):
+        """T-6 변형: weekend_close 파라미터 미설정(기본값 True) → 기존 동작."""
+        from core.exchange.types import FxPosition
+
+        pair = "usd_jpy"
+        box_id = await insert_box(db_session_factory, pair, 155.0, 145.0)
+        await fx_manager._record_open_position(
+            pair=pair, box_id=box_id,
+            entry_order_id="ORD-002", entry_price=150.0,
+            entry_amount=3000.0, entry_jpy=300000.0,
+            exchange_position_id="99002",
+        )
+        fx_adapter.set_fx_positions([
+            FxPosition(
+                product_code="USD_JPY", side="BUY", price=150.0, size=3000.0,
+                pnl=0, leverage=0, require_collateral=0,
+                swap_point_accumulate=0, sfd=0, position_id=99002,
+            ),
+        ])
+        # weekend_close 키 없음 → 기본값 True
+        fx_manager._params[pair] = {"basis_timeframe": "4h"}
+
+        with patch(
+            "core.strategy.plugins.box_mean_reversion.manager.should_close_for_weekend",
+            return_value=True,
+        ), patch(
+            "core.strategy.plugins.box_mean_reversion.manager.minutes_until_market_close",
+            return_value=30,
+        ):
+            await fx_manager._run_one_box_monitor_cycle(pair)
+
+        assert not await fx_manager._has_open_position(pair)
+
+    def test_t8_backtest_weekend_close_false_no_weekend_close_trades(self):
+        """T-8: 백테스트 weekend_close=false → weekend_close exit_reason 거래 없음."""
+        from dataclasses import dataclass as _dc
+
+        @_dc
+        class _FakeCandleBT:
+            open: float
+            high: float
+            low: float
+            close: float
+            open_time: datetime
+            volume: float = 100.0
+            tick_count: int = 100
+            is_complete: bool = True
+
+        from core.backtest.engine import run_backtest, BacktestConfig
+
+        # Mon 2026-01-05 07:00 JST = 2026-01-04 22:00 UTC
+        t0 = datetime(2026, 1, 4, 22, 0, 0, tzinfo=timezone.utc)
+        candles = []
+        for i in range(70):
+            t = t0 + timedelta(hours=4 * i)
+            if i % 2 == 0:
+                candles.append(_FakeCandleBT(open=150.0, high=155.0, low=149.0, close=154.0, open_time=t))
+            else:
+                candles.append(_FakeCandleBT(open=150.0, high=151.0, low=145.0, close=145.5, open_time=t))
+
+        base_params = {
+            "exchange_type": "fx",
+            "box_tolerance_pct": 2.0,
+            "box_min_touches": 3,
+            "box_lookback_candles": 20,
+            "near_bound_pct": 2.0,
+            "stop_loss_pct": 1.5,
+            "position_size_pct": 50.0,
+        }
+        config = BacktestConfig(initial_capital_jpy=1_000_000, fee_pct=0.0, slippage_pct=0.0)
+
+        result_no = run_backtest(
+            candles, {**base_params, "weekend_close": False}, config,
+            strategy_type="box_mean_reversion",
+        )
+        result_yes = run_backtest(
+            candles, {**base_params, "weekend_close": True}, config,
+            strategy_type="box_mean_reversion",
+        )
+
+        wc_no = [t for t in result_no.trades if t.exit_reason == "weekend_close"]
+        wc_yes = [t for t in result_yes.trades if t.exit_reason == "weekend_close"]
+
+        assert len(wc_no) == 0, f"weekend_close=false인데 주말 청산 거래가 있음"
+        assert len(wc_yes) >= 1, f"weekend_close=true인데 주말 청산 거래가 없음"
+

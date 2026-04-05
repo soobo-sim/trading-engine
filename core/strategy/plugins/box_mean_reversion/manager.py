@@ -100,6 +100,8 @@ class BoxMeanReversionManager:
         self._snapshot_collector: Optional[Any] = snapshot_collector  # P-1 트리거 훅
         # pair → PaperExecutor (proposed 전략 전용). active 전략은 이 dict에 없음.
         self._paper_executors: Dict[str, PaperExecutor] = {}
+        # pair → 거래소 SL 주문 ID (None = 미등록 or 취소됨)
+        self._exchange_sl_orders: Dict[str, Optional[str]] = {}
 
         # pair → strategy_id (None = active 전략, N = paper/proposed 전략)
         # _get_active_box / _detect_and_create_box에서 박스 격리에 사용
@@ -181,6 +183,7 @@ class BoxMeanReversionManager:
         self._cached_position.pop(pair, None)
         self._last_invalidation_time.pop(pair, None)
         self._paper_executors.pop(pair, None)
+        self._exchange_sl_orders.pop(pair, None)
         logger.info(f"[BoxMgr] {pair}: 박스 인프라 태스크 종료")
 
     def is_running(self, pair: str) -> bool:
@@ -229,18 +232,24 @@ class BoxMeanReversionManager:
         """_box_monitor 한 사이클 실행 (테스트·리팩토링 공유용)."""
         params = self._params.get(pair, {})
         basis_tf = params.get("basis_timeframe", "4h")
-
-        # ── 주말 자동 청산 (FX 전용) ───────────────────
         is_fx = getattr(self._adapter, "is_margin_trading", False)
+
+        # ── 거래소 SL 체결 감지 + 동기화 (FX 전용) ──────────────────
+        if is_fx:
+            await self._sync_exchange_sl_status(pair)
+
+        # ── 주말 자동 청산 (FX 전용) ───────────────────────────────
+        weekend_close_enabled = params.get("weekend_close", True)
         if is_fx and should_close_for_weekend():
-            pos = await self._get_open_position(pair)
-            if pos:
-                mins = minutes_until_market_close()
-                logger.warning(
-                    f"[BoxMgr] {pair}: 주말 마감 임박 (잔여 {mins}분) → 자동 청산"
-                )
-                await self._close_position_market(pair, pos, "weekend_close")
-            return  # 주말에는 캔들/박스 감지 불필요
+            if weekend_close_enabled:
+                pos = await self._get_open_position(pair)
+                if pos:
+                    mins = minutes_until_market_close()
+                    logger.warning(
+                        f"[BoxMgr] {pair}: 주말 마감 임박 (잔여 {mins}분) → 자동 청산"
+                    )
+                    await self._close_position_market(pair, pos, "weekend_close")
+            return  # 주말에는 캔들/박스 감지 불필요 (weekend_close 여부 무관)
 
         # ── FX 시장 휴장 시 스킵 ──────────────────────
         if is_fx and not is_fx_market_open():
@@ -739,6 +748,22 @@ class BoxMeanReversionManager:
                     exchange_position_id=exchange_position_id,
                     direction=direction,
                 )
+
+                # 거래소 역지정주문 SL 등록 (FX, real trade, positionId 확보 시에만)
+                if exchange_position_id is not None:
+                    sl_pct = float(params.get("stop_loss_pct", 1.5))
+                    sl_price = (
+                        exec_price * (1 - sl_pct / 100)
+                        if direction == "long"
+                        else exec_price * (1 + sl_pct / 100)
+                    )
+                    await self._register_exchange_stop_loss(
+                        pair=pair,
+                        direction=direction,
+                        position_id=int(exchange_position_id),
+                        size=int(exec_amount),
+                        sl_price=sl_price,
+                    )
             else:
                 # 현물: 항상 롱(MARKET_BUY). is_margin=False 시 direction=long 강제.
                 order = await self._get_executor(pair).place_order(
@@ -815,6 +840,8 @@ class BoxMeanReversionManager:
             is_margin = getattr(self._adapter, "is_margin_trading", False)
 
             if is_margin:
+                # 서버가 먼저 청산 → 거래소 SL 취소 (중복 체결 방지)
+                await self._cancel_exchange_stop_loss(pair)
                 await self._close_position_market_fx(pair, pos, reason)
             else:
                 await self._close_position_market_spot(pair, pos, reason)
@@ -947,6 +974,91 @@ class BoxMeanReversionManager:
             f"reason={reason} positionId={position_id} "
             f"order_id={order.order_id} price={exec_price}"
         )
+
+    # ──────────────────────────────────────────
+    # 거래소 역지정주문 SL 관리 (FX 전용)
+    # ──────────────────────────────────────────
+
+    async def _register_exchange_stop_loss(
+        self, pair: str, direction: str, position_id: int, size: int, sl_price: float,
+    ) -> None:
+        """거래소에 역지정(STOP) SL 주문 등록. FX + real trade 전용.
+
+        이중 안전망: 서버 장애/WS 끊김 시에도 거래소가 직접 SL을 실행한다.
+        등록 실패 시 경고만 하고 서버 감시를 계속 유지한다.
+        """
+        try:
+            close_side = "SELL" if direction == "long" else "BUY"
+            symbol = pair.upper()
+            order = await self._adapter.close_order_stop(
+                symbol=symbol,
+                side=close_side,
+                position_id=position_id,
+                size=size,
+                trigger_price=sl_price,
+            )
+            self._exchange_sl_orders[pair] = order.order_id
+            logger.info(
+                f"[BoxMgr] {pair}: 거래소 SL 등록 완료 "
+                f"(order_id={order.order_id}, trigger={sl_price:.4f})"
+            )
+        except Exception as e:
+            logger.warning(f"[BoxMgr] {pair}: 거래소 SL 등록 실패 — {e} (서버 감시로 계속)")
+
+    async def _cancel_exchange_stop_loss(self, pair: str) -> None:
+        """거래소에 등록된 SL 주문 취소. 서버 SL 발동 또는 포지션 청산 시 호출."""
+        sl_order_id = self._exchange_sl_orders.pop(pair, None)
+        if sl_order_id:
+            try:
+                await self._adapter.cancel_order(sl_order_id, pair)
+                logger.info(f"[BoxMgr] {pair}: 거래소 SL 주문 취소 (order_id={sl_order_id})")
+            except Exception as e:
+                logger.warning(f"[BoxMgr] {pair}: 거래소 SL 취소 실패 — {e}")
+
+    async def _sync_exchange_sl_status(self, pair: str) -> None:
+        """거래소 SL 체결 감지 → DB 포지션 동기화 (60초 주기 모니터에서 호출).
+
+        거래소가 SL을 실행했는데 서버는 아직 open 상태인 경우를 감지하여
+        DB를 exchange_stop_loss 사유로 closed 처리한다.
+        """
+        if self._exchange_sl_orders.get(pair) is None:
+            return
+
+        pos = await self._get_open_position(pair)
+        if pos is None:
+            # 이미 서버에서 closed (서버 SL이 먼저 발동됨)
+            self._exchange_sl_orders.pop(pair, None)
+            return
+
+        try:
+            exchange_pid = getattr(pos, "exchange_position_id", None)
+            if not exchange_pid:
+                return
+            positions = await self._adapter.get_positions(pair.upper())
+            pid_int = int(exchange_pid)
+            still_open = any(p.position_id == pid_int for p in positions)
+            if not still_open:
+                # 거래소 SL 체결됨 → 서버 동기화
+                exec_price = 0.0
+                try:
+                    ticker = await self._adapter.get_ticker(pair)
+                    exec_price = ticker.last
+                except Exception:
+                    exec_price = float(pos.entry_price)
+                sl_order_id = self._exchange_sl_orders.pop(pair, None) or "exchange_sl"
+                await self._record_close_position(
+                    pair=pair,
+                    exit_order_id=sl_order_id,
+                    exit_price=exec_price,
+                    exit_amount=float(pos.entry_amount),
+                    exit_reason="exchange_stop_loss",
+                )
+                logger.info(
+                    f"[BoxMgr] {pair}: 거래소 SL 체결 감지 → 서버 동기화 완료 "
+                    f"(price≈{exec_price:.4f})"
+                )
+        except Exception as e:
+            logger.warning(f"[BoxMgr] {pair}: 거래소 SL 동기화 실패 — {e}")
 
     # ──────────────────────────────────────────
     # DB: 포지션 기록
