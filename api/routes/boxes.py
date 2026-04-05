@@ -396,4 +396,7 @@ def _box_pos_to_dict(row, pair_column: str, current_price: float | None = None) 
         "status": row.status,
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "closed_at": row.closed_at.isoformat() if row.closed_at else None,
+        "exchange_sl_order_id": getattr(row, "exchange_sl_order_id", None),
+        "exchange_sl_price": float(row.exchange_sl_price) if getattr(row, "exchange_sl_price", None) else None,
+        "exchange_sl_status": getattr(row, "exchange_sl_status", None),
     }

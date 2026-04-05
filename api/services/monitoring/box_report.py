@@ -222,6 +222,16 @@ def build_box_telegram_text(prefix: str, time_str: str, pair: str, data: dict) -
                     f"🛑 손절: 박스 무효화 ¥{inv_price:,.2f} (현재가 +{inv_pct:.1f}%) / "
                     f"가격SL ¥{sl_price:,.2f} (+{stop_loss_pct:.1f}%)"
                 )
+            # 거래소 SL 상태 (FX 전용: is_margin_trading=True)
+            if is_margin:
+                exchange_sl_status = pos.get("exchange_sl_status")
+                exchange_sl_price = pos.get("exchange_sl_price")
+                if exchange_sl_status == "registered" and exchange_sl_price:
+                    lines.append(f"🛡️ 거래소SL ¥{exchange_sl_price:,.2f} ✅등록")
+                elif exchange_sl_status == "failed":
+                    lines.append("🛡️ 거래소SL ❌등록실패")
+                else:
+                    lines.append("🛡️ 거래소SL ⚠️미등록")
     else:
         # ── 포지션 없음: 진입 대기 모드 (현행) ──
         met = data.get("conditions_met", 0)
@@ -476,6 +486,8 @@ async def generate_box_report(
             "unrealized_pnl_jpy": round(unrealized_pnl_jpy, 0),
             "unrealized_pnl_pct": round(unrealized_pnl_pct, 2),
             "stop_loss_price": float(pos_row.exit_price) if pos_row.exit_price else None,
+            "exchange_sl_price": float(pos_row.exchange_sl_price) if getattr(pos_row, "exchange_sl_price", None) else None,
+            "exchange_sl_status": getattr(pos_row, "exchange_sl_status", None),
         }
 
     # 5. 잔고 조회

@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from adapters.database.models import create_candle_model, create_box_model, create_box_position_model
@@ -2525,4 +2525,170 @@ class TestWeekendCloseParam:
 
         assert len(wc_no) == 0, f"weekend_close=false인데 주말 청산 거래가 있음"
         assert len(wc_yes) >= 1, f"weekend_close=true인데 주말 청산 거래가 없음"
+
+
+# ══════════════════════════════════════════════
+# 거래소 SL DB 영속화 + 복원 검증
+# ══════════════════════════════════════════════
+
+class TestExchangeSlDbPersistence:
+    """
+    T-1: 거래소 SL 등록 성공 → DB exchange_sl_status='registered' + order_id + price 저장
+    T-2: 거래소 SL 등록 실패 → DB exchange_sl_status='failed'
+    T-3: 거래소 SL 취소 → DB exchange_sl_status='cancelled'
+    T-8: start() 재시작 시 DB에서 exchange_sl_order_id 복원
+    """
+
+    @pytest_asyncio.fixture
+    async def fx_adapter(self):
+        adapter = FakeExchangeAdapter(initial_balances={"jpy": 1_000_000.0})
+        adapter.set_margin_trading(True)
+        adapter.set_ticker_price(150.0)
+        return adapter
+
+    @pytest_asyncio.fixture
+    async def fx_manager(self, fx_adapter, supervisor, db_session_factory):
+        return BoxMeanReversionManager(
+            adapter=fx_adapter,
+            supervisor=supervisor,
+            session_factory=db_session_factory,
+            candle_model=BxtCandle,
+            box_model=BxtBox,
+            box_position_model=BxtBoxPosition,
+            pair_column="pair",
+        )
+
+    @pytest.mark.asyncio
+    async def test_t1_register_sl_saves_to_db(
+        self, fx_manager, fx_adapter, db_session_factory,
+    ):
+        """T-1: 거래소 SL 등록 성공 → DB에 registered 상태 + order_id + price 저장."""
+        from core.exchange.types import FxPosition
+
+        pair = "usd_jpy"
+        box_id = await insert_box(db_session_factory, pair, 155.0, 145.0)
+        await fx_manager._record_open_position(
+            pair=pair, box_id=box_id,
+            entry_order_id="ORD-SL-001", entry_price=150.0,
+            entry_amount=3000.0, entry_jpy=300000.0,
+            exchange_position_id="12345",
+        )
+
+        await fx_manager._register_exchange_stop_loss(
+            pair=pair, direction="long", position_id=12345, size=3000, sl_price=147.75,
+        )
+
+        async with db_session_factory() as db:
+            result = await db.execute(
+                select(BxtBoxPosition).where(BxtBoxPosition.status == "open")
+            )
+            pos = result.scalar_one_or_none()
+            assert pos is not None
+            assert getattr(pos, "exchange_sl_status", None) == "registered"
+            assert getattr(pos, "exchange_sl_price", None) is not None
+            assert float(pos.exchange_sl_price) == pytest.approx(147.75, rel=1e-4)
+            assert getattr(pos, "exchange_sl_order_id", None) is not None
+
+    @pytest.mark.asyncio
+    async def test_t2_register_sl_failure_saves_failed(
+        self, fx_manager, fx_adapter, db_session_factory,
+    ):
+        """T-2: 거래소 SL 등록 API 실패 → DB exchange_sl_status='failed'."""
+        pair = "usd_jpy"
+        box_id = await insert_box(db_session_factory, pair, 155.0, 145.0)
+        await fx_manager._record_open_position(
+            pair=pair, box_id=box_id,
+            entry_order_id="ORD-SL-002", entry_price=150.0,
+            entry_amount=3000.0, entry_jpy=300000.0,
+            exchange_position_id="99999",
+        )
+
+        # close_order_stop를 항상 실패하도록 패치
+        from unittest.mock import AsyncMock
+        fx_adapter.close_order_stop = AsyncMock(side_effect=Exception("API timeout"))
+
+        await fx_manager._register_exchange_stop_loss(
+            pair=pair, direction="long", position_id=99999, size=3000, sl_price=147.75,
+        )
+
+        async with db_session_factory() as db:
+            result = await db.execute(
+                select(BxtBoxPosition).where(BxtBoxPosition.status == "open")
+            )
+            pos = result.scalar_one_or_none()
+            assert pos is not None
+            assert getattr(pos, "exchange_sl_status", None) == "failed"
+
+    @pytest.mark.asyncio
+    async def test_t3_cancel_sl_saves_cancelled(
+        self, fx_manager, fx_adapter, db_session_factory,
+    ):
+        """T-3: 거래소 SL 취소 → DB exchange_sl_status='cancelled'."""
+        from core.exchange.types import FxPosition
+
+        pair = "usd_jpy"
+        box_id = await insert_box(db_session_factory, pair, 155.0, 145.0)
+        await fx_manager._record_open_position(
+            pair=pair, box_id=box_id,
+            entry_order_id="ORD-SL-003", entry_price=150.0,
+            entry_amount=3000.0, entry_jpy=300000.0,
+            exchange_position_id="12345",
+        )
+        # SL 등록 상태 설정
+        fake_stop = await fx_adapter.close_order_stop(
+            symbol="USD_JPY", side="SELL", position_id=12345,
+            size=3000, trigger_price=147.75,
+        )
+        fx_manager._exchange_sl_orders[pair] = fake_stop.order_id
+        # DB에도 registered 상태 설정
+        await fx_manager._update_exchange_sl_db(
+            pair, status="registered", order_id=fake_stop.order_id, price=147.75,
+        )
+
+        await fx_manager._cancel_exchange_stop_loss(pair)
+
+        async with db_session_factory() as db:
+            result = await db.execute(
+                select(BxtBoxPosition).where(BxtBoxPosition.status == "open")
+            )
+            pos = result.scalar_one_or_none()
+            assert pos is not None
+            assert getattr(pos, "exchange_sl_status", None) == "cancelled"
+
+    @pytest.mark.asyncio
+    async def test_t8_start_restores_exchange_sl_from_db(
+        self, fx_manager, fx_adapter, db_session_factory,
+    ):
+        """T-8: start() 재시작 시 DB에서 exchange_sl_order_id 인메모리 복원."""
+        pair = "usd_jpy"
+        box_id = await insert_box(db_session_factory, pair, 155.0, 145.0)
+        await fx_manager._record_open_position(
+            pair=pair, box_id=box_id,
+            entry_order_id="ORD-SL-004", entry_price=150.0,
+            entry_amount=3000.0, entry_jpy=300000.0,
+            exchange_position_id="12345",
+        )
+        # DB에 registered 상태 직접 설정
+        async with db_session_factory() as db:
+            await db.execute(
+                update(BxtBoxPosition)
+                .where(BxtBoxPosition.status == "open")
+                .values(
+                    exchange_sl_order_id="STOP-PERSISTED-001",
+                    exchange_sl_price=147.75,
+                    exchange_sl_status="registered",
+                )
+            )
+            await db.commit()
+
+        # 인메모리에는 없는 상태
+        assert pair not in fx_manager._exchange_sl_orders
+
+        # start() 호출 — DB에서 복원
+        params = {"basis_timeframe": "4h"}
+        await fx_manager.start(pair, params)
+
+        assert fx_manager._exchange_sl_orders.get(pair) == "STOP-PERSISTED-001"
+
+        await fx_manager.stop(pair)
 

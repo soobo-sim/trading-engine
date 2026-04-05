@@ -160,6 +160,28 @@ class BoxMeanReversionManager:
         except Exception:
             self._prev_box_state[pair] = None
 
+        # 재시작 시 거래소 SL 주문 ID DB에서 복원 (인메모리 소실 방지)
+        try:
+            async with self._session_factory() as session:
+                BoxPos = self._box_position_model
+                pair_col = getattr(BoxPos, self._pair_column)
+                result = await session.execute(
+                    select(BoxPos.exchange_sl_order_id)
+                    .where(
+                        pair_col == pair,
+                        BoxPos.status == "open",
+                        BoxPos.exchange_sl_status == "registered",
+                    )
+                )
+                sl_id = result.scalar_one_or_none()
+                if sl_id:
+                    self._exchange_sl_orders[pair] = sl_id
+                    logger.info(
+                        f"[BoxMgr] {pair}: DB에서 거래소 SL 복원 (order_id={sl_id})"
+                    )
+        except Exception as e:
+            logger.warning(f"[BoxMgr] {pair}: 거래소 SL 복원 실패 — {e}")
+
         # 기존 태스크 정리
         await self._supervisor.stop_group(pair)
 
@@ -979,6 +1001,31 @@ class BoxMeanReversionManager:
     # 거래소 역지정주문 SL 관리 (FX 전용)
     # ──────────────────────────────────────────
 
+    async def _update_exchange_sl_db(
+        self, pair: str, *, status: str,
+        order_id: Optional[str] = None,
+        price: Optional[float] = None,
+    ) -> None:
+        """open 포지션의 exchange_sl 컬럼 갱신. 실패해도 매매 로직에 영향 없음."""
+        try:
+            async with self._session_factory() as session:
+                BoxPos = self._box_position_model
+                pair_col = getattr(BoxPos, self._pair_column)
+                values: dict = {"exchange_sl_status": status}
+                if order_id is not None:
+                    values["exchange_sl_order_id"] = order_id
+                if price is not None:
+                    values["exchange_sl_price"] = price
+                stmt = (
+                    update(BoxPos)
+                    .where(pair_col == pair, BoxPos.status == "open")
+                    .values(**values)
+                )
+                await session.execute(stmt)
+                await session.commit()
+        except Exception as e:
+            logger.warning(f"[BoxMgr] {pair}: exchange_sl DB 갱신 실패 — {e}")
+
     async def _register_exchange_stop_loss(
         self, pair: str, direction: str, position_id: int, size: int, sl_price: float,
     ) -> None:
@@ -1002,8 +1049,12 @@ class BoxMeanReversionManager:
                 f"[BoxMgr] {pair}: 거래소 SL 등록 완료 "
                 f"(order_id={order.order_id}, trigger={sl_price:.4f})"
             )
+            await self._update_exchange_sl_db(
+                pair, status="registered", order_id=order.order_id, price=sl_price
+            )
         except Exception as e:
             logger.warning(f"[BoxMgr] {pair}: 거래소 SL 등록 실패 — {e} (서버 감시로 계속)")
+            await self._update_exchange_sl_db(pair, status="failed")
 
     async def _cancel_exchange_stop_loss(self, pair: str) -> None:
         """거래소에 등록된 SL 주문 취소. 서버 SL 발동 또는 포지션 청산 시 호출."""
@@ -1012,6 +1063,7 @@ class BoxMeanReversionManager:
             try:
                 await self._adapter.cancel_order(sl_order_id, pair)
                 logger.info(f"[BoxMgr] {pair}: 거래소 SL 주문 취소 (order_id={sl_order_id})")
+                await self._update_exchange_sl_db(pair, status="cancelled")
             except Exception as e:
                 logger.warning(f"[BoxMgr] {pair}: 거래소 SL 취소 실패 — {e}")
 

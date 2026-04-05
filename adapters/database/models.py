@@ -428,6 +428,10 @@ def create_box_position_model(prefix: str, pair_column: str = "pair", order_id_l
         "closed_at": Column(DateTime(timezone=True), nullable=True),
         # 정신차리자 보고 자동화 (BUG-025)
         "loss_webhook_sent": Column(Boolean, nullable=False, server_default="false"),
+        # 거래소 역지정주문 SL 이중화 (DASHBOARD_EXCHANGE_SL_DISPLAY)
+        "exchange_sl_order_id": Column(String(40), nullable=True),
+        "exchange_sl_price": Column(Numeric(20, 6), nullable=True),
+        "exchange_sl_status": Column(String(20), nullable=True),  # registered/cancelled/executed/failed
         "__repr__": lambda self: (
             f"<{self.__class__.__name__}(box={self.box_id} status={self.status})>"
         ),
