@@ -87,6 +87,7 @@ class HealthReport:
     checked_at: str
     issues: list[str]
     ws_connected: bool
+    ws_status: str  # "connected" | "disconnected" | "n/a (no active strategy)"
     tasks: dict[str, dict]
     active_strategies: list[dict]
     position_balance: list[dict]
@@ -128,21 +129,25 @@ class HealthChecker(SafetyChecksMixin):
         issues: list[str] = []
         now = datetime.now(timezone.utc).isoformat()
 
-        # 1. WS 연결
+        # 1. 활성 전략 (WS 체크보다 먼저)
+        strategies = await self._get_active_strategies()
+        self._has_active_strategies = len(strategies) > 0
+
+        # 2. WS 연결 — 활성 전략 없으면 n/a (연결 불필요)
         ws_connected = self._adapter.is_ws_connected()
         if not ws_connected:
-            issues.append("ws: 연결 끊김")
+            if self._has_active_strategies:
+                issues.append("ws: 연결 끊김")
+            # else: 활성 전략 없음 → WS 미연결은 정상, issues에 추가 안 함
 
-        # 2. 태스크 상태
+        # 3. 태스크 상태
         task_health = self._supervisor.get_health()
         for name, info in task_health.items():
             if not info.get("alive", False):
                 last_err = info.get("last_error", "unknown")
                 issues.append(f"task[{name}]: 죽음 ({last_err})")
 
-        # 3. 활성 전략
-        strategies = await self._get_active_strategies()
-        self._has_active_strategies = len(strategies) > 0
+        # (활성 전략은 위에서 이미 조회)
 
         # 4. 포지션-잔고 정합성
         discrepancies = await self._check_position_balance_consistency()
@@ -158,11 +163,20 @@ class HealthChecker(SafetyChecksMixin):
         # safety critical → healthy=False
         healthy = len(issues) == 0 and safety.status != "critical"
 
+        # WS 상태 문자열 결정
+        if ws_connected:
+            ws_status = "connected"
+        elif not self._has_active_strategies:
+            ws_status = "n/a (no active strategy)"
+        else:
+            ws_status = "disconnected"
+
         return HealthReport(
             healthy=healthy,
             checked_at=now,
             issues=issues,
             ws_connected=ws_connected,
+            ws_status=ws_status,
             tasks=task_health,
             active_strategies=strategies,
             position_balance=discrepancies,
