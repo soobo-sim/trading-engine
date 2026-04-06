@@ -365,12 +365,17 @@ class GmoFxAdapter:
             raw=data,
         )
 
-    # GMO FX pair별 stopPrice 허용 소수점 자릿수
+    # GMO FX pair별 가격 소수점 허용 자릿수
     _STOP_PRICE_DECIMALS: dict[str, int] = {
         "USD_JPY": 3, "EUR_JPY": 3, "GBP_JPY": 3, "AUD_JPY": 3,
         "NZD_JPY": 3, "CAD_JPY": 3, "CHF_JPY": 3,
         "EUR_USD": 5, "GBP_USD": 5,
     }
+
+    def _round_price(self, pair: str, price: float) -> float:
+        """GMO FX 통화쌍별 소수점 자릿수 round. 모든 주문 가격 필드에 공용 사용."""
+        decimals = self._STOP_PRICE_DECIMALS.get(pair.upper(), 3)
+        return round(price, decimals)
 
     async def close_order_stop(
         self,
@@ -387,8 +392,7 @@ class GmoFxAdapter:
         executionType=STOP + stopPrice 사용.
         """
         # GMO FX 규격: stopPrice 소수점 자릿수 + size 정수 보장
-        decimals = self._STOP_PRICE_DECIMALS.get(symbol.upper(), 3)
-        rounded_price = round(trigger_price, decimals)
+        rounded_price = self._round_price(symbol, trigger_price)
         size_int = int(size)
 
         payload: dict[str, Any] = {
@@ -944,14 +948,13 @@ class GmoFxAdapter:
             "secondExecutionType": second_execution_type,
             "secondSize": str(second_size or size),
         }
-        if first_execution_type == "LIMIT" and first_price is not None:
-            payload["firstPrice"] = str(first_price)
-        if first_execution_type == "STOP" and first_price is not None:
-            payload["firstStopPrice"] = str(first_price)
+        # API 규격: firstPrice (LIMIT/STOP 공통 필드)
+        if first_price is not None:
+            payload["firstPrice"] = str(self._round_price(pair, first_price))
         if second_execution_type == "LIMIT" and second_price is not None:
-            payload["secondPrice"] = str(second_price)
+            payload["secondPrice"] = str(self._round_price(pair, second_price))
         if second_execution_type == "STOP" and second_price is not None:
-            payload["secondStopPrice"] = str(second_price)
+            payload["secondStopPrice"] = str(self._round_price(pair, second_price))
 
         sign_path = "/v1/ifdOrder"
         body_str = json.dumps(payload, separators=(",", ":"))
@@ -1000,14 +1003,13 @@ class GmoFxAdapter:
             "firstSize": str(size),
             "secondSize": str(second_size or size),
         }
-        if first_execution_type == "LIMIT" and first_price is not None:
-            payload["firstPrice"] = str(first_price)
-        if first_execution_type == "STOP" and first_price is not None:
-            payload["firstStopPrice"] = str(first_price)
+        # API 규격: firstPrice (LIMIT/STOP 공통 필드). firstStopPrice는 존재하지 않음.
+        if first_price is not None:
+            payload["firstPrice"] = str(self._round_price(pair, first_price))
         if take_profit_price is not None:
-            payload["secondLimitPrice"] = str(take_profit_price)
+            payload["secondLimitPrice"] = str(self._round_price(pair, take_profit_price))
         if stop_loss_price is not None:
-            payload["secondStopPrice"] = str(stop_loss_price)
+            payload["secondStopPrice"] = str(self._round_price(pair, stop_loss_price))
 
         sign_path = "/v1/ifoOrder"
         body_str = json.dumps(payload, separators=(",", ":"))
@@ -1027,6 +1029,37 @@ class GmoFxAdapter:
 
         result = data.get("data", [{}])
         return result[0] if result else data
+
+    async def get_orders_by_root(self, root_order_id: str) -> list[dict]:
+        """
+        rootOrderId로 전체 서브 주문 raw dict 조회. IFD-OCO 상태 폴링용.
+
+        GET /private/v1/orders?rootOrderId={id}
+
+        IFDOCO의 경우 list 3개 반환:
+          - settleType=OPEN: 1차 주문 (진입)
+          - settleType=CLOSE + executionType=LIMIT: 2차 TP
+          - settleType=CLOSE + executionType=STOP: 2차 SL
+
+        Returns:
+            list[dict] — raw dict 목록. 오류/미존재 시 빈 리스트.
+        """
+        client = self._get_client()
+        query = urlencode({"rootOrderId": root_order_id})
+        sign_path = "/v1/orders"
+        request_path = f"{sign_path}?{query}"
+        headers = self._get_auth_headers("GET", sign_path)
+
+        try:
+            response = await client.get(f"{self._private_url}{request_path}", headers=headers)
+            data = response.json()
+            self._raise_for_exchange_error(response, data)
+        except (AuthenticationError, RateLimitError, ExchangeError):
+            raise
+        except httpx.HTTPError as e:
+            raise ConnectionError(f"GMO FX HTTP 오류: {e}") from e
+
+        return data.get("data", {}).get("list", [])
 
     # ── 주문 변경 ──────────────────────────────────────────────
 

@@ -141,8 +141,13 @@ def run_backtest(
     if config is None:
         config = BacktestConfig()
 
+    # params.trading_style로 fallback (strategy_type 누락한 호출 안전망)
+    effective_type = strategy_type
+    if strategy_type == "trend_following" and params.get("trading_style") == "box_mean_reversion":
+        effective_type = "box_mean_reversion"
+
     # strategy_type 분기
-    if strategy_type == "box_mean_reversion":
+    if effective_type == "box_mean_reversion":
         return _run_box_backtest(candles, params, config)
 
     # params에서 position_size_pct 오버라이드
@@ -349,12 +354,21 @@ def run_backtest(
     # Max drawdown
     result.max_drawdown_pct = _compute_max_drawdown_from_trades(pnl_pcts)
 
-    # Sharpe
+    # Sharpe (연간화)
     if len(pnl_pcts) >= 2:
         mean_pct = sum(pnl_pcts) / len(pnl_pcts)
         variance = sum((x - mean_pct) ** 2 for x in pnl_pcts) / (len(pnl_pcts) - 1)
         std = math.sqrt(variance)
-        result.sharpe_ratio = round(mean_pct / std, 2) if std > 0 else None
+        if std > 0:
+            raw_sharpe = mean_pct / std
+            # 연간화: sharpe * sqrt(연간 거래수). 백테스트 기간에서 역산.
+            if len(candles) >= 2:
+                span_days = (_candle_time(candles[-1]) - _candle_time(candles[0])).total_seconds() / 86400
+                period_days = max(1.0, span_days)
+                trades_per_year = len(pnl_pcts) * 365.0 / period_days
+                result.sharpe_ratio = round(raw_sharpe * math.sqrt(trades_per_year), 2)
+            else:
+                result.sharpe_ratio = round(raw_sharpe, 2)
 
     # Avg holding hours
     holding_hours = []
@@ -490,6 +504,9 @@ def _run_box_backtest(
     exchange_type = params.get("exchange_type", "spot")
     is_fx = exchange_type == "fx"
     cluster_percentile = float(params.get("box_cluster_percentile", 100.0))
+    use_ifdoco = params.get("use_ifdoco", False)
+    # IFD-OCO 지정가 체결 → 진입/TP 슬리피지 0. SL·무효화·주말은 시장가이므로 유지.
+    entry_slippage = 0.0 if use_ifdoco else config.slippage_pct
 
     min_candles = max(box_window, 10)
     if len(candles) < min_candles:
@@ -644,7 +661,7 @@ def _run_box_backtest(
                 and prev_box_state != "near_upper"
             ):
                 exit_price = _apply_slippage(
-                    current_price, "sell", config.slippage_pct,
+                    current_price, "sell", entry_slippage,
                 )
                 _close_position(
                     current_position, exit_price, current_candle,
@@ -657,7 +674,7 @@ def _run_box_backtest(
 
                 # 양방향: 롱 청산 직후 숏 진입
                 if direction_mode == "both" and _direction_allowed("sell", i):
-                    s_entry = _apply_slippage(current_price, "sell", config.slippage_pct)
+                    s_entry = _apply_slippage(current_price, "sell", entry_slippage)
                     invest_jpy = capital * position_size / 100
                     entry_fee = _apply_fee(invest_jpy, config.fee_pct)
                     amount = (invest_jpy - entry_fee) / s_entry if s_entry > 0 else 0
@@ -674,7 +691,7 @@ def _run_box_backtest(
                 and prev_box_state != "near_lower"
             ):
                 exit_price = _apply_slippage(
-                    current_price, "buy", config.slippage_pct,
+                    current_price, "buy", entry_slippage,
                 )
                 _close_position(
                     current_position, exit_price, current_candle,
@@ -687,7 +704,7 @@ def _run_box_backtest(
 
                 # 양방향: 숏 청산 직후 롱 진입
                 if direction_mode == "both" and _direction_allowed("buy", i):
-                    l_entry = _apply_slippage(current_price, "buy", config.slippage_pct)
+                    l_entry = _apply_slippage(current_price, "buy", entry_slippage)
                     invest_jpy = capital * position_size / 100
                     entry_fee = _apply_fee(invest_jpy, config.fee_pct)
                     amount = (invest_jpy - entry_fee) / l_entry if l_entry > 0 else 0
@@ -748,9 +765,13 @@ def _run_box_backtest(
                 box_width = upper - lower
 
                 # min_width 체크 (실전 _detect_and_create_box와 동일)
+                # fee_rate_pct: params 우선 (GMO FX 트라이얼=0.0), fallback = config.fee_pct
                 if lower > 0:
                     width_pct = box_width / lower * 100
-                    min_width_pct = tolerance_pct * 2 + config.fee_pct * 2
+                    fee_for_width = float(params.get("fee_rate_pct", config.fee_pct))
+                    min_width_pct = tolerance_pct * 2 + fee_for_width * 2
+                    if params.get("box_min_width_pct"):
+                        min_width_pct = max(min_width_pct, float(params["box_min_width_pct"]))
                     if width_pct < min_width_pct:
                         continue
 
@@ -776,7 +797,7 @@ def _run_box_backtest(
                 and _direction_allowed("buy", i)
             ):
                 side = "buy"
-                entry_price = _apply_slippage(current_price, side, config.slippage_pct)
+                entry_price = _apply_slippage(current_price, side, entry_slippage)
                 invest_jpy = capital * position_size / 100
                 entry_fee = _apply_fee(invest_jpy, config.fee_pct)
                 invest_after_fee = invest_jpy - entry_fee
@@ -797,7 +818,7 @@ def _run_box_backtest(
                 and _direction_allowed("sell", i)
             ):
                 side = "sell"
-                entry_price = _apply_slippage(current_price, side, config.slippage_pct)
+                entry_price = _apply_slippage(current_price, side, entry_slippage)
                 invest_jpy = capital * position_size / 100
                 entry_fee = _apply_fee(invest_jpy, config.fee_pct)
                 invest_after_fee = invest_jpy - entry_fee
@@ -843,7 +864,18 @@ def _run_box_backtest(
         mean_pct = sum(pnl_pcts) / len(pnl_pcts)
         variance = sum((x - mean_pct) ** 2 for x in pnl_pcts) / (len(pnl_pcts) - 1)
         std = math.sqrt(variance)
-        result.sharpe_ratio = round(mean_pct / std, 2) if std > 0 else None
+        if std > 0:
+            raw_sharpe = mean_pct / std
+            # 연간화: sqrt(거래수_per_year)
+            period_days = max(
+                1,
+                (_candle_time(candles[-1]) - _candle_time(candles[0])).total_seconds() / 86400
+            ) if len(candles) >= 2 else None
+            if period_days and period_days > 0 and len(pnl_pcts) > 0:
+                trades_per_year = len(pnl_pcts) * 365.0 / period_days
+                result.sharpe_ratio = round(raw_sharpe * math.sqrt(trades_per_year), 2)
+            else:
+                result.sharpe_ratio = round(raw_sharpe, 2)
 
     holding_hours = []
     for t in valid:

@@ -63,6 +63,7 @@ class FakeExchangeAdapter:
         )
         self._fx_positions: list[FxPosition] = []
         self._stop_orders: dict[str, dict] = {}  # order_id → STOP 주문 정보
+        self._ifdoco_orders: dict[str, dict] = {}  # root_order_id → IFD-OCO 주문 정보
 
     # ── 거래소 식별 ─────────────────────────
 
@@ -137,6 +138,13 @@ class FakeExchangeAdapter:
     async def cancel_order(self, order_id: str, pair: str = "") -> bool:
         if order_id in self._stop_orders:
             del self._stop_orders[order_id]
+            return True
+        if order_id in self._ifdoco_orders:
+            meta = self._ifdoco_orders[order_id]
+            meta["status"] = "CANCELED"
+            for sub in meta.get("sub_orders", []):
+                if sub["status"] not in ("EXECUTED",):
+                    sub["status"] = "CANCELED"
             return True
         if order_id in self._orders:
             old = self._orders[order_id]
@@ -244,6 +252,119 @@ class FakeExchangeAdapter:
     def set_margin_trading(self, enabled: bool) -> None:
         """테스트에서 증거금 거래 모드 전환."""
         self._is_margin_trading = enabled
+
+    # ── IFD-OCO (FX 전용) ─────────────────────
+
+    async def place_ifdoco_order(
+        self,
+        pair: str,
+        side: str,
+        size: int,
+        first_execution_type: str,
+        first_price: float,
+        take_profit_price: float,
+        stop_loss_price: float,
+    ) -> dict:
+        """IFD-OCO 지정가 주문 시뮬레이션. 즉시 pending 상태로 등록."""
+        self._order_counter += 1
+        root_id = f"FAKE-IFO-{self._order_counter:06d}"
+        close_side = "SELL" if side.upper() == "BUY" else "BUY"
+        sub_orders = [
+            {
+                "orderId": f"{root_id}-1",
+                "rootOrderId": root_id,
+                "settleType": "OPEN",
+                "executionType": first_execution_type,
+                "side": side.upper(),
+                "size": str(size),
+                "price": str(first_price),
+                "status": "WAITING",
+            },
+            {
+                "orderId": f"{root_id}-2",
+                "rootOrderId": root_id,
+                "settleType": "CLOSE",
+                "executionType": "LIMIT",
+                "side": close_side,
+                "size": str(size),
+                "price": str(take_profit_price),
+                "status": "WAITING",
+            },
+            {
+                "orderId": f"{root_id}-3",
+                "rootOrderId": root_id,
+                "settleType": "CLOSE",
+                "executionType": "STOP",
+                "side": close_side,
+                "size": str(size),
+                "price": str(stop_loss_price),
+                "status": "WAITING",
+            },
+        ]
+        self._ifdoco_orders[root_id] = {
+            "root_order_id": root_id,
+            "pair": pair,
+            "side": side.upper(),
+            "size": size,
+            "first_price": first_price,
+            "take_profit_price": take_profit_price,
+            "stop_loss_price": stop_loss_price,
+            "status": "WAITING",
+            "sub_orders": sub_orders,
+        }
+        return {"rootOrderId": root_id}
+
+    async def get_orders_by_root(self, root_order_id: str) -> list[dict]:
+        """rootOrderId 기준 서브 주문 목록 반환. IFD-OCO 폴링용."""
+        meta = self._ifdoco_orders.get(str(root_order_id))
+        if not meta:
+            return []
+        return list(meta["sub_orders"])
+
+    def simulate_ifdoco_fill(
+        self, root_order_id: str, fill_type: str, exec_price: Optional[float] = None
+    ) -> None:
+        """테스트 헬퍼: IFD-OCO 체결 상태를 강제로 변경한다.
+
+        fill_type: "first_fill" | "tp" | "sl" | "cancel"
+        """
+        meta = self._ifdoco_orders.get(root_order_id)
+        if not meta:
+            return
+        sub_orders = meta["sub_orders"]
+        open_order = next((o for o in sub_orders if o["settleType"] == "OPEN"), None)
+        tp_order   = next((o for o in sub_orders if o["settleType"] == "CLOSE" and o["executionType"] == "LIMIT"), None)
+        sl_order   = next((o for o in sub_orders if o["settleType"] == "CLOSE" and o["executionType"] == "STOP"), None)
+
+        price = exec_price or meta["first_price"]
+        if fill_type == "first_fill":
+            if open_order:
+                open_order["status"] = "EXECUTED"
+                open_order["price"] = str(price)
+        elif fill_type == "tp":
+            if open_order:
+                open_order["status"] = "EXECUTED"
+            if tp_order:
+                tp_order["status"] = "EXECUTED"
+                tp_order["price"] = str(exec_price or meta["take_profit_price"])
+            if sl_order:
+                sl_order["status"] = "CANCELED"
+        elif fill_type == "sl":
+            if open_order:
+                open_order["status"] = "EXECUTED"
+            if sl_order:
+                sl_order["status"] = "EXECUTED"
+                sl_order["price"] = str(exec_price or meta["stop_loss_price"])
+            if tp_order:
+                tp_order["status"] = "CANCELED"
+        elif fill_type == "cancel":
+            for o in sub_orders:
+                if o["status"] not in ("EXECUTED",):
+                    o["status"] = "CANCELED"
+
+    def _round_price(self, pair: str, price: float) -> float:
+        """테스트용 round_price — 소수점 3자리."""
+        return round(price, 3)
 
     async def close_order_stop(
         self,

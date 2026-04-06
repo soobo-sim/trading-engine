@@ -220,20 +220,39 @@ async def fetch_candles(
     pair: str,
     timeframe: str,
     days: int,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
 ) -> list:
-    """DB에서 완성 캔들 조회 (시간순)."""
+    """DB에서 완성 캔들 조회 (시간순).
+
+    start_date / end_date (YYYY-MM-DD): 지정 시 해당 구간만 조회 (만약에 분석 look-ahead bias 방지용).
+    미지정 시 days 기반 기존 동작 유지.
+    """
     CandleModel = state.models.candle
     pair_col = getattr(CandleModel, state.pair_column)
-    since = datetime.now(timezone.utc) - timedelta(days=days)
+
+    conditions = [
+        pair_col == pair,
+        CandleModel.timeframe == timeframe,
+        CandleModel.is_complete == True,
+    ]
+
+    if start_date or end_date:
+        # 날짜 범위 모드: look-ahead bias 방지용
+        if start_date:
+            start_dt = datetime.fromisoformat(start_date).replace(tzinfo=timezone.utc)
+            conditions.append(CandleModel.open_time >= start_dt)
+        if end_date:
+            end_dt = datetime.fromisoformat(end_date).replace(tzinfo=timezone.utc)
+            conditions.append(CandleModel.open_time < end_dt)
+    else:
+        # 기존 days 기반 모드
+        since = datetime.now(timezone.utc) - timedelta(days=days)
+        conditions.append(CandleModel.open_time >= since)
 
     result = await db.execute(
         select(CandleModel)
-        .where(and_(
-            pair_col == pair,
-            CandleModel.timeframe == timeframe,
-            CandleModel.is_complete == True,
-            CandleModel.open_time >= since,
-        ))
+        .where(and_(*conditions))
         .order_by(CandleModel.open_time)
     )
     return list(result.scalars().all())
@@ -338,10 +357,12 @@ async def run_backtest_api(
     initial_capital_jpy: float, slippage_pct: float, fee_pct: float,
     state: AppState, db: AsyncSession,
     strategy_type: str = "trend_following",
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
 ) -> dict:
     """캔들 리플레이 백테스트."""
     pair = state.normalize_pair(pair)
-    candles = await fetch_candles(db, state, pair, timeframe, days)
+    candles = await fetch_candles(db, state, pair, timeframe, days, start_date, end_date)
     if len(candles) < 25:
         return {"error": "INSUFFICIENT_CANDLES", "count": len(candles)}
 
@@ -357,6 +378,8 @@ async def run_backtest_api(
         "pair": pair,
         "timeframe": timeframe,
         "days": days,
+        "start_date": start_date,
+        "end_date": end_date,
         "result": result.to_dict(),
     }
 
@@ -367,10 +390,12 @@ async def run_grid_search_api(
     initial_capital_jpy: float, slippage_pct: float, fee_pct: float,
     state: AppState, db: AsyncSession,
     strategy_type: str = "trend_following",
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
 ) -> dict:
     """파라미터 조합 자동 비교."""
     pair = state.normalize_pair(pair)
-    candles = await fetch_candles(db, state, pair, timeframe, days)
+    candles = await fetch_candles(db, state, pair, timeframe, days, start_date, end_date)
     if len(candles) < 25:
         return {"error": "INSUFFICIENT_CANDLES", "count": len(candles)}
 
@@ -388,6 +413,8 @@ async def run_grid_search_api(
         "pair": pair,
         "timeframe": timeframe,
         "days": days,
+        "start_date": start_date,
+        "end_date": end_date,
         "grid_search": result.to_dict(),
     }
 

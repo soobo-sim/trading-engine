@@ -432,6 +432,11 @@ def create_box_position_model(prefix: str, pair_column: str = "pair", order_id_l
         "exchange_sl_order_id": Column(String(40), nullable=True),
         "exchange_sl_price": Column(Numeric(20, 6), nullable=True),
         "exchange_sl_status": Column(String(20), nullable=True),  # registered/cancelled/executed/failed
+        # IFD-OCO 지정가 주문 추적 (BOX_IFDOCO_MIGRATION)
+        "ifdoco_root_order_id": Column(String(40), nullable=True),
+        "ifdoco_status": Column(String(20), nullable=True),  # pending/first_filled/completed_tp/completed_sl/cancelled
+        "tp_price": Column(Numeric(20, 5), nullable=True),
+        "sl_price_registered": Column(Numeric(20, 5), nullable=True),
         "__repr__": lambda self: (
             f"<{self.__class__.__name__}(box={self.box_id} status={self.status})>"
         ),

@@ -67,6 +67,7 @@ WF_PASS_POSITIVE_RATIO = 0.6     # OOS 양수 윈도우 ≥ 60%
 WF_PASS_MIN_RETURN = 0.0         # 합산 수익률 > 0%
 WF_PASS_MIN_TRADES = 30          # OOS 거래수 합산 ≥ 30
 WF_PASS_SHARPE_DECAY_MAX = 0.6   # IS/OOS Sharpe 괴리 < 60%
+WF_PASS_MAX_MDD = 10.0           # OOS 최대 MDD < 10%
 
 
 # ──────────────────────────────────────────────────────────────
@@ -224,6 +225,12 @@ def run_walk_forward(
         fail_reasons.append(f"합산 수익률 {result.total_return_pct:.2f}% ≤ 0%")
     if result.total_trades < WF_PASS_MIN_TRADES:
         fail_reasons.append(f"OOS 거래수 {result.total_trades} < {WF_PASS_MIN_TRADES}")
+
+    # MDD 쭔크
+    if result.max_mdd is not None and result.max_mdd > WF_PASS_MAX_MDD:
+        fail_reasons.append(
+            f"OOS 최대 MDD {result.max_mdd:.1f}% > {WF_PASS_MAX_MDD:.0f}% 제한"
+        )
 
     # IS/OOS Sharpe 괴리 (과적합 필터)
     is_sharpes = [w.is_sharpe for w in windows if w.is_sharpe is not None]

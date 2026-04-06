@@ -21,6 +21,7 @@ from adapters.database.models import create_candle_model, create_box_model, crea
 from adapters.database.session import Base
 from core.exchange.types import OrderType
 from core.strategy.box_mean_reversion import BoxMeanReversionManager
+from core.strategy.box_signals import linear_slope
 from core.task.supervisor import TaskSupervisor
 from tests.fake_exchange import FakeExchangeAdapter
 
@@ -181,12 +182,12 @@ class TestClusterDetection:
 
     def test_linear_slope_positive(self):
         """상승 기울기."""
-        slope = BoxMeanReversionManager._linear_slope([0, 1, 2, 3], [1.0, 2.0, 3.0, 4.0])
+        slope = linear_slope([0, 1, 2, 3], [1.0, 2.0, 3.0, 4.0])
         assert slope == pytest.approx(1.0)
 
     def test_linear_slope_negative(self):
         """하락 기울기."""
-        slope = BoxMeanReversionManager._linear_slope([0, 1, 2, 3], [4.0, 3.0, 2.0, 1.0])
+        slope = linear_slope([0, 1, 2, 3], [4.0, 3.0, 2.0, 1.0])
         assert slope == pytest.approx(-1.0)
 
     def test_candle_high_low(self):

@@ -399,4 +399,8 @@ def _box_pos_to_dict(row, pair_column: str, current_price: float | None = None) 
         "exchange_sl_order_id": getattr(row, "exchange_sl_order_id", None),
         "exchange_sl_price": float(row.exchange_sl_price) if getattr(row, "exchange_sl_price", None) else None,
         "exchange_sl_status": getattr(row, "exchange_sl_status", None),
+        # IFD-OCO 상태 (GMO FX 전용, use_ifdoco=True 시)
+        "ifdoco_status": getattr(row, "ifdoco_status", None),
+        "tp_price": float(row.tp_price) if getattr(row, "tp_price", None) else None,
+        "sl_price_registered": float(row.sl_price_registered) if getattr(row, "sl_price_registered", None) else None,
     }

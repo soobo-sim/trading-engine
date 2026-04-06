@@ -570,3 +570,183 @@ class TestAPISchema:
         """strategy_type 미지정 시 기본값 trend_following."""
         req = GridSearchRequest(pair="usd_jpy", base_params={}, param_grid={})
         assert req.strategy_type == "trend_following"
+
+
+# ── Sharpe 연간화 테스트 (P0) ───────────────────────────────
+
+
+class TestSharpeAnnualization:
+    """Sharpe 연간화 — 기간이 길수록 연간 거래수 보정이 들어감."""
+
+    def test_sharpe_is_annualized_trend(self):
+        """trend backtest: Sharpe가 None이 아니고, 기간 대비 연간화된 값."""
+        candles = _make_uptrend_candles(n=120)  # 120 × 4h = 480일
+        params = {
+            "ema_period": 20, "atr_period": 14,
+            "entry_rsi_min": 40.0, "entry_rsi_max": 65.0,
+            "ema_slope_entry_min": 0.0,
+            "atr_multiplier_stop": 2.0, "trailing_stop_atr_initial": 2.0,
+            "trailing_stop_atr_mature": 1.2,
+            "rsi_overbought": 75, "rsi_extreme": 80, "rsi_breakdown": 40,
+            "ema_slope_weak_threshold": 0.03, "tighten_stop_atr": 1.0,
+            "partial_exit_profit_atr": 2.0, "position_size_pct": 100.0,
+        }
+        from core.backtest.engine import run_backtest, BacktestConfig
+        result = run_backtest(candles, params, BacktestConfig())
+        # 거래가 발생했으면 Sharpe가 None이 아님
+        if result.total_trades >= 2:
+            # 연간화 계수가 곱해졌으므로 |Sharpe| ≥ |mean/std|
+            # 거래 수와 기간으로 계수를 직접 계산해 검증
+            import math
+            pnl_pcts = [t.pnl_pct for t in result.trades if t.pnl_pct is not None]
+            if len(pnl_pcts) >= 2:
+                mean = sum(pnl_pcts) / len(pnl_pcts)
+                std = (sum((x - mean) ** 2 for x in pnl_pcts) / (len(pnl_pcts) - 1)) ** 0.5
+                if std > 0:
+                    span = (candles[-1].open_time - candles[0].open_time).total_seconds() / 86400
+                    expected_factor = math.sqrt(len(pnl_pcts) * 365.0 / max(1, span))
+                    expected = round(mean / std * expected_factor, 2)
+                    assert result.sharpe_ratio == expected
+
+    def test_sharpe_is_annualized_box(self):
+        """box backtest: Sharpe가 연간화됨."""
+        candles = _make_box_candles(n=200)
+        params = {"box_tolerance_pct": 0.5, "near_bound_pct": 0.5, "stop_loss_pct": 2.0}
+        from core.backtest.engine import run_backtest, BacktestConfig
+        result = run_backtest(candles, params, BacktestConfig(), "box_mean_reversion")
+        if result.total_trades >= 2:
+            import math
+            pnl_pcts = [t.pnl_pct for t in result.trades if t.pnl_pct is not None]
+            if len(pnl_pcts) >= 2:
+                mean = sum(pnl_pcts) / len(pnl_pcts)
+                std = (sum((x - mean) ** 2 for x in pnl_pcts) / (len(pnl_pcts) - 1)) ** 0.5
+                if std > 0:
+                    span = (candles[-1].open_time - candles[0].open_time).total_seconds() / 86400
+                    expected_factor = math.sqrt(len(pnl_pcts) * 365.0 / max(1, span))
+                    expected = round(mean / std * expected_factor, 2)
+                    assert result.sharpe_ratio == expected
+
+    def test_sharpe_none_with_one_trade(self):
+        """거래 1건이면 std=0 → Sharpe=None 유지."""
+        candles = _make_uptrend_candles(n=30)
+        params = {
+            "ema_period": 20, "atr_period": 14,
+            "entry_rsi_min": 40.0, "entry_rsi_max": 65.0,
+            "ema_slope_entry_min": 0.0, "atr_multiplier_stop": 99.0,
+            "trailing_stop_atr_initial": 99.0, "trailing_stop_atr_mature": 99.0,
+            "rsi_overbought": 99, "rsi_extreme": 100, "rsi_breakdown": 0,
+            "ema_slope_weak_threshold": 0.001, "tighten_stop_atr": 99.0,
+            "partial_exit_profit_atr": 99.0, "position_size_pct": 100.0,
+        }
+        from core.backtest.engine import run_backtest, BacktestConfig
+        result = run_backtest(candles, params, BacktestConfig())
+        # 거래 1건 이하이면 sharpe None
+        if result.total_trades <= 1:
+            assert result.sharpe_ratio is None
+
+
+# ── WF MDD 체크 테스트 (P1) ─────────────────────────────────
+
+
+class TestWFMDDCheck:
+    """WF_PASS_MAX_MDD: OOS MDD 10% 초과 시 WF 실패 판정."""
+
+    def _make_wf_candles(self):
+        """WF 실행에 충분한 400일치 캔들."""
+        candles = []
+        t = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        import math
+        for i in range(1200):  # 1200 × 4h = 200일
+            price = 100.0 + 5 * math.sin(i / 60)
+            candles.append(FakeCandle(
+                open=price - 0.1, high=price + 0.5,
+                low=price - 0.5, close=price,
+                open_time=t + timedelta(hours=4 * i),
+            ))
+        return candles
+
+    def test_wf_mdd_constant_exists(self):
+        """WF_PASS_MAX_MDD 상수가 10.0으로 정의되어 있음."""
+        from core.backtest.walk_forward import WF_PASS_MAX_MDD
+        assert WF_PASS_MAX_MDD == 10.0
+
+    def test_wf_mdd_fail_message_included(self):
+        """OOS MDD가 상한을 초과하면 fail_reason에 MDD 관련 메시지 포함."""
+        from core.backtest.walk_forward import run_walk_forward, WF_PASS_MAX_MDD, WFResult
+        # 실제로 MDD 10% 초과를 만들기 어려우므로 상수를 0으로 오버라이드해 검증
+        import core.backtest.walk_forward as wfw
+        original = wfw.WF_PASS_MAX_MDD
+        wfw.WF_PASS_MAX_MDD = 0.0  # 무조건 실패 유도
+        try:
+            candles = self._make_wf_candles()
+            result = run_walk_forward(
+                candles=candles, params={"box_tolerance_pct": 0.5, "near_bound_pct": 0.5},
+                strategy_type="box_mean_reversion", train_days=60, valid_days=30, step_days=30,
+            )
+            if result.total_windows > 0 and result.max_mdd is not None:
+                # MDD가 0 초과면 반드시 fail
+                if result.max_mdd > 0:
+                    assert not result.pass_fail
+                    assert "MDD" in result.fail_reason
+        finally:
+            wfw.WF_PASS_MAX_MDD = original
+
+
+# ── start_date/end_date API 스키마 테스트 (P0) ──────────────
+
+
+class TestDateRangeAPISchema:
+    """BacktestRequest/GridSearchRequest에 start_date/end_date 필드 존재 확인."""
+
+    def test_backtest_request_has_date_fields(self):
+        req = BacktestRequest(
+            pair="GBP_JPY", params={},
+            start_date="2026-01-01", end_date="2026-04-01",
+        )
+        assert req.start_date == "2026-01-01"
+        assert req.end_date == "2026-04-01"
+
+    def test_backtest_request_date_optional(self):
+        req = BacktestRequest(pair="GBP_JPY", params={})
+        assert req.start_date is None
+        assert req.end_date is None
+
+    def test_grid_request_has_date_fields(self):
+        req = GridSearchRequest(
+            pair="GBP_JPY", base_params={}, param_grid={},
+            start_date="2026-01-01", end_date="2026-04-01",
+        )
+        assert req.start_date == "2026-01-01"
+        assert req.end_date == "2026-04-01"
+
+    def test_grid_request_date_optional(self):
+        req = GridSearchRequest(pair="GBP_JPY", base_params={}, param_grid={})
+        assert req.start_date is None
+        assert req.end_date is None
+
+
+# ── GridWithWFRequest 스키마 테스트 (P1) ────────────────────
+
+
+class TestGridWithWFSchema:
+    """grid-with-wf 통합 엔드포인트 스키마 검증."""
+
+    def test_grid_with_wf_request_fields(self):
+        from api.routes.performance import GridWithWFRequest
+        req = GridWithWFRequest(
+            pair="GBP_JPY",
+            base_params={"box_tolerance_pct": 0.3},
+            param_grid={"near_bound_pct": [0.3, 0.5]},
+            end_date="2026-04-01",
+        )
+        assert req.pair == "GBP_JPY"
+        assert req.end_date == "2026-04-01"
+        assert req.train_days == 240
+        assert req.valid_days == 60
+        assert req.top_n == 5
+
+    def test_grid_with_wf_start_date_optional(self):
+        from api.routes.performance import GridWithWFRequest
+        req = GridWithWFRequest(pair="USD_JPY", base_params={}, param_grid={})
+        assert req.start_date is None
+        assert req.end_date is None

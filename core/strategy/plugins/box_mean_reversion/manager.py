@@ -102,6 +102,10 @@ class BoxMeanReversionManager:
         self._paper_executors: Dict[str, PaperExecutor] = {}
         # pair → 거래소 SL 주문 ID (None = 미등록 or 취소됨)
         self._exchange_sl_orders: Dict[str, Optional[str]] = {}
+        # pair → IFD-OCO rootOrderId (None = 미활성)
+        self._ifdoco_orders: Dict[str, Optional[str]] = {}
+        # pair → IFD-OCO 메타 (pending 상태 캐싱. 서버 재시작 시 소실 → poll에서 API 재취득)
+        self._ifdoco_meta: Dict[str, Optional[Dict]] = {}
 
         # pair → strategy_id (None = active 전략, N = paper/proposed 전략)
         # _get_active_box / _detect_and_create_box에서 박스 격리에 사용
@@ -182,6 +186,28 @@ class BoxMeanReversionManager:
         except Exception as e:
             logger.warning(f"[BoxMgr] {pair}: 거래소 SL 복원 실패 — {e}")
 
+        # IFD-OCO first_filled 복원 (first_filled 상태에서만 DB에 포지션 row 존재)
+        try:
+            async with self._session_factory() as session:
+                BoxPos = self._box_position_model
+                pair_col = getattr(BoxPos, self._pair_column)
+                result = await session.execute(
+                    select(BoxPos.ifdoco_root_order_id)
+                    .where(
+                        pair_col == pair,
+                        BoxPos.status == "open",
+                        BoxPos.ifdoco_status == "first_filled",
+                    )
+                )
+                root_id = result.scalar_one_or_none()
+                if root_id:
+                    self._ifdoco_orders[pair] = str(root_id)
+                    logger.info(
+                        f"[BoxMgr] {pair}: DB에서 IFD-OCO 복원 (root_id={root_id})"
+                    )
+        except Exception as e:
+            logger.warning(f"[BoxMgr] {pair}: IFD-OCO 복원 실패 — {e}")
+
         # 기존 태스크 정리
         await self._supervisor.stop_group(pair)
 
@@ -206,6 +232,8 @@ class BoxMeanReversionManager:
         self._last_invalidation_time.pop(pair, None)
         self._paper_executors.pop(pair, None)
         self._exchange_sl_orders.pop(pair, None)
+        self._ifdoco_orders.pop(pair, None)
+        self._ifdoco_meta.pop(pair, None)
         logger.info(f"[BoxMgr] {pair}: 박스 인프라 태스크 종료")
 
     def is_running(self, pair: str) -> bool:
@@ -260,6 +288,10 @@ class BoxMeanReversionManager:
         if is_fx:
             await self._sync_exchange_sl_status(pair)
 
+        # ── IFD-OCO 상태 폴링 (FX 전용) ─────────────────────────────
+        if is_fx:
+            await self._poll_ifdoco_status(pair)
+
         # ── 주말 자동 청산 (FX 전용) ───────────────────────────────
         weekend_close_enabled = params.get("weekend_close", True)
         if is_fx and should_close_for_weekend():
@@ -297,6 +329,9 @@ class BoxMeanReversionManager:
         reason = await self._validate_active_box(pair, params)
         if reason:
             logger.info(f"[BoxMgr] {pair}: 박스 무효화 ({reason})")
+            # IFD-OCO pending(DB pos 없음)이면 거래소 주문만 취소
+            if self._ifdoco_orders.get(pair) is not None:
+                await self._cancel_active_ifdoco(pair)
             pos = await self._get_open_position(pair)
             if pos:
                 await self._close_position_market(pair, pos, reason)
@@ -394,6 +429,39 @@ class BoxMeanReversionManager:
                     direction_mode = "long_only"
                 else:
                     direction_mode = params.get("direction_mode", "long_only")
+
+                # ── IFD-OCO 경로 (use_ifdoco=True && FX 시) ──────────────
+                use_ifdoco = params.get("use_ifdoco", False) and is_fx
+                if use_ifdoco:
+                    # IFD-OCO 이미 활성이면 틱 로직 전부 스킵 (거래소가 처리 중)
+                    if self._ifdoco_orders.get(pair) is not None:
+                        self._prev_box_state[pair] = box_state
+                        continue
+
+                    # near_lower → 롱 IFD-OCO
+                    if box_state == "near_lower" and prev_state != "near_lower":
+                        if direction_mode in ("long_only", "both"):
+                            box = await self._get_active_box(pair)
+                            if box:
+                                entry_params = await self._apply_bias(pair, params, "long")
+                                if entry_params is not None:
+                                    await self._open_position_ifdoco(
+                                        pair, box, entry_params, "long"
+                                    )
+
+                    # near_upper → 숏 IFD-OCO
+                    elif box_state == "near_upper" and prev_state != "near_upper":
+                        if direction_mode in ("both", "short_only"):
+                            box = await self._get_active_box(pair)
+                            if box:
+                                entry_params = await self._apply_bias(pair, params, "short")
+                                if entry_params is not None:
+                                    await self._open_position_ifdoco(
+                                        pair, box, entry_params, "short"
+                                    )
+
+                    self._prev_box_state[pair] = box_state
+                    continue  # 기존 MARKET 경로 건너뜀
 
                 # ── near_lower 도달 ──────────────────────
                 if box_state == "near_lower" and prev_state != "near_lower":
@@ -862,6 +930,8 @@ class BoxMeanReversionManager:
             is_margin = getattr(self._adapter, "is_margin_trading", False)
 
             if is_margin:
+                # IFD-OCO 활성 시: OCO 취소 후 청산 (이중 체결 방지)
+                await self._cancel_active_ifdoco(pair)
                 # 서버가 먼저 청산 → 거래소 SL 취소 (중복 체결 방지)
                 await self._cancel_exchange_stop_loss(pair)
                 await self._close_position_market_fx(pair, pos, reason)
@@ -996,6 +1066,266 @@ class BoxMeanReversionManager:
             f"reason={reason} positionId={position_id} "
             f"order_id={order.order_id} price={exec_price}"
         )
+
+    # ──────────────────────────────────────────
+    # IFD-OCO 주문 실행 (FX 전용)
+    # ──────────────────────────────────────────
+
+    async def _open_position_ifdoco(
+        self, pair: str, box: Any, params: Dict[str, Any], direction: str
+    ) -> None:
+        """GMO FX IFD-OCO 지정가 주문 발주. pending 상태로 거래소에 등록만 한다."""
+        try:
+            balance = await self._adapter.get_balance()
+            jpy_available = balance.get_available("jpy")
+            position_size_pct = float(params.get("position_size_pct", 10.0))
+            invest_jpy = jpy_available * position_size_pct / 100
+            min_jpy = float(params.get("min_order_jpy", 500))
+            if invest_jpy < min_jpy:
+                logger.info(f"[BoxMgr] {pair}: IFD-OCO 잔고 부족 invest={invest_jpy:.0f} < min={min_jpy:.0f}")
+                return
+
+            ticker = await self._adapter.get_ticker(pair)
+            ref_price = float(ticker.last) if ticker.last else float(box.lower_bound)
+            if ref_price <= 0:
+                return
+            leverage = float(params.get("leverage", 1))
+            lot_unit = int(params.get("lot_unit", 1000))
+            order_size = math.floor(invest_jpy * leverage / ref_price / lot_unit) * lot_unit
+            min_lot = int(params.get("min_lot_size", 1000))
+            if order_size < min_lot:
+                logger.info(f"[BoxMgr] {pair}: IFD-OCO lot 부족 size={order_size} < min={min_lot}")
+                return
+
+            upper = float(box.upper_bound)
+            lower = float(box.lower_bound)
+            sl_pct = float(params.get("stop_loss_pct", 1.5))
+
+            if direction == "long":
+                entry_price = lower
+                tp_price = upper
+                sl_price = lower * (1 - sl_pct / 100)
+                side = "BUY"
+            else:
+                entry_price = upper
+                tp_price = lower
+                sl_price = upper * (1 + sl_pct / 100)
+                side = "SELL"
+
+            round_fn = getattr(self._adapter, "_round_price", lambda p, v: v)
+            entry_price = round_fn(pair, entry_price)
+            tp_price = round_fn(pair, tp_price)
+            sl_price = round_fn(pair, sl_price)
+
+            response = await self._adapter.place_ifdoco_order(
+                pair=pair,
+                side=side,
+                size=int(order_size),
+                first_execution_type="LIMIT",
+                first_price=entry_price,
+                take_profit_price=tp_price,
+                stop_loss_price=sl_price,
+            )
+            root_order_id = str(response.get("rootOrderId", ""))
+            if not root_order_id:
+                logger.error(f"[BoxMgr] {pair}: IFD-OCO rootOrderId 미반환")
+                return
+
+            self._ifdoco_orders[pair] = root_order_id
+            self._ifdoco_meta[pair] = {
+                "root_order_id": root_order_id,
+                "direction": direction,
+                "entry_price": entry_price,
+                "tp_price": tp_price,
+                "sl_price": sl_price,
+                "order_size": int(order_size),
+                "box_id": box.id,
+                "invest_jpy": invest_jpy,
+            }
+            logger.info(
+                f"[BoxMgr] {pair}: IFD-OCO 발주 완료 "
+                f"direction={direction} root_id={root_order_id} "
+                f"entry={entry_price} tp={tp_price} sl={sl_price}"
+            )
+        except Exception as e:
+            logger.error(f"[BoxMgr] {pair}: IFD-OCO 발주 오류 — {e}", exc_info=True)
+
+    async def _cancel_active_ifdoco(self, pair: str) -> None:
+        """등록된 IFD-OCO 주문 취소. pending 또는 first_filled 상태에서 강제 청산 시 호출."""
+        root_id = self._ifdoco_orders.pop(pair, None)
+        self._ifdoco_meta.pop(pair, None)
+        if root_id:
+            try:
+                await self._adapter.cancel_order(root_id, pair)
+                logger.info(f"[BoxMgr] {pair}: IFD-OCO 취소 완료 (root_id={root_id})")
+            except Exception as e:
+                logger.warning(f"[BoxMgr] {pair}: IFD-OCO 취소 실패 — {e}")
+
+    async def _poll_ifdoco_status(self, pair: str) -> None:
+        """IFD-OCO 체결 상태 폴링. 60초 주기 모니터에서 호출."""
+        root_id = self._ifdoco_orders.get(pair)
+        if not root_id:
+            return
+        try:
+            sub_orders = await self._adapter.get_orders_by_root(root_id)
+        except Exception as e:
+            logger.warning(f"[BoxMgr] {pair}: IFD-OCO 폴링 실패 — {e}")
+            return
+        if not sub_orders:
+            return
+
+        open_order = next(
+            (o for o in sub_orders if o.get("settleType") == "OPEN"), None
+        )
+        tp_order = next(
+            (o for o in sub_orders
+             if o.get("settleType") == "CLOSE" and o.get("executionType") == "LIMIT"),
+            None,
+        )
+        sl_order = next(
+            (o for o in sub_orders
+             if o.get("settleType") == "CLOSE" and o.get("executionType") == "STOP"),
+            None,
+        )
+
+        # TP 체결 감지 (우선순위: TP > SL > 1차 체결)
+        if tp_order and tp_order.get("status") == "EXECUTED":
+            await self._handle_ifdoco_completion(pair, "completed_tp", tp_order)
+        elif sl_order and sl_order.get("status") == "EXECUTED":
+            await self._handle_ifdoco_completion(pair, "completed_sl", sl_order)
+        elif open_order and open_order.get("status") == "EXECUTED":
+            # 1차 체결 — DB pos가 아직 없는 경우에만 기록
+            pos = await self._get_open_position(pair)
+            if pos is None:
+                await self._handle_ifdoco_first_fill(pair, open_order)
+        elif any(o.get("status") == "CANCELED" for o in sub_orders):
+            logger.info(f"[BoxMgr] {pair}: IFD-OCO CANCELED 감지 → 메모리 정리")
+            self._ifdoco_orders.pop(pair, None)
+            self._ifdoco_meta.pop(pair, None)
+
+    async def _handle_ifdoco_first_fill(self, pair: str, open_order: Dict) -> None:
+        """IFD-OCO 1차(진입) 체결 처리: DB 포지션 생성 + ifdoco_status='first_filled' 기록."""
+        meta = self._ifdoco_meta.get(pair) or {}
+        entry_price = float(open_order.get("price", meta.get("entry_price", 0)))
+        order_size = float(open_order.get("size", meta.get("order_size", 0)))
+        direction = meta.get("direction", "long")
+        box_id = meta.get("box_id")
+        invest_jpy = meta.get("invest_jpy")
+
+        if not entry_price or not order_size:
+            logger.warning(f"[BoxMgr] {pair}: IFD-OCO first_fill 메타 부족 — 건너뜀")
+            return
+
+        exchange_position_id = await self._find_exchange_position_id(pair)
+        await self._record_open_position(
+            pair=pair,
+            box_id=box_id,
+            entry_order_id=self._ifdoco_orders.get(pair, ""),
+            entry_price=entry_price,
+            entry_amount=order_size,
+            entry_jpy=invest_jpy,
+            exchange_position_id=exchange_position_id,
+            direction=direction,
+        )
+        await self._update_ifdoco_db(
+            pair,
+            status="first_filled",
+            root_order_id=self._ifdoco_orders.get(pair),
+            tp_price=meta.get("tp_price"),
+            sl_price=meta.get("sl_price"),
+        )
+        logger.info(
+            f"[BoxMgr] {pair}: IFD-OCO 1차 체결 기록 "
+            f"entry={entry_price} size={order_size} direction={direction}"
+        )
+
+    async def _handle_ifdoco_completion(
+        self, pair: str, completion_type: str, executed_order: Dict
+    ) -> None:
+        """IFD-OCO TP 또는 SL 체결 처리: DB 포지션 closed + 스냅샷 트리거."""
+        meta = self._ifdoco_meta.get(pair) or {}
+        direction = meta.get("direction", "long")
+        exit_price = float(executed_order.get("price", 0))
+
+        if completion_type == "completed_tp":
+            exit_reason = "near_upper_exit" if direction == "long" else "near_lower_exit"
+        else:
+            exit_reason = "price_stop_loss"
+
+        pos = await self._get_open_position(pair)
+        if pos:
+            exit_amount = float(pos.entry_amount)
+            if not exit_price:
+                try:
+                    ticker = await self._adapter.get_ticker(pair)
+                    exit_price = ticker.last
+                except Exception:
+                    exit_price = float(pos.entry_price)
+            order_id = str(executed_order.get("orderId", "ifdoco_completion"))
+            await self._record_close_position(
+                pair=pair,
+                exit_order_id=order_id,
+                exit_price=exit_price,
+                exit_amount=exit_amount,
+                exit_reason=exit_reason,
+            )
+            await self._update_ifdoco_db(pair, status=completion_type)
+
+        self._ifdoco_orders.pop(pair, None)
+        self._ifdoco_meta.pop(pair, None)
+        logger.info(
+            f"[BoxMgr] {pair}: IFD-OCO 완료 {completion_type} exit={exit_price}"
+        )
+
+        # both 모드 + TP 체결 → 반대 방향 IFD-OCO 자동 재발주
+        if completion_type == "completed_tp":
+            params = self._params.get(pair, {})
+            if (
+                params.get("direction_mode") == "both"
+                and params.get("use_ifdoco")
+                and getattr(self._adapter, "is_margin_trading", False)
+            ):
+                box = await self._get_active_box(pair)
+                if box:
+                    next_direction = "short" if direction == "long" else "long"
+                    entry_params = await self._apply_bias(pair, params, next_direction)
+                    if entry_params is not None:
+                        await self._open_position_ifdoco(pair, box, entry_params, next_direction)
+
+        if self._snapshot_collector is not None:
+            asyncio.create_task(
+                self._snapshot_collector.collect_all_snapshots("T1_position_close", pair)
+            )
+
+    async def _update_ifdoco_db(
+        self,
+        pair: str,
+        *,
+        status: str,
+        root_order_id: Optional[str] = None,
+        tp_price: Optional[float] = None,
+        sl_price: Optional[float] = None,
+    ) -> None:
+        """open 포지션의 ifdoco 컬럼 갱신. 실패해도 매매 로직에 영향 없음."""
+        try:
+            async with self._session_factory() as session:
+                BoxPos = self._box_position_model
+                pair_col = getattr(BoxPos, self._pair_column)
+                values: Dict[str, Any] = {"ifdoco_status": status}
+                if root_order_id is not None:
+                    values["ifdoco_root_order_id"] = root_order_id
+                if tp_price is not None:
+                    values["tp_price"] = tp_price
+                if sl_price is not None:
+                    values["sl_price_registered"] = sl_price
+                await session.execute(
+                    update(BoxPos)
+                    .where(pair_col == pair, BoxPos.status == "open")
+                    .values(**values)
+                )
+                await session.commit()
+        except Exception as e:
+            logger.warning(f"[BoxMgr] {pair}: ifdoco DB 갱신 실패 — {e}")
 
     # ──────────────────────────────────────────
     # 거래소 역지정주문 SL 관리 (FX 전용)
@@ -1448,7 +1778,4 @@ class BoxMeanReversionManager:
         """core.analysis.box_detector.find_cluster_percentile 위임."""
         return find_cluster_percentile(prices, tolerance_pct, min_touches, mode, percentile)
 
-    @staticmethod
-    def _linear_slope(xs: list[int], ys: list[float]) -> float:
-        """하위 호환 래퍼. 정본: core.strategy.box_signals.linear_slope"""
-        return linear_slope(xs, ys)
+

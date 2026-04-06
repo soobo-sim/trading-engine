@@ -9,6 +9,7 @@ Phase 1-C: 백테스트
   POST /api/backtest/run         - 백테스트 실행
   POST /api/backtest/grid        - 파라미터 그리드 서치
   POST /api/backtest/walk-forward - Rolling WF 검증 (BUG-021)
+  POST /api/backtest/grid-with-wf - 그리드 서치 + WF 통합 (만약에 분석용)
 """
 from typing import Optional
 
@@ -18,6 +19,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.dependencies import AppState, get_db, get_state
 from api.services import performance_service as svc
+from core.backtest.engine import BacktestConfig
+from core.backtest.walk_forward import run_walk_forward
 
 router = APIRouter(tags=["Performance"])
 
@@ -72,12 +75,14 @@ async def get_performance_by_strategy(
 class BacktestRequest(BaseModel):
     pair: str = Field(..., description="페어 (e.g. xrp_jpy)")
     params: dict = Field(..., description="전략 파라미터")
-    days: int = Field(90, ge=7, le=365, description="백테스트 기간 (일)")
-    timeframe: str = Field("4h", description="캔들 타임프레임: 1h | 4h")
+    days: int = Field(90, ge=7, le=365, description="백테스트 기간 (일). start_date/end_date 지정 시 무시됨")
+    timeframe: str = Field("4h", description="컀들 타임프레임: 1h | 4h")
     initial_capital_jpy: float = Field(100_000.0, ge=1000, description="초기 자본 (JPY)")
     slippage_pct: float = Field(0.05, ge=0, le=1.0, description="슬리피지 (%)")
     fee_pct: float = Field(0.15, ge=0, le=1.0, description="수수료 편도 (%)")
     strategy_type: str = Field("trend_following", description="전략 타입: trend_following|box_mean_reversion")
+    start_date: Optional[str] = Field(None, description="시작일 (YYYY-MM-DD). look-ahead bias 방지용")
+    end_date: Optional[str] = Field(None, description="종료일 (YYYY-MM-DD, exclusive). 만약에 분석 진입 시점 지정")
 
 
 @router.post("/api/backtest/run", summary="백테스트 실행")
@@ -94,6 +99,7 @@ async def run_backtest_api(
         body.pair, body.params, body.days, body.timeframe,
         body.initial_capital_jpy, body.slippage_pct, body.fee_pct,
         state, db, body.strategy_type,
+        start_date=body.start_date, end_date=body.end_date,
     )
     if "error" in result:
         raise HTTPException(400, {
@@ -114,13 +120,15 @@ class GridSearchRequest(BaseModel):
     pair: str = Field(..., description="페어")
     base_params: dict = Field(..., description="기본 전략 파라미터")
     param_grid: dict = Field(..., description="그리드 서치 파라미터 (키: 파라미터명, 값: 후보 리스트)")
-    days: int = Field(90, ge=7, le=365, description="백테스트 기간 (일)")
-    timeframe: str = Field("4h", description="캔들 타임프레임")
+    days: int = Field(90, ge=7, le=365, description="백테스트 기간 (일). start_date/end_date 지정 시 무시됨")
+    timeframe: str = Field("4h", description="컀들 타임프레임")
     top_n: int = Field(10, ge=1, le=50, description="상위 N개 결과")
     initial_capital_jpy: float = Field(100_000.0, ge=1000)
     slippage_pct: float = Field(0.05, ge=0, le=1.0)
     fee_pct: float = Field(0.15, ge=0, le=1.0)
     strategy_type: str = Field("trend_following", description="전략 타입: trend_following|box_mean_reversion")
+    start_date: Optional[str] = Field(None, description="시작일 (YYYY-MM-DD). look-ahead bias 방지용")
+    end_date: Optional[str] = Field(None, description="종료일 (YYYY-MM-DD, exclusive). 만약에 분석 진입 시점 지정")
 
 
 @router.post("/api/backtest/grid", summary="파라미터 그리드 서치")
@@ -149,13 +157,135 @@ async def grid_search_api(
         body.days, body.timeframe, body.top_n,
         body.initial_capital_jpy, body.slippage_pct, body.fee_pct,
         state, db, body.strategy_type,
+        start_date=body.start_date, end_date=body.end_date,
     )
     if "error" in result:
         raise HTTPException(400, {
             "blocked_code": result["error"],
-            "detail": f"캔들 {result['count']}개",
+            "detail": f"컀들 {result['count']}개",
         })
     return result
+
+
+# ──────────────────────────────────────────────────────────────
+# POST /api/backtest/grid-with-wf  — 그리드 서치 + WF 통합
+# ──────────────────────────────────────────────────────────────
+
+class GridWithWFRequest(BaseModel):
+    pair: str = Field(..., description="페어")
+    base_params: dict = Field(..., description="기본 전략 파라미터")
+    param_grid: dict = Field(..., description="그리드 서치 파라미터")
+    days: int = Field(90, ge=7, le=365, description="그리드 서치 기간 (일). start_date/end_date 지정 시 무시됨")
+    timeframe: str = Field("4h", description="컀들 타임프레임")
+    top_n: int = Field(5, ge=1, le=20, description="WF 검증할 상위 N개")
+    initial_capital_jpy: float = Field(100_000.0, ge=1000)
+    slippage_pct: float = Field(0.05, ge=0, le=1.0)
+    fee_pct: float = Field(0.15, ge=0, le=1.0)
+    strategy_type: str = Field("trend_following", description="전략 타입")
+    start_date: Optional[str] = Field(None, description="시작일 (YYYY-MM-DD). look-ahead bias 방지용")
+    end_date: Optional[str] = Field(None, description="종료일 (YYYY-MM-DD, exclusive)")
+    # WF 파라미터
+    train_days: int = Field(240, ge=30, le=720, description="IS 기간(일)")
+    valid_days: int = Field(60, ge=14, le=365, description="OOS 기간(일)")
+    step_days: int = Field(30, ge=7, le=180, description="슬라이드 간격(일)")
+    min_windows: int = Field(3, ge=1, le=20, description="최소 윈도우 수")
+
+
+@router.post("/api/backtest/grid-with-wf", summary="그리드 서치 + WF 통합")
+async def grid_with_wf_api(
+    body: GridWithWFRequest,
+    state: AppState = Depends(get_state),
+    db: AsyncSession = Depends(get_db),
+):
+    """상위 N개 파라미터를 그리드 서치한 후 자동으로 WF 검증. 1회 호출로 완결.
+
+    만약에 분석에서 사용 시: end_date = 진입 시점으로 지정하면 look-ahead bias가 구조적으로 방지됨.
+    """
+    if body.timeframe not in ("1h", "4h"):
+        raise HTTPException(400, {"blocked_code": "INVALID_TIMEFRAME"})
+
+    total = 1
+    for vals in body.param_grid.values():
+        if not isinstance(vals, list):
+            raise HTTPException(400, {"blocked_code": "INVALID_PARAM_GRID", "detail": "값은 리스트여야 합니다"})
+        total *= len(vals)
+    if total > MAX_GRID_COMBINATIONS:
+        raise HTTPException(400, {
+            "blocked_code": "TOO_MANY_COMBINATIONS",
+            "detail": f"조합 {total}개 > 상한 {MAX_GRID_COMBINATIONS}개",
+        })
+
+    pair = state.normalize_pair(body.pair)
+    config = BacktestConfig(
+        initial_capital_jpy=body.initial_capital_jpy,
+        slippage_pct=body.slippage_pct,
+        fee_pct=body.fee_pct,
+    )
+
+    # STEP 1: 그리드 서치
+    grid_result = await svc.run_grid_search_api(
+        pair, body.base_params, body.param_grid,
+        body.days, body.timeframe, body.top_n,
+        body.initial_capital_jpy, body.slippage_pct, body.fee_pct,
+        state, db, body.strategy_type,
+        start_date=body.start_date, end_date=body.end_date,
+    )
+    if "error" in grid_result:
+        raise HTTPException(400, {
+            "blocked_code": grid_result["error"],
+            "detail": f"컀들 {grid_result['count']}개",
+        })
+
+    # STEP 2: 상위 N개 파라미터에 WF 검증
+    top_candidates = grid_result["grid_search"]["results"]  # 이미 Sharpe 정렬됨
+    total_days_needed = body.train_days + body.valid_days + body.step_days * 10
+    wf_candles = await svc.fetch_candles(db, state, pair, body.timeframe, total_days_needed)
+
+    wf_results = []
+    for candidate in top_candidates:
+        merged = {**body.base_params, **candidate["params"]}
+        wf = run_walk_forward(
+            candles=wf_candles,
+            params=merged,
+            strategy_type=body.strategy_type,
+            train_days=body.train_days,
+            valid_days=body.valid_days,
+            step_days=body.step_days,
+            min_windows=body.min_windows,
+            initial_capital_jpy=body.initial_capital_jpy,
+            slippage_pct=body.slippage_pct,
+            fee_pct=body.fee_pct,
+        )
+        wf_results.append({
+            "params": candidate["params"],
+            "grid_sharpe": candidate["sharpe_ratio"],
+            "grid_return_pct": candidate["total_return_pct"],
+            "wf_pass": wf.pass_fail,
+            "wf_fail_reason": wf.fail_reason or None,
+            "wf_positive_windows": wf.positive_windows,
+            "wf_total_windows": wf.total_windows,
+            "wf_total_return_pct": wf.total_return_pct,
+            "wf_avg_sharpe": wf.avg_sharpe,
+            "wf_max_mdd": wf.max_mdd,
+        })
+
+    # WF 통과 후보만 간추리
+    passed = [r for r in wf_results if r["wf_pass"]]
+    best = passed[0] if passed else None
+
+    return {
+        "pair": pair,
+        "strategy_type": body.strategy_type,
+        "timeframe": body.timeframe,
+        "start_date": body.start_date,
+        "end_date": body.end_date,
+        "grid_combinations_tested": total,
+        "top_n_wf_validated": len(wf_results),
+        "wf_passed_count": len(passed),
+        "best_params": best["params"] if best else None,
+        "best_wf_summary": {k: v for k, v in best.items() if k != "params"} if best else None,
+        "all_results": wf_results,
+    }
 
 
 # ──────────────────────────────────────────────────────────────
@@ -183,8 +313,6 @@ async def walk_forward_api(
     db: AsyncSession = Depends(get_db),
 ):
     """Rolling Walk-Forward 검증. box_mean_reversion + trend_following 모두 지원."""
-    from core.backtest.walk_forward import run_walk_forward
-
     if body.timeframe not in ("1h", "4h"):
         raise HTTPException(400, {"blocked_code": "INVALID_TIMEFRAME"})
 
