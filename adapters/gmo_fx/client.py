@@ -365,6 +365,13 @@ class GmoFxAdapter:
             raw=data,
         )
 
+    # GMO FX pair별 stopPrice 허용 소수점 자릿수
+    _STOP_PRICE_DECIMALS: dict[str, int] = {
+        "USD_JPY": 3, "EUR_JPY": 3, "GBP_JPY": 3, "AUD_JPY": 3,
+        "NZD_JPY": 3, "CAD_JPY": 3, "CHF_JPY": 3,
+        "EUR_USD": 5, "GBP_USD": 5,
+    }
+
     async def close_order_stop(
         self,
         symbol: str,
@@ -379,13 +386,18 @@ class GmoFxAdapter:
         POST /private/v1/closeOrder
         executionType=STOP + stopPrice 사용.
         """
+        # GMO FX 규격: stopPrice 소수점 자릿수 + size 정수 보장
+        decimals = self._STOP_PRICE_DECIMALS.get(symbol.upper(), 3)
+        rounded_price = round(trigger_price, decimals)
+        size_int = int(size)
+
         payload: dict[str, Any] = {
             "symbol": symbol.upper(),
             "side": side.upper(),
             "executionType": "STOP",
-            "stopPrice": str(trigger_price),
+            "stopPrice": str(rounded_price),
             "settlePosition": [
-                {"positionId": position_id, "size": str(size)},
+                {"positionId": position_id, "size": str(size_int)},
             ],
         }
 
