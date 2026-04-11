@@ -120,7 +120,7 @@ class SnapshotCollector:
 
         results = [sc for _, sc in strategy_score_pairs]
 
-        logger.info(
+        logger.debug(
             f"[Snapshot] {trigger_type} pair={trigger_pair!r}: "
             f"{len(results)}/{len(strategies)} 스냅샷 완료"
         )

@@ -911,3 +911,140 @@ async def test_get_sentiment_api_failure_returns_none(hub_with_url):
 
     assert result is None
     await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_get_sentiment_fng_priority(hub_with_url):
+    """
+    TC5: trading-data /api/sentiment/latest 성공
+    → source="alternative_me_fng", score/classification 그대로 반환.
+    """
+    factory, adapter = hub_with_url
+    await adapter.connect()
+    hub = DataHub(
+        session_factory=factory, adapter=adapter,
+        candle_model=TstCandle, pair_column="pair",
+        trading_data_url="http://mock-trading-data:8002",
+    )
+
+    fng_response = {
+        "scores": [
+            {
+                "source": "alternative_me_fng",
+                "score": 25,
+                "classification": "Extreme Fear",
+                "fetched_at": "2026-04-11T10:00:00+00:00",
+            }
+        ],
+        "count": 1,
+    }
+    mock_client = _make_mock_httpx_client(fng_response)
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        result = await hub.get_sentiment()
+
+    assert result is not None
+    assert result.source == "alternative_me_fng"
+    assert result.score == 25
+    assert result.classification == "Extreme Fear"
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_get_sentiment_fng_fallback_to_news(hub_with_url):
+    """
+    TC6: trading-data /api/sentiment/latest 실패 (ConnectionError)
+    → 뉴스 평균 폴백, source="marketaux_news_avg".
+    """
+    factory, adapter = hub_with_url
+    await adapter.connect()
+    hub = DataHub(
+        session_factory=factory, adapter=adapter,
+        candle_model=TstCandle, pair_column="pair",
+        trading_data_url="http://mock-trading-data:8002",
+    )
+
+    mock_news_resp = MagicMock()
+    mock_news_resp.raise_for_status = MagicMock()
+    mock_news_resp.json = MagicMock(return_value={"articles": [], "count": 0, "avg_sentiment": 0.3})
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.get = AsyncMock(side_effect=[
+        Exception("FNG 연결 실패"),
+        mock_news_resp,
+    ])
+
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        result = await hub.get_sentiment()
+
+    assert result is not None
+    assert result.source == "marketaux_news_avg"
+    assert result.score == 65  # (0.3 + 1.0) * 50 = 65
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_get_sentiment_fng_empty_scores_fallback_to_news(hub_with_url):
+    """
+    엣지: FNG API 빈 scores 배열 → 뉴스 폴백.
+    → source="marketaux_news_avg" 반환.
+    """
+    factory, adapter = hub_with_url
+    await adapter.connect()
+    hub = DataHub(
+        session_factory=factory, adapter=adapter,
+        candle_model=TstCandle, pair_column="pair",
+        trading_data_url="http://mock-trading-data:8002",
+    )
+
+    mock_fng_resp = MagicMock()
+    mock_fng_resp.raise_for_status = MagicMock()
+    mock_fng_resp.json = MagicMock(return_value={"scores": [], "count": 0})
+
+    mock_news_resp = MagicMock()
+    mock_news_resp.raise_for_status = MagicMock()
+    mock_news_resp.json = MagicMock(return_value={"articles": [], "count": 0, "avg_sentiment": -0.6})
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.get = AsyncMock(side_effect=[mock_fng_resp, mock_news_resp])
+
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        result = await hub.get_sentiment()
+
+    assert result is not None
+    assert result.source == "marketaux_news_avg"
+    assert result.score == 20  # (-0.6 + 1.0) * 50 = 20
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_get_sentiment_cache_hit_no_second_call(hub_with_url):
+    """
+    엣지: _SENTIMENT_CACHE_TTL 이내 재호출 → HTTP 1번만 (캐시 히트).
+    """
+    factory, adapter = hub_with_url
+    await adapter.connect()
+    hub = DataHub(
+        session_factory=factory, adapter=adapter,
+        candle_model=TstCandle, pair_column="pair",
+        trading_data_url="http://mock-trading-data:8002",
+    )
+
+    fng_response = {
+        "scores": [{"source": "alternative_me_fng", "score": 50,
+                    "classification": "Neutral", "fetched_at": "2026-04-11T10:00:00+00:00"}],
+        "count": 1,
+    }
+    mock_client = _make_mock_httpx_client(fng_response)
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        first = await hub.get_sentiment()
+        second = await hub.get_sentiment()
+
+    # 두 결과 동일 객체
+    assert first is second
+    # get 호출 1번만 (캐시 히트)
+    assert mock_client.get.call_count == 1
+    await adapter.close()

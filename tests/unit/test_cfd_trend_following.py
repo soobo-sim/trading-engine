@@ -624,3 +624,80 @@ class TestShortPosition:
         assert result is not None
         # 하락 추세에서 entry_sell 또는 exit_warning
         assert result["signal"] in ("entry_sell", "exit_warning")
+
+
+# ──────────────────────────────────────────────────────────────
+# _on_adjust_risk_hook 엣지케이스
+# ──────────────────────────────────────────────────────────────
+
+
+class TestAdjustRiskHook:
+    """CfdTrendFollowingManager._on_adjust_risk_hook() 엣지케이스."""
+
+    @pytest.mark.asyncio
+    async def test_hook_skips_when_no_ifd_root_order_id(self, manager, fake_adapter):
+        """
+        Given: 포지션은 있으나 extra에 ifd_root_order_id 없음
+        When:  _on_adjust_risk_hook()
+        Then:  change_order 미호출 (graceful skip)
+        """
+        fake_adapter.set_margin_trading(True)
+        pos = Position(pair="FX_BTC_JPY", entry_price=15_000_000.0, entry_amount=1.0,
+                       extra={})  # ifd_root_order_id 없음
+        manager._position["FX_BTC_JPY"] = pos
+
+        called = []
+        fake_adapter.change_order = lambda *a, **kw: called.append(a) or True
+
+        await manager._on_adjust_risk_hook(
+            "FX_BTC_JPY",
+            {"stop_loss_price": 14_500_000.0, "take_profit_price": 16_000_000.0},
+            {**_DEFAULT_PARAMS},
+        )
+        assert not called, "ifd_root_order_id 없으면 change_order 호출 안 됨"
+
+    @pytest.mark.asyncio
+    async def test_hook_skips_when_no_close_orders(self, manager, fake_adapter):
+        """
+        Given: ifd_root_order_id 있지만 close 주문 없음 (이미 체결/취소)
+        When:  _on_adjust_risk_hook()
+        Then:  change_order 미호출
+        """
+        fake_adapter.set_margin_trading(True)
+        # root_order_id=9999에 해당하는 주문 없음 (get_orders_by_root → [])
+        pos = Position(pair="FX_BTC_JPY", entry_price=15_000_000.0, entry_amount=1.0,
+                       extra={"ifd_root_order_id": "9999"})
+        manager._position["FX_BTC_JPY"] = pos
+
+        called = []
+        fake_adapter.change_order = lambda *a, **kw: called.append(a) or True
+
+        await manager._on_adjust_risk_hook(
+            "FX_BTC_JPY",
+            {"stop_loss_price": 14_500_000.0, "take_profit_price": 16_000_000.0},
+            {**_DEFAULT_PARAMS},
+        )
+        assert not called, "close 주문 없으면 change_order 호출 안 됨"
+
+    @pytest.mark.asyncio
+    async def test_hook_skips_when_no_sl_tp_in_adjustments(self, manager, fake_adapter):
+        """
+        Given: adjustments에 stop_loss_price/take_profit_price 모두 없음
+        When:  _on_adjust_risk_hook()
+        Then:  change_order 미호출 (변경할 대상 없음)
+        """
+        fake_adapter.set_margin_trading(True)
+        pos = Position(pair="FX_BTC_JPY", entry_price=15_000_000.0, entry_amount=1.0,
+                       extra={"ifd_root_order_id": "1234"})
+        manager._position["FX_BTC_JPY"] = pos
+
+        called = []
+        fake_adapter.change_order = lambda *a, **kw: called.append(a) or True
+
+        # adjustments에 stop_loss_price/take_profit_price 없음
+        await manager._on_adjust_risk_hook(
+            "FX_BTC_JPY",
+            {"stop_loss_pct": 1.5},  # 가격 아닌 비율만 있음
+            {**_DEFAULT_PARAMS},
+        )
+        assert not called, "가격 없으면 change_order 호출 안 됨"

@@ -1112,6 +1112,7 @@ class AiJudgment(Base):
     realized_pnl = Column(Float, nullable=True)
     hold_duration_hours = Column(Float, nullable=True)
     confidence_error = Column(Float, nullable=True)       # |predicted - actual_success|
+    post_analysis = Column(Text, nullable=True)           # LLM 사후 분석 텍스트 (ENABLE_POST_ANALYSIS=true 시)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), nullable=True)
@@ -1161,6 +1162,9 @@ class RachelAdvisory(Base):
     # 에이전트 요약 (학습 루프용)
     alice_summary = Column(Text, nullable=True)            # 앨리스 제안 1줄
     samantha_summary = Column(Text, nullable=True)         # 사만다 감사 1줄
+
+    # adjust_risk 전용 (action=adjust_risk 시에만 사용)
+    adjustments = Column(JSON, nullable=True)              # {stop_loss_pct, take_profit_ratio, trailing_atr_multiplier, force_exit}
 
     # 시간
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)

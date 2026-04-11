@@ -168,7 +168,7 @@ async def _trigger_rachel_analysis(
 
     cooldown = ALERT_COOLDOWN_EXTENDED_SEC if _consecutive_same.get(pair, 0) >= 3 else ALERT_COOLDOWN_SEC
     if now - last < cooldown:
-        logger.info(f"레이첼 webhook 쿨다운 중: {pair} ({int(now - last)}s ago, cooldown={cooldown}s, repeat={_consecutive_same.get(pair, 0)})")
+        logger.debug(f"레이첼 webhook 쿨다운 중: {pair} ({int(now - last)}s ago, cooldown={cooldown}s, repeat={_consecutive_same.get(pair, 0)})")
         return
 
     _last_alert_time[pair] = now

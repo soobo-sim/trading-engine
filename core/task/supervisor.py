@@ -88,7 +88,7 @@ class TaskSupervisor:
         """
         async with self._lock:
             if name in self._tasks and self._tasks[name].alive:
-                logger.info(f"[Supervisor] {name}: 이미 실행 중 → 교체")
+                logger.debug(f"[Supervisor] {name}: 이미 실행 중 → 교체")
                 await self._cancel_task(self._tasks[name])
 
             info = TaskInfo(
@@ -101,7 +101,7 @@ class TaskSupervisor:
                 auto_restart=auto_restart,
             )
             self._tasks[name] = info
-            logger.info(f"[Supervisor] {name}: 등록 완료")
+            logger.debug(f"[Supervisor] {name}: 등록 완료")
 
     # ── 중지 ────────────────────────────────
 
@@ -111,7 +111,7 @@ class TaskSupervisor:
             info = self._tasks.pop(name, None)
             if info:
                 await self._cancel_task(info)
-                logger.info(f"[Supervisor] {name}: 중지 완료")
+                logger.debug(f"[Supervisor] {name}: 중지 완료")
 
     async def stop_group(self, prefix: str) -> None:
         """prefix로 시작하는 모든 태스크 중지. (예: "trend_candle:xrp_jpy" → prefix="xrp_jpy")"""
@@ -121,7 +121,7 @@ class TaskSupervisor:
                 info = self._tasks.pop(name)
                 await self._cancel_task(info)
             if to_remove:
-                logger.info(f"[Supervisor] 그룹 중지: {to_remove}")
+                logger.debug(f"[Supervisor] 그룹 중지: {to_remove}")
 
     async def stop_all(self) -> None:
         """모든 태스크 graceful shutdown."""
@@ -130,7 +130,7 @@ class TaskSupervisor:
             for name in names:
                 info = self._tasks.pop(name)
                 await self._cancel_task(info)
-            logger.info(f"[Supervisor] 전체 종료: {len(names)}개 태스크")
+            logger.debug(f"[Supervisor] 전체 종료: {len(names)}개 태스크")
 
     # ── 조회 ────────────────────────────────
 
@@ -195,10 +195,10 @@ class TaskSupervisor:
             try:
                 await coro_factory()
                 # coroutine이 정상 종료 — 재시작 안 함
-                logger.info(f"[Supervisor] {name}: 정상 종료")
+                logger.debug(f"[Supervisor] {name}: 정상 종료")
                 return
             except asyncio.CancelledError:
-                logger.info(f"[Supervisor] {name}: 취소됨")
+                logger.debug(f"[Supervisor] {name}: 취소됨")
                 return
             except Exception as exc:
                 restarts += 1
@@ -217,7 +217,7 @@ class TaskSupervisor:
                     return
 
                 wait = min(backoff * (2 ** (restarts - 1)), 60.0)  # 최대 60초
-                logger.info(f"[Supervisor] {name}: {wait:.1f}초 후 재시작")
+                logger.debug(f"[Supervisor] {name}: {wait:.1f}초 후 재시작")
                 await asyncio.sleep(wait)
 
     @staticmethod

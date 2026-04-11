@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 _MACRO_CACHE_TTL = 3600   # 1시간 — FRED 일배치 데이터
 _EVENTS_CACHE_TTL = 300   # 5분 — 경제 캘린더
+_SENTIMENT_CACHE_TTL = 3600  # 1시간 — Fear & Greed Index 갱신 주기
 
 from core.data.dto import (
     CandleDTO,
@@ -131,6 +132,8 @@ class DataHub:
         self._events_cache: Optional[tuple[tuple[EconomicEventDTO, ...], datetime]] = None
         # v2 뉴스 캐시 (category별)
         self._news_cache: dict[str, tuple[tuple[NewsDTO, ...], datetime]] = {}
+        # v2 센티먼트 캐시 (FNG 1시간 TTL)
+        self._sentiment_cache: Optional[tuple[SentimentDTO, datetime]] = None
 
     # ── v1 구현: 캔들 ──────────────────────────────
 
@@ -294,16 +297,49 @@ class DataHub:
         return dtos
 
     async def get_sentiment(self) -> Optional[SentimentDTO]:
-        """최근 뉴스 sentiment 평균 → SentimentDTO.
+        """센티먼트 지수 조회. Fear & Greed Index 우선, 실패 시 뉴스 평균 폴백.
 
-        trading-data /api/news/latest의 avg_sentiment (전체 카테고리, 24h, 50건)를
-        0~100 스케일로 변환. 별도 Fear & Greed API 없이 뉴스 sentiment으로 대체 (Phase 1).
-        API 실패 또는 데이터 없으면 None.
-        trading_data_url 미설정 시 None.
+        1차: trading-data /api/sentiment/latest (source=alternative_me_fng)
+        2차 폴백: trading-data /api/news/latest avg_sentiment → 0~100 변환
+
+        캐시 TTL: 1시간 (FNG 갱신 주기). 캐시 HIT 시 API 호출 없음.
+        API 실패 및 데이터 없으면 None. trading_data_url 미설정 시 None.
         """
         if self._trading_data_url is None:
             return None
 
+        now = datetime.now(tz=timezone.utc)
+        if self._sentiment_cache is not None:
+            cached, fetched_at = self._sentiment_cache
+            if (now - fetched_at).total_seconds() < _SENTIMENT_CACHE_TTL:
+                return cached
+
+        # 1차: Fear & Greed Index (trading-data /api/sentiment/latest)
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(
+                    f"{self._trading_data_url}/api/sentiment/latest",
+                    params={"source": "alternative_me_fng", "limit": 1},
+                )
+                resp.raise_for_status()
+                scores = resp.json().get("scores", [])
+
+            if scores:
+                entry = scores[0]
+                dto = SentimentDTO(
+                    source="alternative_me_fng",
+                    score=int(entry["score"]),
+                    classification=entry["classification"],
+                    timestamp=datetime.fromisoformat(
+                        entry["fetched_at"].replace("Z", "+00:00")
+                    ),
+                )
+                self._sentiment_cache = (dto, now)
+                return dto
+        except Exception as e:
+            logger.warning(f"[DataHub] Fear & Greed 조회 실패 (뉴스로 폴백): {e}")
+
+        # 2차 폴백: 뉴스 sentiment 평균 (기존 로직)
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
                 resp = await client.get(

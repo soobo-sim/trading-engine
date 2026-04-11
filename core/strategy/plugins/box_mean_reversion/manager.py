@@ -130,12 +130,12 @@ class BoxMeanReversionManager:
     def register_paper_pair(self, pair: str, strategy_id: int) -> None:
         """proposed 전략의 pair를 Paper 실행으로 등록. 해당 pair에만 PaperExecutor 바인딩."""
         self._paper_executors[pair] = PaperExecutor(self._session_factory, strategy_id)
-        logger.info(f"[BoxMgr] {pair}: PaperExecutor 등록 strategy_id={strategy_id}")
+        logger.debug(f"[BoxMgr] {pair}: PaperExecutor 등록 strategy_id={strategy_id}")
 
     def unregister_paper_pair(self, pair: str) -> None:
         """Paper 등록 해제. 추천 승인/pair 전환 시 호출."""
         self._paper_executors.pop(pair, None)
-        logger.info(f"[BoxMgr] {pair}: PaperExecutor 해제")
+        logger.debug(f"[BoxMgr] {pair}: PaperExecutor 해제")
 
     def _get_executor(self, pair: str) -> IExecutor:
         """pair에 해당하는 executor 반환. paper pair면 PaperExecutor, 아니면 공유 executor."""
@@ -219,7 +219,7 @@ class BoxMeanReversionManager:
             f"box_entry:{pair}",
             lambda p=pair: self._entry_monitor(p),
         )
-        logger.info(f"[BoxMgr] {pair}: 박스 인프라 태스크 2개 시작")
+        logger.debug(f"[BoxMgr] {pair}: 박스 인프라 태스크 2개 시작")
 
     async def stop(self, pair: str) -> None:
         """pair에 대한 태스크 종료."""
@@ -234,7 +234,7 @@ class BoxMeanReversionManager:
         self._exchange_sl_orders.pop(pair, None)
         self._ifdoco_orders.pop(pair, None)
         self._ifdoco_meta.pop(pair, None)
-        logger.info(f"[BoxMgr] {pair}: 박스 인프라 태스크 종료")
+        logger.debug(f"[BoxMgr] {pair}: 박스 인프라 태스크 종료")
 
     def is_running(self, pair: str) -> bool:
         """pair에 대한 박스 전략 태스크가 실행 중인지 확인."""
@@ -572,7 +572,7 @@ class BoxMeanReversionManager:
 
         # 포지션 가드: 포지션 보유 중 신규 박스 생성 금지
         if await self._has_open_position(pair):
-            logger.info(f"[BoxMgr] {pair}: 포지션 보유 중 — 신규 박스 생성 금지")
+            logger.debug(f"[BoxMgr] {pair}: 포지션 보유 중 — 신규 박스 생성 금지")
             return None
 
         existing = await self._get_active_box(pair)
@@ -582,7 +582,7 @@ class BoxMeanReversionManager:
 
         candles = await self._get_completed_candles(pair, basis_tf, lookback)
         if len(candles) < min_touches * 2:
-            logger.info(f"[BoxMgr] {pair}: 캔들 부족 ({len(candles)}개 < {min_touches * 2})")
+            logger.debug(f"[BoxMgr] {pair}: 캔들 부족 ({len(candles)}개 < {min_touches * 2})")
             return None
 
         upper, upper_count = self._find_cluster(
@@ -595,11 +595,11 @@ class BoxMeanReversionManager:
         )
 
         if upper is None or lower is None:
-            logger.info(f"[BoxMgr] {pair}: 박스 불형성 (upper={upper}, lower={lower})")
+            logger.debug(f"[BoxMgr] {pair}: 박스 불형성 (upper={upper}, lower={lower})")
             return None
 
         if upper <= lower:
-            logger.info(f"[BoxMgr] {pair}: 상단 ≤ 하단, 박스 무효")
+            logger.debug(f"[BoxMgr] {pair}: 상단 ≤ 하단, 박스 무효")
             return None
 
         # 최소 박스 폭: tolerance×2 + fee×2

@@ -733,14 +733,14 @@ class GmoFxAdapter:
                 ) as ws:
                     self._ws = ws
                     self._ws_connected = True
-                    logger.info(f"[GMO FX WS] 연결: {self._ws_public_url}")
+                    logger.debug(f"[GMO FX WS] 연결: {self._ws_public_url}")
 
                     await ws.send(json.dumps({
                         "command": "subscribe",
                         "channel": "ticker",
                         "symbol": symbol,
                     }))
-                    logger.info(f"[GMO FX WS] ticker 구독: {symbol}")
+                    logger.debug(f"[GMO FX WS] ticker 구독: {symbol}")
 
                     async for raw in ws:
                         try:
@@ -765,7 +765,7 @@ class GmoFxAdapter:
                 from core.monitoring.maintenance import is_maintenance_window, seconds_until_maintenance_end
                 if is_maintenance_window("gmofx"):
                     wait = seconds_until_maintenance_end("gmofx") or 3600
-                    logger.info(f"[GMO FX WS] 정기 메인터넌스 중 — {wait}초 대기 후 재접속")
+                    logger.debug(f"[GMO FX WS] 정기 메인터넌스 중 — {wait}초 대기 후 재접속")
                     await asyncio.sleep(wait)
                     delay = 1
                 else:
@@ -827,7 +827,7 @@ class GmoFxAdapter:
                     ping_timeout=10,
                     close_timeout=5,
                 ) as ws:
-                    logger.info("[GMO FX Private WS] 연결 성공")
+                    logger.debug("[GMO FX Private WS] 연결 성공")
 
                     # executionEvents 구독 (INITIAL: 미체결 초기 데이터 1회)
                     await ws.send(json.dumps({
@@ -835,14 +835,14 @@ class GmoFxAdapter:
                         "channel": "executionEvents",
                         "option": "INITIAL",
                     }))
-                    logger.info("[GMO FX Private WS] executionEvents 구독")
+                    logger.debug("[GMO FX Private WS] executionEvents 구독")
 
                     # orderEvents 구독
                     await ws.send(json.dumps({
                         "command": "subscribe",
                         "channel": "orderEvents",
                     }))
-                    logger.info("[GMO FX Private WS] orderEvents 구독")
+                    logger.debug("[GMO FX Private WS] orderEvents 구독")
 
                     async for raw in ws:
                         try:
@@ -861,7 +861,7 @@ class GmoFxAdapter:
                 from core.monitoring.maintenance import is_maintenance_window, seconds_until_maintenance_end
                 if is_maintenance_window("gmofx"):
                     wait = seconds_until_maintenance_end("gmofx") or 3600
-                    logger.info(f"[GMO FX Private WS] 정기 메인터넌스 중 — {wait}초 대기 후 재접속")
+                    logger.debug(f"[GMO FX Private WS] 정기 메인터넌스 중 — {wait}초 대기 후 재접속")
                     await asyncio.sleep(wait)
                     delay = 1
                 else:

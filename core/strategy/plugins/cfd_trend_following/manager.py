@@ -15,9 +15,10 @@ CFD 고유 로직:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import Dict, Optional, Type
+from typing import Any, Dict, Optional, Type
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -261,7 +262,7 @@ class CfdTrendFollowingManager(BaseTrendManager):
         # FX: 주말 임박 시 신규 진입 차단
         is_fx = self._adapter.exchange_name == "gmofx"
         if is_fx and (should_close_for_weekend() or not is_fx_market_open()):
-            logger.info(f"[CfdMgr] {pair}: FX 시장 휴장/주말 임박 → 진입 차단")
+            logger.debug(f"[CfdMgr] {pair}: FX 시장 휴장/주말 임박 → 진입 차단")
             return
 
         keep_rate = self._last_keep_rate.get(pair)
@@ -293,7 +294,7 @@ class CfdTrendFollowingManager(BaseTrendManager):
             collateral = await self._adapter.get_collateral()
             available_collateral = collateral.collateral - collateral.require_collateral
             if available_collateral <= 0:
-                logger.info(f"[CfdMgr] {product_code}: 여유 증거금 없음, 진입 스킵")
+                logger.debug(f"[CfdMgr] {product_code}: 여유 증거금 없음, 진입 스킵")
                 return
 
             position_size_pct = float(params.get("position_size_pct", 10.0))
@@ -316,7 +317,7 @@ class CfdTrendFollowingManager(BaseTrendManager):
 
             min_coin = float(params.get("min_coin_size", 0.001))
             if coin_size < min_coin:
-                logger.info(f"[CfdMgr] {product_code}: 수량 부족 ({coin_size} < {min_coin})")
+                logger.debug(f"[CfdMgr] {product_code}: 수량 부족 ({coin_size} < {min_coin})")
                 return
 
             # 슬리피지 체크
@@ -531,3 +532,107 @@ class CfdTrendFollowingManager(BaseTrendManager):
                 )
         except Exception as e:
             logger.error(f"[CfdMgr] {product_code}: DB 청산 기록 실패 — {e}", exc_info=True)
+
+    # ──────────────────────────────────────────
+    # adjust_risk hook (IFD-OCO 주문 변경)
+    # ──────────────────────────────────────────
+
+    async def _on_adjust_risk_hook(
+        self, pair: str, adjustments: dict, params: dict
+    ) -> None:
+        """adjust_risk 실행 후 GMO FX IFD-OCO 주문 가격 변경.
+
+        포지션의 extra["ifd_root_order_id"]가 있으면 changeOrder API로
+        SL/TP 주문 가격을 갱신한다.
+
+        변경 순서:
+          1. SL(STOP) 주문 → 리스크 방어 우선
+          2. 1초 대기 (GMO FX POST 1회/초 제한)
+          3. TP(LIMIT) 주문
+
+        실패 시 WARNING 로그만 (이미 인메모리 파라미터는 갱신됨).
+        """
+        if not hasattr(self._adapter, "change_order"):
+            return
+        if not hasattr(self._adapter, "get_orders_by_root"):
+            return
+
+        pos = self._position.get(pair)
+        if pos is None:
+            return
+
+        root_order_id = pos.extra.get("ifd_root_order_id")
+        if not root_order_id:
+            logger.debug(f"[CfdMgr] {pair}: ifd_root_order_id 없음 — IFD-OCO 변경 스킵")
+            return
+
+        new_sl = adjustments.get("stop_loss_price")
+        new_tp = adjustments.get("take_profit_price")
+        if new_sl is None and new_tp is None:
+            return
+
+        try:
+            # 현재 서브 주문 목록 조회
+            sub_orders = await self._adapter.get_orders_by_root(str(root_order_id))
+        except Exception as e:
+            logger.warning(f"[CfdMgr] {pair}: IFD-OCO 서브 주문 조회 실패 — {e}")
+            return
+
+        # OPEN(1차 진입) 주문이 이미 체결됐는지 확인
+        # 1차 체결 후에도 CLOSE 주문(SL/TP)은 WAITING 상태로 존재
+        close_orders = [
+            o for o in sub_orders
+            if o.get("settleType") == "CLOSE"
+            and o.get("status") in ("WAITING", "ORDERED")
+        ]
+        if not close_orders:
+            logger.debug(f"[CfdMgr] {pair}: 활성 CLOSE 주문 없음 — IFD-OCO 변경 스킵")
+            return
+
+        # SL(STOP) 주문 먼저 변경
+        sl_order = next(
+            (o for o in close_orders if o.get("executionType") == "STOP"), None
+        )
+        if sl_order and new_sl is not None:
+            sl_root_id = sl_order.get("rootOrderId")
+            if sl_root_id:
+                new_sl_rounded = self._adapter._round_price(pair, float(new_sl))
+                try:
+                    ok = await self._adapter.change_order(int(sl_root_id), new_sl_rounded)
+                    if ok:
+                        logger.info(
+                            f"[CfdMgr] {pair}: IFD-OCO SL 변경 완료 "
+                            f"root={sl_root_id} → ¥{new_sl_rounded}"
+                        )
+                    else:
+                        logger.warning(
+                            f"[CfdMgr] {pair}: IFD-OCO SL 변경 실패 root={sl_root_id}"
+                        )
+                except Exception as e:
+                    logger.warning(f"[CfdMgr] {pair}: IFD-OCO SL 변경 오류 — {e}")
+
+        # 1초 대기 (GMO FX POST 1회/초 제한)
+        if sl_order and new_sl is not None and new_tp is not None:
+            await asyncio.sleep(1.0)
+
+        # TP(LIMIT) 주문 변경
+        tp_order = next(
+            (o for o in close_orders if o.get("executionType") == "LIMIT"), None
+        )
+        if tp_order and new_tp is not None:
+            tp_root_id = tp_order.get("rootOrderId")
+            if tp_root_id:
+                new_tp_rounded = self._adapter._round_price(pair, float(new_tp))
+                try:
+                    ok = await self._adapter.change_order(int(tp_root_id), new_tp_rounded)
+                    if ok:
+                        logger.info(
+                            f"[CfdMgr] {pair}: IFD-OCO TP 변경 완료 "
+                            f"root={tp_root_id} → ¥{new_tp_rounded}"
+                        )
+                    else:
+                        logger.warning(
+                            f"[CfdMgr] {pair}: IFD-OCO TP 변경 실패 root={tp_root_id}"
+                        )
+                except Exception as e:
+                    logger.warning(f"[CfdMgr] {pair}: IFD-OCO TP 변경 오류 — {e}")

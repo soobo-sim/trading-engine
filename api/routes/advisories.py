@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/advisories", tags=["Advisories"])
 
-_VALID_ACTIONS = frozenset({"entry_long", "entry_short", "hold", "exit"})
+_VALID_ACTIONS = frozenset({"entry_long", "entry_short", "hold", "exit", "adjust_risk"})
 _VALID_REGIMES = frozenset({"trending", "ranging", "uncertain"})
 
 
@@ -30,7 +30,7 @@ _VALID_REGIMES = frozenset({"trending", "ranging", "uncertain"})
 
 class AdvisoryCreateRequest(BaseModel):
     pair: str = Field(..., description="페어 (예: BTC_JPY, USD_JPY)")
-    action: str = Field(..., description="entry_long|entry_short|hold|exit")
+    action: str = Field(..., description="entry_long|entry_short|hold|exit|adjust_risk")
     confidence: float = Field(..., ge=0.0, le=1.0, description="판정 확신도 0.0~1.0")
     size_pct: float | None = Field(None, ge=0.0, le=0.80, description="포지션 사이즈 비율 (최대 0.80)")
     stop_loss: float | None = None
@@ -41,6 +41,10 @@ class AdvisoryCreateRequest(BaseModel):
     alice_summary: str | None = None
     samantha_summary: str | None = None
     ttl_hours: float = Field(5.0, gt=0.0, le=48.0, description="만료까지 시간 (기본 5H, 최대 48H)")
+    adjustments: dict | None = Field(
+        None,
+        description="adjust_risk 전용. 키: stop_loss_pct, take_profit_ratio, trailing_atr_multiplier, force_exit",
+    )
 
 
 class AdvisoryResponse(BaseModel):
@@ -57,6 +61,7 @@ class AdvisoryResponse(BaseModel):
     risk_notes: str | None
     alice_summary: str | None
     samantha_summary: str | None
+    adjustments: dict | None
     created_at: datetime
     expires_at: datetime
     is_expired: bool
@@ -83,6 +88,7 @@ def _to_response(advisory: RachelAdvisory) -> AdvisoryResponse:
         risk_notes=advisory.risk_notes,
         alice_summary=advisory.alice_summary,
         samantha_summary=advisory.samantha_summary,
+        adjustments=advisory.adjustments,
         created_at=advisory.created_at,
         expires_at=expires_at,
         is_expired=now >= expires_at,
@@ -113,10 +119,18 @@ async def create_advisory(
             400,
             {"blocked_code": "INVALID_REGIME", "detail": f"regime은 {sorted(_VALID_REGIMES)} 중 하나여야 합니다."},
         )
+    if body.action == "adjust_risk" and not body.adjustments:
+        raise HTTPException(
+            400,
+            {"blocked_code": "ADJUSTMENTS_REQUIRED", "detail": "action=adjust_risk 이면 adjustments 필수."},
+        )
 
     now = datetime.now(timezone.utc)
     expires_at = now + timedelta(hours=body.ttl_hours)
     exchange = os.environ.get("EXCHANGE", "bitflyer").lower()
+
+    # adjust_risk 이외 액션은 adjustments 무시
+    adjustments = body.adjustments if body.action == "adjust_risk" else None
 
     advisory = RachelAdvisory(
         pair=body.pair,
@@ -131,6 +145,7 @@ async def create_advisory(
         risk_notes=body.risk_notes,
         alice_summary=body.alice_summary,
         samantha_summary=body.samantha_summary,
+        adjustments=adjustments,
         expires_at=expires_at,
     )
     db.add(advisory)

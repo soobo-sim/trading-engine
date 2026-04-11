@@ -768,3 +768,100 @@ class TestBalanceReconciliation:
     async def test_sync_skipped_when_no_position(self, manager, fake_adapter):
         """BUG-006: 포지션 없으면 에러 없이 스킵."""
         await manager._sync_position_state("xrp_jpy")  # no-op
+
+
+# ──────────────────────────────────────────────
+# adjust_risk / force_exit 테스트
+# ──────────────────────────────────────────────
+
+
+class TestAdjustRisk:
+    """_handle_execution_result(action=adjust_risk) 엣지케이스."""
+
+    def _make_result(self, adjustments: dict):
+        """ExecutionResult(action=adjust_risk, meta.adjustments) 생성 헬퍼."""
+        from core.data.dto import Decision, ExecutionResult
+        from datetime import datetime, timezone
+        dec = Decision(
+            action="adjust_risk",
+            pair="xrp_jpy",
+            exchange="bitflyer",
+            confidence=0.9,
+            size_pct=0.0,
+            stop_loss=None,
+            take_profit=None,
+            reasoning="advisory adjust_risk",
+            risk_factors=(),
+            source="rachel_advisory",
+            trigger="regular_4h",
+            raw_signal="hold",
+            timestamp=datetime.now(timezone.utc),
+            meta={"adjustments": adjustments},
+        )
+        return ExecutionResult(action="adjust_risk", executed=False, decision=dec)
+
+    def _make_snapshot(self):
+        from core.data.dto import SignalSnapshot
+        from datetime import datetime, timezone
+        return SignalSnapshot(
+            pair="xrp_jpy",
+            exchange="bitflyer",
+            timestamp=datetime.now(timezone.utc),
+            signal="hold",
+            current_price=100.0,
+            exit_signal={"action": "hold"},
+        )
+
+    @pytest.mark.asyncio
+    async def test_force_exit_triggers_close_position(self, manager, fake_adapter, db_session_factory):
+        """
+        Given: adjust_risk adjustments.force_exit=True, 포지션 있음
+        When:  _handle_execution_result()
+        Then:  _close_position 호출 → 포지션 해제
+        """
+        async with db_session_factory() as db:
+            rec = TstTrendPosition(
+                pair="xrp_jpy", entry_order_id="FORCE-EXIT-001",
+                entry_price=100.0, entry_amount=50.0, status="open",
+            )
+            db.add(rec)
+            await db.commit()
+            await db.refresh(rec)
+            db_id = rec.id
+
+        fake_adapter.set_balance("xrp", 50.0)
+        pos = Position(pair="xrp_jpy", entry_price=100.0, entry_amount=50.0,
+                       db_record_id=db_id)
+        manager._position["xrp_jpy"] = pos
+        manager._params["xrp_jpy"] = {
+            "pair": "xrp_jpy",
+            "trading_fee_rate": 0.001,
+        }
+
+        result = self._make_result({"force_exit": True})
+        snapshot = self._make_snapshot()
+        await manager._handle_execution_result("xrp_jpy", result, snapshot, {}, manager._params["xrp_jpy"])
+
+        # 청산 → 포지션 해제
+        assert manager._position.get("xrp_jpy") is None
+
+    @pytest.mark.asyncio
+    async def test_force_exit_false_does_not_close_position(self, manager, db_session_factory):
+        """
+        Given: adjust_risk adjustments.force_exit=False
+        When:  _handle_execution_result()
+        Then:  포지션 유지 (normal adjust)
+        """
+        pos = Position(pair="xrp_jpy", entry_price=100.0, entry_amount=50.0)
+        manager._position["xrp_jpy"] = pos
+        params = {"pair": "xrp_jpy", "stop_loss_pct": 2.0}
+        manager._params["xrp_jpy"] = params
+
+        result = self._make_result({"force_exit": False, "stop_loss_pct": 1.5})
+        snapshot = self._make_snapshot()
+        await manager._handle_execution_result("xrp_jpy", result, snapshot, {}, params)
+
+        # 포지션 유지 (force_exit=False → 청산 안 됨)
+        assert manager._position.get("xrp_jpy") is not None
+        # stop_loss_pct 갱신 확인
+        assert params["stop_loss_pct"] == 1.5

@@ -74,6 +74,24 @@ def _validate_gmo_safety(params: dict, state: AppState) -> None:
         except (TypeError, ValueError):
             pass
 
+    # regime 임계값 필수 검증 (FX는 BTC 기본값과 크게 다름)
+    _REGIME_REQUIRED_STYLES = {"trend_following", "cfd_trend_following"}
+    _REGIME_KEYS = [
+        "bb_width_trending_min",
+        "range_pct_trending_min",
+        "bb_width_ranging_max",
+        "range_pct_ranging_max",
+    ]
+    style = params.get("trading_style", "")
+    if style in _REGIME_REQUIRED_STYLES:
+        missing = [k for k in _REGIME_KEYS if k not in params]
+        if missing:
+            raise HTTPException(
+                400,
+                f"GMO FX {style} 전략에 regime 임계값 필수 "
+                f"(BTC 기본값은 FX에 부적합). 누락: {missing}",
+            )
+
 
 
 @router.get("")

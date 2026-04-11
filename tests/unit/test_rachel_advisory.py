@@ -484,3 +484,98 @@ async def test_high_confidence_advisory_propagates_to_decision():
 
     assert result.action == "entry_long"
     assert result.confidence == pytest.approx(0.95)
+
+
+# ── adjust_risk 테스트 ───────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_adjust_risk_returns_adjust_risk_when_position_exists():
+    """
+    Given: advisory action=adjust_risk, adjustments={stop_loss_pct:1.5}, 포지션 있음
+    When:  decide()
+    Then:  action=adjust_risk, meta["adjustments"] 포함
+    """
+    adv = SimpleNamespace(
+        id=10,
+        pair="BTC_JPY",
+        exchange="bitflyer",
+        action="adjust_risk",
+        confidence=0.7,
+        size_pct=None,
+        stop_loss=None,
+        take_profit=None,
+        adjustments={"stop_loss_pct": 1.5},
+        regime="ranging",
+        reasoning="변동성 확대 → SL 확대",
+        expires_at=_NOW + timedelta(hours=4.0),
+    )
+    dec, _ = _make_decision(advisory=adv)
+
+    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+        mock_dt.now.return_value = _NOW
+        result = await dec.decide(_snapshot(signal="hold", position=_pos()))
+
+    assert result.action == "adjust_risk"
+    assert result.meta.get("adjustments") == {"stop_loss_pct": 1.5}
+
+
+@pytest.mark.asyncio
+async def test_adjust_risk_returns_hold_when_no_position():
+    """
+    Given: advisory action=adjust_risk, 포지션 없음
+    When:  decide()
+    Then:  action=hold (조정할 포지션 없음)
+    """
+    adv = SimpleNamespace(
+        id=11,
+        pair="BTC_JPY",
+        exchange="bitflyer",
+        action="adjust_risk",
+        confidence=0.7,
+        size_pct=None,
+        stop_loss=None,
+        take_profit=None,
+        adjustments={"stop_loss_pct": 2.0},
+        regime="ranging",
+        reasoning="포지션 없는데 adjust_risk",
+        expires_at=_NOW + timedelta(hours=4.0),
+    )
+    dec, _ = _make_decision(advisory=adv)
+
+    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+        mock_dt.now.return_value = _NOW
+        # position=None — 포지션 없음
+        result = await dec.decide(_snapshot(signal="hold"))
+
+    assert result.action == "hold"
+
+
+@pytest.mark.asyncio
+async def test_adjust_risk_empty_adjustments_still_returns_adjust_risk():
+    """
+    Given: advisory action=adjust_risk, adjustments=None (빈값), 포지션 있음
+    When:  decide()
+    Then:  action=adjust_risk, meta["adjustments"]={} (빈 dict)
+    """
+    adv = SimpleNamespace(
+        id=12,
+        pair="BTC_JPY",
+        exchange="bitflyer",
+        action="adjust_risk",
+        confidence=0.6,
+        size_pct=None,
+        stop_loss=9_500_000.0,
+        take_profit=None,
+        adjustments=None,  # None → {}로 처리
+        regime="ranging",
+        reasoning="adjustments 없음",
+        expires_at=_NOW + timedelta(hours=2.0),
+    )
+    dec, _ = _make_decision(advisory=adv)
+
+    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+        mock_dt.now.return_value = _NOW
+        result = await dec.decide(_snapshot(signal="hold", position=_pos()))
+
+    assert result.action == "adjust_risk"
+    assert result.meta.get("adjustments") == {}

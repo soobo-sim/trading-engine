@@ -449,3 +449,91 @@ async def test_gr04_passes_when_asset_increased(guardrail_with_balance, session_
     result = await guardrail_with_balance.check(d, _make_snapshot())
     assert not any("GR-04" in v for v in result.violations)
 
+
+# ── GR-05: ATH 기반 포트폴리오 낙폭 ────────────────────────────
+
+@pytest.mark.asyncio
+async def test_gr05_no_balance_model_always_passes(guardrail):
+    """
+    Given: balance_model=None (GR-05 비활성화)
+    When:  entry_long check()
+    Then:  GR-05 violation 없음
+    """
+    d = _make_decision("entry_long")
+    result = await guardrail.check(d, _make_snapshot())
+    assert not any("GR-05" in v for v in result.violations)
+
+
+@pytest.mark.asyncio
+async def test_gr05_passes_when_under_threshold(guardrail_with_balance, session_factory):
+    """
+    Given: ATH=1,000,000 JPY, 현재=900,000 JPY → DD=10% < 기본 임계 15%
+    When:  entry_long check()
+    Then:  GR-05 통과
+    """
+    base_time = datetime(2026, 4, 1, 6, 0, 0, tzinfo=timezone.utc)
+    async with session_factory() as db:
+        db.add(TstBalance(currency="jpy", available=1_000_000.0, created_at=base_time))
+        db.add(TstBalance(
+            currency="jpy", available=900_000.0,
+            created_at=base_time + timedelta(days=5)
+        ))
+        await db.commit()
+
+    d = _make_decision("entry_long")
+    result = await guardrail_with_balance.check(d, _make_snapshot())
+    assert not any("GR-05" in v for v in result.violations)
+
+
+@pytest.mark.asyncio
+async def test_gr05_blocks_when_ath_dd_exceeds_threshold(session_factory):
+    """
+    Given: ATH=1,000,000 JPY, 현재=820,000 JPY → DD=18% > 기본 15%
+    When:  entry_long check() (max_portfolio_dd_pct 기본값 15.0)
+    Then:  approved=False, GR-05 violation
+    """
+    base_time = datetime(2026, 4, 1, 6, 0, 0, tzinfo=timezone.utc)
+    async with session_factory() as db:
+        db.add(TstBalance(currency="jpy", available=1_000_000.0, created_at=base_time))
+        db.add(TstBalance(
+            currency="jpy", available=820_000.0,
+            created_at=base_time + timedelta(days=30)
+        ))
+        await db.commit()
+
+    g = AiGuardrails(
+        session_factory=session_factory,
+        trade_model=TstTrade,
+        balance_model=TstBalance,
+        settings={
+            "max_trades_per_day": 10,
+            "max_daily_loss_pct": 50.0,
+            "max_portfolio_dd_pct": 15.0,
+        },
+    )
+    d = _make_decision("entry_long")
+    result = await g.check(d, _make_snapshot())
+    assert result.approved is False
+    assert any("GR-05" in v for v in result.violations)
+
+
+@pytest.mark.asyncio
+async def test_gr05_exit_always_bypasses(guardrail_with_balance, session_factory):
+    """
+    Given: ATH=1,000,000 JPY, 현재=700,000 JPY → DD=30% (GR-05 초과)
+    When:  action=exit check()
+    Then:  청산이므로 GR-05 체크 스킵 → approved=True
+    """
+    base_time = datetime(2026, 4, 1, 6, 0, 0, tzinfo=timezone.utc)
+    async with session_factory() as db:
+        db.add(TstBalance(currency="jpy", available=1_000_000.0, created_at=base_time))
+        db.add(TstBalance(
+            currency="jpy", available=700_000.0,
+            created_at=base_time + timedelta(days=10)
+        ))
+        await db.commit()
+
+    d = _make_decision("exit")
+    result = await guardrail_with_balance.check(d, _make_snapshot())
+    assert result.approved is True
+

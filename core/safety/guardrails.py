@@ -114,6 +114,11 @@ class AiGuardrails:
         if gr04 is not None:
             violations.append(gr04)
 
+        # GR-05: 포트폴리오 DD (ATH 기준)
+        gr05 = await self._check_gr05()
+        if gr05 is not None:
+            violations.append(gr05)
+
         is_blocked = bool(violations)
 
         if is_blocked:
@@ -291,3 +296,74 @@ class AiGuardrails:
             current_jpy: float | None = row[0] if row is not None else None
 
         return peak_jpy, current_jpy
+
+    # ── GR-05 ────────────────────────────────────────────────────
+
+    async def _check_gr05(self) -> str | None:
+        """포트폴리오 DD = (ATH - 현재잔고) / ATH × 100.
+
+        ATH(All-Time High): balance_entries 테이블의 역대 최대 total_jpy.
+        현재잔고: 가장 최근 balance_entry의 total_jpy.
+        total_jpy 컬럼이 없는 모델은 available(JPY) × 1로 단순화.
+
+        balance_model 미제공 시 항상 통과 (GR-05 비활성화).
+        데이터 부족·계산 오류 시 통과 (안전장치가 데이터 부족으로 거래를 막지 않도록).
+
+        Note: BTC 보유 자산은 미포함 (JPY only 단순화).
+              BTC+JPY 합산 포트폴리오 가치 계산은 미결 항목 (03_EXECUTION_MODEL §6).
+        """
+        if self._balance_model is None:
+            return None
+
+        max_dd_pct = float(
+            self._settings.get("max_portfolio_dd_pct", self._DEFAULT_MAX_PORTFOLIO_DD_PCT)
+        )
+        try:
+            peak_jpy, current_jpy = await self._fetch_ath_and_current_jpy()
+        except Exception as e:
+            logger.warning(f"[Guardrail] GR-05 조회 실패 (무시): {e}")
+            return None
+
+        if peak_jpy is None or current_jpy is None:
+            return None
+        if peak_jpy <= 0.0:
+            return None
+
+        dd_pct = (peak_jpy - current_jpy) / peak_jpy * 100.0
+        if dd_pct < 0.0:
+            # 현재 잔고 > ATH → DD 없음 (ATH 갱신 직후 비정상값 방어)
+            return None
+        if dd_pct >= max_dd_pct:
+            return (
+                f"GR-05: 포트폴리오 DD {dd_pct:.1f}% (임계 {max_dd_pct:.0f}%) — 수보오빠 수동 해제 필요"
+            )
+        return None
+
+    async def _fetch_ath_and_current_jpy(
+        self,
+    ) -> tuple[float | None, float | None]:
+        """balance_entries 테이블에서 ATH(전역 최대) JPY와 최근 JPY를 조회.
+
+        GR-04(_fetch_peak_and_current_jpy)와 동일 로직이지만 의미 차이:
+          GR-04: 낙폭(최근 피크 대비) — 시간 제한 없음
+          GR-05: ATH 기준 DD — 전체 기간 최대치 기준 (동일 쿼리)
+        """
+        BalanceEntry = self._balance_model
+        async with self._session_factory() as db:
+            ath_result = await db.execute(
+                select(func.max(BalanceEntry.available)).where(
+                    func.lower(BalanceEntry.currency) == "jpy",
+                )
+            )
+            ath_jpy: float | None = ath_result.scalar()
+
+            current_result = await db.execute(
+                select(BalanceEntry.available)
+                .where(func.lower(BalanceEntry.currency) == "jpy")
+                .order_by(BalanceEntry.created_at.desc())
+                .limit(1)
+            )
+            row = current_result.fetchone()
+            current_jpy: float | None = row[0] if row is not None else None
+
+        return ath_jpy, current_jpy

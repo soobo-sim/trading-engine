@@ -263,6 +263,36 @@ class RachelAdvisoryDecision:
                 ),
             )
 
+        # ── adjust_risk: 리스크 파라미터 동적 재조정 ─────────────
+        if advisory_action == "adjust_risk":
+            if not has_position:
+                # 포지션 없으면 조정 불필요
+                return self._decision(
+                    action="hold",
+                    snapshot=snapshot,
+                    confidence=confidence,
+                    size_pct=0.0,
+                    stop_loss=None,
+                    take_profit=None,
+                    reasoning=(
+                        f"advisory=adjust_risk이나 포지션 없음 → hold. "
+                        f"advisory 근거: {advisory.reasoning}"
+                    ),
+                )
+            adjustments = advisory.adjustments or {}
+            from core.data.dto import modify_decision as _mod
+            decision = self._decision(
+                action="adjust_risk",
+                snapshot=snapshot,
+                confidence=confidence,
+                size_pct=0.0,
+                stop_loss=advisory.stop_loss,
+                take_profit=advisory.take_profit,
+                reasoning=f"레이첼 adjust_risk: {advisory.reasoning}",
+            )
+            # meta에 조정 파라미터 첨부 (base_trend가 읽어 _params에 적용)
+            return _mod(decision, meta={"adjustments": adjustments})
+
         # ── 기본: hold ───────────────────────────────────────────
         return self._decision(
             action="hold",

@@ -104,6 +104,8 @@ class BaseTrendManager(ABC):
         self._orchestrator: Optional[ExecutionOrchestrator] = None
         # Data Layer 연결 (v1.5)
         self._data_hub: Optional[IDataHub] = None
+        # 사후 분석 (ENABLE_POST_ANALYSIS=true 시 주입)
+        self._post_analyzer: Optional[Any] = None
 
     # ──────────────────────────────────────────
     # Public API
@@ -136,7 +138,7 @@ class BaseTrendManager(ABC):
             max_restarts=5,
         )
 
-        logger.info(
+        logger.debug(
             f"{self._log_prefix} {pair}: 추세추종 시작 "
             f"(position={'있음' if pos else '없음'}, exchange={self._adapter.exchange_name})"
         )
@@ -154,12 +156,12 @@ class BaseTrendManager(ABC):
         self._ema_slope_last_key.pop(pair, None)
         self._close_fail_count.pop(pair, None)
         self._close_fail_until.pop(pair, None)
-        logger.info(f"{self._log_prefix} {pair}: 추세추종 태스크 종료")
+        logger.debug(f"{self._log_prefix} {pair}: 추세추종 태스크 종료")
 
     async def stop_all(self) -> None:
         for p in list(self._params.keys()):
             await self.stop(p)
-        logger.info(f"{self._log_prefix} 전체 추세추종 인프라 종료")
+        logger.debug(f"{self._log_prefix} 전체 추세추종 인프라 종료")
 
     def is_running(self, pair: str) -> bool:
         prefix = self._task_prefix
@@ -175,7 +177,7 @@ class BaseTrendManager(ABC):
         """proposed pair에 PaperExecutor를 바인딩한다. active pair에는 호출하지 않는다."""
         from core.execution.executor import PaperExecutor
         self._paper_executors[pair] = PaperExecutor(self._session_factory, strategy_id)
-        logger.info(
+        logger.debug(
             f"{self._log_prefix} {pair}: PaperExecutor 등록 (strategy_id={strategy_id})"
         )
 
@@ -183,7 +185,7 @@ class BaseTrendManager(ABC):
         """Paper 등록 해제. 추천 승인/pair 전환 시 호출."""
         self._paper_executors.pop(pair, None)
         self._paper_positions.pop(pair, None)
-        logger.info(f"{self._log_prefix} {pair}: PaperExecutor 해제")
+        logger.debug(f"{self._log_prefix} {pair}: PaperExecutor 해제")
 
     async def _try_paper_entry(
         self, pair: str, direction: str, current_price: float,
@@ -238,6 +240,10 @@ class BaseTrendManager(ABC):
     def set_data_hub(self, hub: IDataHub) -> None:
         """IDataHub를 주입한다. main.py lifespan에서 호출."""
         self._data_hub = hub
+
+    def set_post_analyzer(self, analyzer: Any) -> None:
+        """PostAnalyzer를 주입한다. ENABLE_POST_ANALYSIS=true 시 main.py에서 호출."""
+        self._post_analyzer = analyzer
 
     def get_position(self, pair: str) -> Optional[Position]:
         return self._position.get(pair)
@@ -494,7 +500,9 @@ class BaseTrendManager(ABC):
             if realtime_price is not None and ema is not None:
                 signal = self._check_exit_warning(pair, signal, realtime_price, ema, pos)
 
-            logger.debug(
+            # 시그널 로그: hold=DEBUG, 그 외(매매 이벤트)=INFO
+            _sig_log = logger.debug if signal == "hold" else logger.info
+            _sig_log(
                 f"{self._log_prefix} {pair}: signal={signal} exit={exit_action} "
                 f"price={current_price} pos={'있음' if pos else '없음'}"
             )
@@ -788,6 +796,50 @@ class BaseTrendManager(ABC):
             logger.info(
                 f"{self._log_prefix} {pair}: 진입 차단 — {result.reason}"
             )
+            return False
+
+        if action == "adjust_risk":
+            # 레이첼 advisory adjust_risk — 포지션 리스크 파라미터 동적 재조정
+            adjustments: dict = (
+                result.decision.meta.get("adjustments", {}) if result.decision else {}
+            )
+            if adjustments:
+                # force_exit 처리: true이면 즉시 전량 청산 (설계서 §7-3, §7-4)
+                if adjustments.get("force_exit", False):
+                    logger.warning(
+                        f"{self._log_prefix} {pair}: adjust_risk force_exit=true → 즉시 청산"
+                    )
+                    await self._close_position(pair, "advisory_force_exit")
+                    return False
+
+                _adjustable_keys = {
+                    "stop_loss_pct",
+                    "trailing_stop_atr_initial",
+                    "trailing_stop_atr_mature",
+                    "tighten_stop_atr",
+                    "ema_slope_weak_threshold",
+                }
+                applied = {}
+                for k, v in adjustments.items():
+                    if k in _adjustable_keys:
+                        params[k] = v
+                        applied[k] = v
+                if applied:
+                    logger.info(
+                        f"{self._log_prefix} {pair}: adjust_risk 적용 — {applied}"
+                    )
+                    # 새로운 SL이 있으면 즉시 갱신
+                    if pos is not None and atr is not None and "stop_loss_pct" in applied:
+                        sl_pct = float(applied["stop_loss_pct"])
+                        new_sl = round(current_price * (1.0 - sl_pct / 100.0), 6)
+                        if pos.stop_loss_price is None or new_sl > pos.stop_loss_price:
+                            pos.stop_loss_price = new_sl
+                            await self._update_trailing_stop_in_db(pair, new_sl)
+                            logger.info(
+                                f"{self._log_prefix} {pair}: adjust_risk SL 갱신 → ¥{new_sl}"
+                            )
+                # 서브클래스 훅 (GMO FX IFD-OCO 주문 변경 등)
+                await self._on_adjust_risk_hook(pair, adjustments, params)
             return False
 
         # hold: 트레일링 스탑 (포지션 있을 때만)
@@ -1130,6 +1182,18 @@ class BaseTrendManager(ABC):
         except Exception as e:
             logger.warning(f"{self._log_prefix} {pair}: ai_judgments outcome 업데이트 실패 — {e}")
 
+        # 사후 분석 (ENABLE_POST_ANALYSIS=true + PostAnalyzer 주입 시)
+        if self._post_analyzer is not None:
+            try:
+                await self._post_analyzer.analyze(
+                    judgment_id=judgment_id,
+                    outcome=outcome,
+                    realized_pnl=realized_pnl,
+                    hold_duration_hours=hold_hours,
+                )
+            except Exception as e:
+                logger.warning(f"{self._log_prefix} {pair}: 사후 분석 실패 (무시) — {e}")
+
     @abstractmethod
     async def _close_position_impl(self, pair: str, reason: str) -> None:
         """실거래소 청산 주문 실행. (구: _close_position)"""
@@ -1141,6 +1205,15 @@ class BaseTrendManager(ABC):
     ) -> None:
         """스탑 타이트닝."""
         ...
+
+    async def _on_adjust_risk_hook(
+        self, pair: str, adjustments: dict, params: dict
+    ) -> None:
+        """adjust_risk 실행 후 서브클래스별 추가 처리 hook.
+
+        기본 구현은 no-op. 서브클래스에서 override:
+          - CfdTrendFollowingManager: GMO FX IFD-OCO 주문 변경
+        """
 
     @abstractmethod
     async def _record_open(self, **kwargs) -> Optional[int]:

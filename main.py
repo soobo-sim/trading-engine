@@ -52,18 +52,41 @@ class JSONFormatter(logging.Formatter):
 
 def setup_logging(exchange: str) -> None:
     """전역 로깅 초기화. EXCHANGE 이름을 모든 로그에 포함."""
-    level = os.environ.get("LOG_LEVEL", "INFO").upper()
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(JSONFormatter(exchange=exchange))
+    from logging.handlers import TimedRotatingFileHandler
+
+    console_level_str = os.environ.get("LOG_LEVEL", "INFO").upper()
+    json_fmt = JSONFormatter(exchange=exchange)
 
     root = logging.getLogger()
-    root.setLevel(level)
+    root.setLevel(logging.DEBUG)  # 루트는 DEBUG — 파일에 전부 남김
     # 기존 핸들러 제거 (uvicorn 기본 핸들러 중복 방지)
     root.handlers.clear()
-    root.addHandler(handler)
 
-    # uvicorn 과도한 access 로그 억제
+    # 1) 콘솔: LOG_LEVEL 이상 (기본 INFO)
+    console = logging.StreamHandler(sys.stdout)
+    console.setLevel(getattr(logging, console_level_str, logging.INFO))
+    console.setFormatter(json_fmt)
+    root.addHandler(console)
+
+    # 2) 파일: DEBUG 이상 (전체 활동 기록, 30일 보관)
+    os.makedirs("logs", exist_ok=True)
+    file_handler = TimedRotatingFileHandler(
+        filename=f"logs/{exchange}.log",
+        when="midnight", interval=1, backupCount=30,
+        encoding="utf-8", utc=False,
+    )
+    file_handler.suffix = "%Y-%m-%d"
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(json_fmt)
+    root.addHandler(file_handler)
+
+    # 노이즈 억제
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("websockets").setLevel(logging.WARNING)
+    logging.getLogger("websockets.client").setLevel(logging.WARNING)
+    logging.getLogger("asyncio").setLevel(logging.WARNING)
 
 from adapters.database.models import (
     AiJudgment,
@@ -170,11 +193,15 @@ async def lifespan(app: FastAPI):
     # 로깅 초기화 (exchange 이름 포함)
     setup_logging(exchange)
 
+    # Telegram 로그 핸들러 초기화 (DEBUG→사만다, INFO→레이첼, WARNING+→Save Us)
+    from core.logging.telegram_handlers import setup_telegram_logging, shutdown_telegram_logging
+    await setup_telegram_logging(exchange)
+
     cfg = _EXCHANGE_CONFIG[exchange]
     prefix = cfg["prefix"]
     pair_column = cfg["pair_column"]
 
-    logger.info(f"Starting trading-engine: exchange={exchange}, prefix={prefix}")
+    logger.debug(f"Starting trading-engine: exchange={exchange}, prefix={prefix}")
 
     # 1. DB
     database_url = os.environ.get("DATABASE_URL", "")
@@ -276,10 +303,10 @@ async def lifespan(app: FastAPI):
                         os.environ.get("AUTO_APPROVAL_MAX_SIZE", "0.40")
                     ),
                 )
-                logger.info("Approval Gate: Phase B 자동 승인 (AutoApprovalGate)")
+                logger.debug("Approval Gate: Phase B 자동 승인 (AutoApprovalGate)")
             else:
                 _approval_gate = _tg_gate
-                logger.info("Approval Gate: Phase A 수동 승인 (TelegramApprovalGate)")
+                logger.debug("Approval Gate: Phase A 수동 승인 (TelegramApprovalGate)")
         else:
             logger.warning(
                 "TELEGRAM_APPROVAL=true이나 TELEGRAM_BOT_TOKEN/CHAT_ID 미설정 "
@@ -305,7 +332,7 @@ async def lifespan(app: FastAPI):
         )
         trend_manager.set_orchestrator(_orchestrator)
         cfd_manager.set_orchestrator(_orchestrator)
-        logger.info(f"Execution Layer 초기화: TRADING_MODE={trading_mode}")
+        logger.debug(f"Execution Layer 초기화: TRADING_MODE={trading_mode}")
     elif trading_mode in ("v2", "ai"):
         from core.decision.ai_decision import AiDecision
         from core.decision.llm_client import OpenAiLlmClient
@@ -340,7 +367,7 @@ async def lifespan(app: FastAPI):
         )
         trend_manager.set_orchestrator(_orchestrator)
         cfd_manager.set_orchestrator(_orchestrator)
-        logger.info(f"Execution Layer 초기화: TRADING_MODE={trading_mode} [DEPRECATED: v2/ai는 rachel 모드로 전환 권장]")
+        logger.debug(f"Execution Layer 초기화: TRADING_MODE={trading_mode} [DEPRECATED: v2/ai는 rachel 모드로 전환 권장]")
     elif trading_mode == "rachel":
         from core.decision.rachel_advisory import RachelAdvisoryDecision
         from core.decision.rule_based import RuleBasedDecision
@@ -367,7 +394,7 @@ async def lifespan(app: FastAPI):
         )
         trend_manager.set_orchestrator(_orchestrator)
         cfd_manager.set_orchestrator(_orchestrator)
-        logger.info(f"Execution Layer 초기화: TRADING_MODE={trading_mode} (OpenClaw 레이첼 advisory 연동)")
+        logger.debug(f"Execution Layer 초기화: TRADING_MODE={trading_mode} (OpenClaw 레이첼 advisory 연동)")
     else:
         logger.warning(
             f"TRADING_MODE={trading_mode!r} 미지원. 기본값 v1을 사용합니다."
@@ -407,7 +434,7 @@ async def lifespan(app: FastAPI):
     )
     trend_manager.set_data_hub(_data_hub)
     cfd_manager.set_data_hub(_data_hub)
-    logger.info(f"DataHub v1.5 초기화: trading_data_url={_trading_data_url}")
+    logger.debug(f"DataHub v1.5 초기화: trading_data_url={_trading_data_url}")
 
     health_checker = HealthChecker(
         adapter=adapter,
@@ -477,7 +504,7 @@ async def lifespan(app: FastAPI):
                 elif style == "cfd_trend_following":
                     cfd_manager.register_paper_pair(pair, strategy.id)
                 proposed_count += 1
-                logger.info(
+                logger.debug(
                     f"Paper trading 시작: strategy_id={strategy.id} pair={pair} style={style} "
                     f"({proposed_count}/{_PAPER_TRADING_HARDCAP})"
                 )
@@ -492,13 +519,91 @@ async def lifespan(app: FastAPI):
     if auto_reporter:
         await auto_reporter.start()
 
-    logger.info("Application startup complete")
+    # 10. PostAnalyzer (ENABLE_POST_ANALYSIS=true + OPENAI_API_KEY 필요)
+    _enable_post_analysis = os.environ.get("ENABLE_POST_ANALYSIS", "").lower() in ("true", "1", "yes")
+    if _enable_post_analysis:
+        _openai_key_pa = os.environ.get("OPENAI_API_KEY")
+        if _openai_key_pa:
+            from core.decision.llm_client import OpenAiLlmClient
+            from core.learning.post_analyzer import PostAnalyzer
+            _pa_llm = OpenAiLlmClient(
+                api_key=_openai_key_pa,
+                default_model=os.environ.get("POST_ANALYSIS_MODEL", "gpt-4o-mini"),
+            )
+            _post_analyzer = PostAnalyzer(
+                llm_client=_pa_llm,
+                session_factory=session_factory,
+                judgment_model=AiJudgment,
+            )
+            trend_manager.set_post_analyzer(_post_analyzer)
+            cfd_manager.set_post_analyzer(_post_analyzer)
+            logger.debug("PostAnalyzer 초기화 완료 (ENABLE_POST_ANALYSIS=true)")
+        else:
+            logger.warning("ENABLE_POST_ANALYSIS=true이나 OPENAI_API_KEY 미설정 — PostAnalyzer 비활성화")
+
+    # 11. EventDetector (ENABLE_EVENT_DETECTOR=true)
+    _enable_event_detector = os.environ.get("ENABLE_EVENT_DETECTOR", "").lower() in ("true", "1", "yes")
+    _event_detector = None
+    _active_pairs: list[str] = []
+    if _enable_event_detector and _data_hub is not None:
+        _active_pairs: list[str] = []
+        try:
+            from sqlalchemy import select as sa_select
+            async with session_factory() as _db:
+                _strats = (await _db.execute(
+                    sa_select(models.strategy).where(models.strategy.status == "active")
+                )).scalars().all()
+                for _s in _strats:
+                    _p = (_s.parameters or {}).get("pair") or (_s.parameters or {}).get("product_code")
+                    if _p:
+                        _active_pairs.append(_p)
+        except Exception as _e:
+            logger.warning(f"EventDetector: 활성 pair 조회 실패 — {_e}")
+        _advisory_base_url = os.environ.get("SELF_BASE_URL", f"http://localhost:{os.environ.get('PORT', '8001')}")
+        from core.monitoring.event_detector import EventDetector
+        _event_detector = EventDetector(
+            data_hub=_data_hub,
+            advisory_base_url=_advisory_base_url,
+            exchange=exchange,
+            pairs=_active_pairs,
+        )
+        await _event_detector.start()
+        logger.debug(f"EventDetector 시작 (pairs={_active_pairs})")
+
+    # 12. DailyBriefing (ENABLE_DAILY_BRIEFING=true)
+    _enable_daily_briefing = os.environ.get("ENABLE_DAILY_BRIEFING", "").lower() in ("true", "1", "yes")
+    _daily_briefing = None
+    if _enable_daily_briefing:
+        _tg_token_db = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+        _tg_chat_db = os.environ.get("TELEGRAM_CHAT_ID", "")
+        if _tg_token_db and _tg_chat_db:
+            from core.monitoring.daily_briefing import DailyBriefing
+            _daily_briefing = DailyBriefing(
+                session_factory=session_factory,
+                trade_model=models.trade,
+                pairs=_active_pairs,
+                bot_token=_tg_token_db,
+                chat_id=_tg_chat_db,
+                adapter=adapter,
+            )
+            await _daily_briefing.start()
+            logger.debug("DailyBriefing 시작 (09:00 JST 스케줄)")
+        else:
+            logger.warning("ENABLE_DAILY_BRIEFING=true이나 TELEGRAM_BOT_TOKEN/CHAT_ID 미설정 — 비활성화")
+
+    logger.debug("Application startup complete")
     yield
 
     # === Shutdown ===
     logger.info("Shutting down trading-engine...")
+    # Telegram 로그 핸들러 정리 (잔여 버퍼 전송)
+    await shutdown_telegram_logging()
     if auto_reporter:
         await auto_reporter.stop()
+    if _event_detector is not None:
+        await _event_detector.stop()
+    if _daily_briefing is not None:
+        await _daily_briefing.stop()
     await supervisor.stop_all()
     await adapter.close()
     await engine.dispose()

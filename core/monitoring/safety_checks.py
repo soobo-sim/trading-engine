@@ -454,7 +454,7 @@ class SafetyChecksMixin:
 
         exchange_raw = os.getenv("EXCHANGE", "unknown")
         if is_maintenance_window(exchange_raw):
-            logger.info(f"[Safety] {exchange_raw} 정기 메인터넌스 중 — 경고 스킵")
+            logger.debug(f"[Safety] {exchange_raw} 정기 메인터넌스 중 — 경고 스킵")
             return
 
         bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -466,7 +466,7 @@ class SafetyChecksMixin:
         now = time.time()
         last_sent = self._telegram_alert_cooldown.get("safety", 0)
         if now - last_sent < self.TELEGRAM_ALERT_COOLDOWN_SEC:
-            logger.info(f"[Safety] Telegram 경고 쿨다운 중 ({int(now - last_sent)}s ago)")
+            logger.debug(f"[Safety] Telegram 경고 쿨다운 중 ({int(now - last_sent)}s ago)")
             return
 
         critical_checks = [c for c in checks if c.status == "critical"]

@@ -421,7 +421,7 @@ class BitFlyerAdapter:
                 ) as ws:
                     self._ws = ws
                     self._ws_connected = True
-                    logger.info(f"[BF WS] 연결 완료: {self._ws_url}")
+                    logger.debug(f"[BF WS] 연결 완료: {self._ws_url}")
 
                     await ws.send(json.dumps({
                         "jsonrpc": "2.0",
@@ -429,7 +429,7 @@ class BitFlyerAdapter:
                         "params": {"channel": channel},
                         "id": 1,
                     }))
-                    logger.info(f"[BF WS] 구독: {channel}")
+                    logger.debug(f"[BF WS] 구독: {channel}")
 
                     async for raw in ws:
                         try:

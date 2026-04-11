@@ -32,7 +32,7 @@ class StrategyRegistry:
     def register(self, trading_style: str, manager: IStrategy) -> None:
         """전략 매니저 등록."""
         self._managers[trading_style] = manager
-        logger.info(f"[Registry] 전략 등록: {trading_style} → {type(manager).__name__}")
+        logger.debug(f"[Registry] 전략 등록: {trading_style} → {type(manager).__name__}")
 
     def get(self, trading_style: str) -> Optional[IStrategy]:
         """trading_style에 해당하는 매니저 반환. 없으면 None."""
@@ -53,5 +53,5 @@ class StrategyRegistry:
             logger.warning(f"[Registry] 미등록 전략: {trading_style}")
             return False
         await manager.start(pair, params)
-        logger.info(f"[Registry] {type(manager).__name__} 기동: pair={pair}")
+        logger.debug(f"[Registry] {type(manager).__name__} 기동: pair={pair}")
         return True

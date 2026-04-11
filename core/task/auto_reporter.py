@@ -105,7 +105,7 @@ class AutoReporter:
             return
         self._http_client = httpx.AsyncClient(timeout=10)
         self._task = asyncio.create_task(self._loop(), name="auto_reporter")
-        logger.info(
+        logger.debug(
             f"AutoReporter 시작: interval={self._interval_sec}s, "
             f"chat_id={self._chat_id}"
         )
@@ -120,7 +120,7 @@ class AutoReporter:
         if self._http_client:
             await self._http_client.aclose()
             self._http_client = None
-        logger.info("AutoReporter 종료")
+        logger.debug("AutoReporter 종료")
 
     async def _loop(self) -> None:
         """주기적으로 보고 생성 + 전송."""
@@ -145,7 +145,7 @@ class AutoReporter:
                 self._bot_token, self._chat_id, text,
                 client=self._http_client,
             )
-            logger.info("[AutoReporter] 메인터넌스 모드 — 간소 보고 전송")
+            logger.debug("[AutoReporter] 메인터넌스 모드 — 간소 보고 전송")
             return
 
         state = self._state
@@ -236,7 +236,7 @@ class AutoReporter:
                     import time as _time
                     from core.monitoring.health import _last_report_time
                     _last_report_time["last"] = _time.time()
-                logger.info(f"자동 보고 전송 완료: {pair}")
+                logger.debug(f"자동 보고 전송 완료: {pair}")
 
     async def _generate_report(
         self,
@@ -309,7 +309,7 @@ def create_auto_reporter(
     """환경변수 기반으로 AutoReporter 생성. 비활성이면 None 반환."""
     enabled = os.environ.get("AUTO_REPORT_ENABLED", "false").lower() == "true"
     if not enabled:
-        logger.info("AutoReporter 비활성 (AUTO_REPORT_ENABLED=false)")
+        logger.debug("AutoReporter 비활성 (AUTO_REPORT_ENABLED=false)")
         return None
 
     bot_token = os.environ.get("AUTO_REPORT_BOT_TOKEN", "")
