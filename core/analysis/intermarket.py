@@ -50,13 +50,13 @@ class IntermarketClient:
     FRED 매크로 지표 조회 클라이언트.
 
     사용:
-        client = IntermarketClient(coinmarket_url="http://coinmarket-data:8002")
+        client = IntermarketClient(trading_data_url="http://trading-data:8002")
         bias, conf, reasons = await client.get_direction_bias("usd_jpy", params)
         stressed = await client.is_macro_stress(params)
     """
 
-    def __init__(self, coinmarket_url: str) -> None:
-        self._base_url = coinmarket_url.rstrip("/")
+    def __init__(self, trading_data_url: str) -> None:
+        self._base_url = trading_data_url.rstrip("/")
         # (series_data, fetched_at)
         self._cache: Optional[tuple[dict, datetime]] = None
 
@@ -206,8 +206,8 @@ class IntermarketClient:
 
 def create_intermarket_client() -> IntermarketClient:
     """
-    환경변수 COINMARKET_DATA_URL에서 URL 읽어 IntermarketClient 생성.
+    환경변수 TRADING_DATA_URL에서 URL 읽어 IntermarketClient 생성.
     (FRED_API_KEY 미설정이어도 클라이언트는 생성됨 — coinmarket-data가 graceful 처리)
     """
-    url = os.environ.get("COINMARKET_DATA_URL", "http://coinmarket-data:8002")
-    return IntermarketClient(coinmarket_url=url)
+    url = os.environ.get("TRADING_DATA_URL", "http://trading-data:8002")
+    return IntermarketClient(trading_data_url=url)

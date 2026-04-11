@@ -1,0 +1,323 @@
+"""
+api/routes/advisories.py 단위 테스트.
+
+TestClient + SQLite in-memory로 실제 DB 왕복을 검증한다.
+
+커버 항목:
+  - POST /api/advisories → 201, DB 저장 확인
+  - POST invalid action → 400 INVALID_ACTION
+  - POST invalid regime → 400 INVALID_REGIME
+  - POST reasoning 너무 짧음 → 422 (Pydantic validation)
+  - POST confidence 범위 초과 → 422
+  - POST size_pct 최대치 초과 → 422
+  - GET /{pair}/latest → advisory 없음 404
+  - GET /{pair}/latest → 미만료 advisory 반환, is_expired=False
+  - GET /{pair}/latest → 만료 advisory + include_expired=false → 404
+  - GET /{pair}/latest → 만료 advisory + include_expired=true → is_expired=True
+  - GET exchange 격리 — 다른 exchange의 advisory는 반환 안 함
+"""
+from __future__ import annotations
+
+import os
+from datetime import datetime, timedelta, timezone
+from unittest.mock import MagicMock
+
+import pytest
+import pytest_asyncio
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+from adapters.database.models import RachelAdvisory
+from adapters.database.session import Base
+from api.routes.advisories import router
+
+# ──────────────────────────────────────────────────────────────
+# Fixtures
+# ──────────────────────────────────────────────────────────────
+
+@pytest_asyncio.fixture
+async def db_factory():
+    """SQLite in-memory — rachel_advisories 테이블만 생성."""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+    async with engine.begin() as conn:
+        target = [Base.metadata.tables["rachel_advisories"]]
+        await conn.run_sync(lambda sc: Base.metadata.create_all(sc, tables=target))
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    yield factory
+    await engine.dispose()
+
+
+def _build_client(db_factory, exchange: str = "bitflyer") -> TestClient:
+    """TestClient 생성 — EXCHANGE 환경변수 + DB override."""
+    from api.dependencies import get_db, get_state
+
+    app = FastAPI()
+    app.include_router(router)
+
+    state = MagicMock()
+
+    async def _override_state():
+        return state
+
+    async def _override_db():
+        async with db_factory() as session:
+            yield session
+
+    app.dependency_overrides[get_state] = _override_state
+    app.dependency_overrides[get_db] = _override_db
+
+    # EXCHANGE 환경변수 설정 (저장 시 exchange 컬럼에 반영)
+    os.environ["EXCHANGE"] = exchange
+    client = TestClient(app, raise_server_exceptions=True)
+    return client
+
+
+_VALID_BODY = {
+    "pair": "BTC_JPY",
+    "action": "entry_long",
+    "confidence": 0.70,
+    "size_pct": 0.5,
+    "stop_loss": 9700000.0,
+    "regime": "trending",
+    "reasoning": "EMA 상향 + RSI 52 + 매크로 금리 동결 기대로 롱 진입 유망",
+    "ttl_hours": 5.0,
+}
+
+
+# ──────────────────────────────────────────────────────────────
+# POST /api/advisories
+# ──────────────────────────────────────────────────────────────
+
+
+def test_post_advisory_success(db_factory):
+    """
+    Given: 유효한 요청 body
+    When:  POST /api/advisories
+    Then:  201 + advisory 필드 반환, is_expired=False
+    """
+    client = _build_client(db_factory)
+    resp = client.post("/api/advisories", json=_VALID_BODY)
+
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["action"] == "entry_long"
+    assert data["exchange"] == "bitflyer"
+    assert data["pair"] == "BTC_JPY"
+    assert data["confidence"] == pytest.approx(0.70)
+    assert data["is_expired"] is False
+    assert "id" in data
+
+
+def test_post_advisory_invalid_action(db_factory):
+    """
+    Given: action이 허용 목록 외
+    When:  POST /api/advisories
+    Then:  400 INVALID_ACTION
+    """
+    client = _build_client(db_factory)
+    body = {**_VALID_BODY, "action": "buy"}  # 유효하지 않은 action
+    resp = client.post("/api/advisories", json=body)
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"]["blocked_code"] == "INVALID_ACTION"
+
+
+def test_post_advisory_invalid_regime(db_factory):
+    """
+    Given: regime이 허용 목록 외
+    When:  POST /api/advisories
+    Then:  400 INVALID_REGIME
+    """
+    client = _build_client(db_factory)
+    body = {**_VALID_BODY, "regime": "volatile"}  # 유효하지 않은 regime
+    resp = client.post("/api/advisories", json=body)
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"]["blocked_code"] == "INVALID_REGIME"
+
+
+def test_post_advisory_short_reasoning(db_factory):
+    """
+    Given: reasoning이 20자 미만 (Pydantic min_length 위반)
+    When:  POST /api/advisories
+    Then:  422 Unprocessable Entity
+    """
+    client = _build_client(db_factory)
+    body = {**_VALID_BODY, "reasoning": "짧음"}
+    resp = client.post("/api/advisories", json=body)
+
+    assert resp.status_code == 422
+
+
+def test_post_advisory_confidence_out_of_range(db_factory):
+    """
+    Given: confidence > 1.0
+    When:  POST /api/advisories
+    Then:  422 Unprocessable Entity
+    """
+    client = _build_client(db_factory)
+    body = {**_VALID_BODY, "confidence": 1.5}
+    resp = client.post("/api/advisories", json=body)
+
+    assert resp.status_code == 422
+
+
+def test_post_advisory_size_pct_exceeds_max(db_factory):
+    """
+    Given: size_pct = 0.90 (최대 0.80 초과)
+    When:  POST /api/advisories
+    Then:  422 Unprocessable Entity
+    """
+    client = _build_client(db_factory)
+    body = {**_VALID_BODY, "size_pct": 0.90}
+    resp = client.post("/api/advisories", json=body)
+
+    assert resp.status_code == 422
+
+
+def test_post_advisory_ttl_hours_exceeds_max(db_factory):
+    """
+    Given: ttl_hours = 72.0 (최대 48H 초과)
+    When:  POST /api/advisories
+    Then:  422 Unprocessable Entity
+    """
+    client = _build_client(db_factory)
+    body = {**_VALID_BODY, "ttl_hours": 72.0}
+    resp = client.post("/api/advisories", json=body)
+
+    assert resp.status_code == 422
+
+
+def test_post_advisory_hold_without_size_pct(db_factory):
+    """
+    Given: action=hold, size_pct 없음 (선택 필드)
+    When:  POST /api/advisories
+    Then:  201, size_pct=None
+    """
+    client = _build_client(db_factory)
+    body = {
+        "pair": "BTC_JPY",
+        "action": "hold",
+        "confidence": 0.45,
+        "reasoning": "레인징 구간 — 뚜렷한 방향성 없음, 진입 보류",
+    }
+    resp = client.post("/api/advisories", json=body)
+
+    assert resp.status_code == 201
+    assert resp.json()["size_pct"] is None
+    assert resp.json()["action"] == "hold"
+
+
+# ──────────────────────────────────────────────────────────────
+# GET /api/advisories/{pair}/latest
+# ──────────────────────────────────────────────────────────────
+
+
+def test_get_latest_no_advisory_returns_404(db_factory):
+    """
+    Given: DB에 advisory 없음
+    When:  GET /api/advisories/BTC_JPY/latest
+    Then:  404
+    """
+    client = _build_client(db_factory)
+    resp = client.get("/api/advisories/BTC_JPY/latest")
+
+    assert resp.status_code == 404
+
+
+def test_get_latest_returns_unexpired_advisory(db_factory):
+    """
+    Given: 미만료 advisory가 DB에 있음
+    When:  GET /api/advisories/BTC_JPY/latest
+    Then:  200, is_expired=False, action 일치
+    """
+    client = _build_client(db_factory)
+    # 먼저 advisory 저장
+    post_resp = client.post("/api/advisories", json=_VALID_BODY)
+    assert post_resp.status_code == 201
+
+    get_resp = client.get("/api/advisories/BTC_JPY/latest")
+    assert get_resp.status_code == 200
+    data = get_resp.json()
+    assert data["action"] == "entry_long"
+    assert data["is_expired"] is False
+
+
+@pytest.mark.asyncio
+async def test_get_latest_expired_excluded_by_default(db_factory):
+    """
+    Given: advisory가 이미 만료됨 (expires_at을 과거로 직접 삽입)
+    When:  GET /api/advisories/BTC_JPY/latest (include_expired=false, 기본값)
+    Then:  404 (만료된 것은 제외)
+    """
+    # 만료된 advisory 직접 삽입
+    async with db_factory() as session:
+        row = RachelAdvisory(
+            pair="BTC_JPY",
+            exchange="bitflyer",
+            action="hold",
+            confidence=0.5,
+            reasoning="만료 테스트용 advisory 직접 삽입 (20자)",
+            expires_at=datetime(2020, 1, 1, tzinfo=timezone.utc),  # 과거
+        )
+        session.add(row)
+        await session.commit()
+
+    client = _build_client(db_factory)
+    resp = client.get("/api/advisories/BTC_JPY/latest")
+
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_get_latest_include_expired_returns_expired(db_factory):
+    """
+    Given: 만료된 advisory가 DB에 있음
+    When:  GET /api/advisories/BTC_JPY/latest?include_expired=true
+    Then:  200, is_expired=True
+    """
+    async with db_factory() as session:
+        row = RachelAdvisory(
+            pair="BTC_JPY",
+            exchange="bitflyer",
+            action="entry_long",
+            confidence=0.7,
+            reasoning="만료 포함 조회 테스트용 advisory 직접 삽입 (20자)",
+            expires_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
+        )
+        session.add(row)
+        await session.commit()
+
+    client = _build_client(db_factory)
+    resp = client.get("/api/advisories/BTC_JPY/latest?include_expired=true")
+
+    assert resp.status_code == 200
+    assert resp.json()["is_expired"] is True
+
+
+@pytest.mark.asyncio
+async def test_get_latest_exchange_isolation(db_factory):
+    """
+    Given: gmofx exchange로 advisory 저장됨
+    When:  EXCHANGE=bitflyer 서버에서 GET /api/advisories/BTC_JPY/latest
+    Then:  404 (다른 exchange advisory는 조회 불가)
+    """
+    # gmofx advisory 직접 삽입
+    async with db_factory() as session:
+        row = RachelAdvisory(
+            pair="BTC_JPY",
+            exchange="gmofx",  # 다른 exchange
+            action="entry_long",
+            confidence=0.7,
+            reasoning="GMO FX exchange 격리 테스트용 advisory (20자 이상)",
+            expires_at=datetime(2099, 1, 1, tzinfo=timezone.utc),
+        )
+        session.add(row)
+        await session.commit()
+
+    # EXCHANGE=bitflyer 서버에서 조회
+    client = _build_client(db_factory, exchange="bitflyer")
+    resp = client.get("/api/advisories/BTC_JPY/latest")
+
+    assert resp.status_code == 404

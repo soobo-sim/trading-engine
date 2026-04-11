@@ -66,6 +66,8 @@ def setup_logging(exchange: str) -> None:
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 
 from adapters.database.models import (
+    AiJudgment,
+    RachelAdvisory,
     StrategyTechnique,
     create_balance_entry_model,
     create_box_model,
@@ -82,7 +84,7 @@ from adapters.database.models import (
 )
 from adapters.database.session import create_db_engine, create_session_factory
 from api.dependencies import AppState, ModelRegistry
-from api.routes import system, trading, account, strategies, boxes, candles, techniques, analysis, monitoring, cfd, performance, wake_up_reviews, strategy_changes, strategy_analysis, paper_trades, strategy_scores
+from api.routes import system, trading, account, strategies, boxes, candles, techniques, analysis, monitoring, cfd, performance, wake_up_reviews, strategy_changes, strategy_analysis, paper_trades, strategy_scores, advisories
 from core.notifications.switch_telegram import send_switch_recommendation_telegram
 from core.monitoring.health import HealthChecker
 from core.analysis.event_filter import create_event_filter
@@ -244,7 +246,169 @@ async def lifespan(app: FastAPI):
     strategy_registry.register("box_mean_reversion", box_manager)
     strategy_registry.register("cfd_trend_following", cfd_manager)
 
-    # 6. Health Checker
+    # 5.5. Execution Layer 조립 (TRADING_MODE 환경변수)
+    trading_mode = os.environ.get("TRADING_MODE", "v1").lower()
+
+    # 5.5-a. Approval Gate 조립 (TELEGRAM_APPROVAL / APPROVAL_MODE 환경변수)
+    from core.execution.approval import AutoApprovalGate, TelegramApprovalGate
+
+    _approval_gate = None
+    _tg_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    _tg_chat = os.environ.get("TELEGRAM_CHAT_ID", "")
+    _approval_env = os.environ.get("TELEGRAM_APPROVAL", "").lower()
+    _approval_mode = os.environ.get("APPROVAL_MODE", "").lower()
+
+    if _approval_env in ("true", "1", "yes") or _approval_mode in ("manual", "auto"):
+        if _tg_token and _tg_chat:
+            _timeout_sec = int(os.environ.get("TELEGRAM_APPROVAL_TIMEOUT", "300"))
+            _tg_gate = TelegramApprovalGate(
+                bot_token=_tg_token,
+                chat_id=_tg_chat,
+                timeout_sec=_timeout_sec,
+            )
+            if _approval_mode == "auto":
+                _approval_gate = AutoApprovalGate(
+                    telegram_gate=_tg_gate,
+                    min_confidence=float(
+                        os.environ.get("AUTO_APPROVAL_MIN_CONFIDENCE", "0.65")
+                    ),
+                    max_auto_size=float(
+                        os.environ.get("AUTO_APPROVAL_MAX_SIZE", "0.40")
+                    ),
+                )
+                logger.info("Approval Gate: Phase B 자동 승인 (AutoApprovalGate)")
+            else:
+                _approval_gate = _tg_gate
+                logger.info("Approval Gate: Phase A 수동 승인 (TelegramApprovalGate)")
+        else:
+            logger.warning(
+                "TELEGRAM_APPROVAL=true이나 TELEGRAM_BOT_TOKEN/CHAT_ID 미설정 "
+                "— 승인 게이트 비활성화"
+            )
+
+    if trading_mode in ("v1", "rule_based"):
+        from core.decision.rule_based import RuleBasedDecision
+        from core.execution.orchestrator import ExecutionOrchestrator
+        from core.safety.guardrails import AiGuardrails
+
+        _guardrail = AiGuardrails(
+            session_factory=session_factory,
+            trade_model=models.trade,
+            balance_model=models.balance_entry,
+        )
+        _orchestrator = ExecutionOrchestrator(
+            decision_maker=RuleBasedDecision(),
+            guardrail=_guardrail,
+            session_factory=session_factory,
+            judgment_model=AiJudgment,
+            approval_gate=_approval_gate,
+        )
+        trend_manager.set_orchestrator(_orchestrator)
+        cfd_manager.set_orchestrator(_orchestrator)
+        logger.info(f"Execution Layer 초기화: TRADING_MODE={trading_mode}")
+    elif trading_mode in ("v2", "ai"):
+        from core.decision.ai_decision import AiDecision
+        from core.decision.llm_client import OpenAiLlmClient
+        from core.execution.orchestrator import ExecutionOrchestrator
+        from core.safety.guardrails import AiGuardrails
+
+        _openai_key = os.environ.get("OPENAI_API_KEY")
+        if not _openai_key:
+            raise RuntimeError("TRADING_MODE=v2 requires OPENAI_API_KEY")
+
+        _llm = OpenAiLlmClient(
+            api_key=_openai_key,
+            default_model=os.environ.get("AI_DEFAULT_MODEL", "gpt-4o-mini"),
+        )
+        _ai_decision = AiDecision(
+            llm_client=_llm,
+            alice_model=os.environ.get("AI_ALICE_MODEL"),
+            samantha_model=os.environ.get("AI_SAMANTHA_MODEL"),
+            rachel_model=os.environ.get("AI_RACHEL_MODEL"),
+        )
+        _guardrail = AiGuardrails(
+            session_factory=session_factory,
+            trade_model=models.trade,
+            balance_model=models.balance_entry,
+        )
+        _orchestrator = ExecutionOrchestrator(
+            decision_maker=_ai_decision,
+            guardrail=_guardrail,
+            session_factory=session_factory,
+            judgment_model=AiJudgment,
+            approval_gate=_approval_gate,
+        )
+        trend_manager.set_orchestrator(_orchestrator)
+        cfd_manager.set_orchestrator(_orchestrator)
+        logger.info(f"Execution Layer 초기화: TRADING_MODE={trading_mode} [DEPRECATED: v2/ai는 rachel 모드로 전환 권장]")
+    elif trading_mode == "rachel":
+        from core.decision.rachel_advisory import RachelAdvisoryDecision
+        from core.decision.rule_based import RuleBasedDecision
+        from core.execution.orchestrator import ExecutionOrchestrator
+        from core.safety.guardrails import AiGuardrails
+
+        _fallback = RuleBasedDecision()
+        _rachel_decision = RachelAdvisoryDecision(
+            session_factory=session_factory,
+            advisory_model=RachelAdvisory,
+            fallback=_fallback,
+        )
+        _guardrail = AiGuardrails(
+            session_factory=session_factory,
+            trade_model=models.trade,
+            balance_model=models.balance_entry,
+        )
+        _orchestrator = ExecutionOrchestrator(
+            decision_maker=_rachel_decision,
+            guardrail=_guardrail,
+            session_factory=session_factory,
+            judgment_model=AiJudgment,
+            approval_gate=_approval_gate,
+        )
+        trend_manager.set_orchestrator(_orchestrator)
+        cfd_manager.set_orchestrator(_orchestrator)
+        logger.info(f"Execution Layer 초기화: TRADING_MODE={trading_mode} (OpenClaw 레이첼 advisory 연동)")
+    else:
+        logger.warning(
+            f"TRADING_MODE={trading_mode!r} 미지원. 기본값 v1을 사용합니다."
+        )
+        from core.decision.rule_based import RuleBasedDecision
+        from core.execution.orchestrator import ExecutionOrchestrator
+        from core.safety.guardrails import AiGuardrails
+
+        _guardrail = AiGuardrails(
+            session_factory=session_factory,
+            trade_model=models.trade,
+            balance_model=models.balance_entry,
+        )
+        _orchestrator = ExecutionOrchestrator(
+            decision_maker=RuleBasedDecision(),
+            guardrail=_guardrail,
+            session_factory=session_factory,
+            judgment_model=AiJudgment,
+            approval_gate=_approval_gate,
+        )
+        trend_manager.set_orchestrator(_orchestrator)
+        cfd_manager.set_orchestrator(_orchestrator)
+
+    # 5.6. Data Layer (DataHub v1.5)
+    from core.data.hub import DataHub
+    from adapters.database.models import WakeUpReview
+
+    _trading_data_url = os.environ.get("TRADING_DATA_URL", "http://trading-data:8002")
+    _data_hub = DataHub(
+        session_factory=session_factory,
+        adapter=adapter,
+        candle_model=models.candle,
+        pair_column=pair_column,
+        positions=trend_manager._position,
+        trading_data_url=_trading_data_url,
+        lesson_model=WakeUpReview,
+    )
+    trend_manager.set_data_hub(_data_hub)
+    cfd_manager.set_data_hub(_data_hub)
+    logger.info(f"DataHub v1.5 초기화: trading_data_url={_trading_data_url}")
+
     health_checker = HealthChecker(
         adapter=adapter,
         supervisor=supervisor,
@@ -373,3 +537,4 @@ app.include_router(strategy_changes.router)
 app.include_router(strategy_analysis.router)
 app.include_router(paper_trades.router)
 app.include_router(strategy_scores.router)
+app.include_router(advisories.router)

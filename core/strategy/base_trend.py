@@ -34,8 +34,11 @@ from typing import Any, Dict, List, Optional, Type
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from core.data.dto import PositionDTO, SignalSnapshot
+from core.data.hub import IDataHub
 from core.exchange.base import ExchangeAdapter
 from core.exchange.types import OrderType, Position
+from core.execution.orchestrator import ExecutionOrchestrator
 from core.strategy.signals import (
     compute_adaptive_trailing_mult,
     compute_trend_signal,
@@ -93,6 +96,11 @@ class BaseTrendManager(ABC):
         # Paper Trading — pair 레벨 분리 (active pair 영향 0)
         self._paper_executors: Dict[str, Any] = {}   # pair → PaperExecutor
         self._paper_positions: Dict[str, dict] = {}  # pair → {paper_trade_id, entry_price, direction}
+
+        # Execution Layer 연결 (Step 4)
+        self._orchestrator: Optional[ExecutionOrchestrator] = None
+        # Data Layer 연결 (v1.5)
+        self._data_hub: Optional[IDataHub] = None
 
     # ──────────────────────────────────────────
     # Public API
@@ -219,6 +227,14 @@ class BaseTrendManager(ABC):
             f"direction={direction} price={current_price}"
         )
         return True
+
+    def set_orchestrator(self, orchestrator: ExecutionOrchestrator) -> None:
+        """ExecutionOrchestrator를 주입한다. main.py lifespan에서 호출."""
+        self._orchestrator = orchestrator
+
+    def set_data_hub(self, hub: IDataHub) -> None:
+        """IDataHub를 주입한다. main.py lifespan에서 호출."""
+        self._data_hub = hub
 
     def get_position(self, pair: str) -> Optional[Position]:
         return self._position.get(pair)
@@ -493,37 +509,20 @@ class BaseTrendManager(ABC):
                             )
                             await self._apply_stop_tightening(pair, current_price, atr, params)
 
-            # ── 포지션 있을 때: 청산 우선순위 ──
-            if pos is not None:
-                if signal == "exit_warning":
-                    logger.info(f"{self._log_prefix} {pair}: exit_warning @ ¥{current_price} → 전량 청산")
-                    await self._close_position(pair, "exit_warning")
-                    continue
-
-                if exit_action == "full_exit":
-                    triggers = exit_signal.get("triggers", {})
-                    reason_code = (
-                        "full_exit_ema_slope" if triggers.get("ema_slope_negative")
-                        else "full_exit_rsi_breakdown" if triggers.get("rsi_breakdown")
-                        else "full_exit"
-                    )
-                    logger.info(
-                        f"{self._log_prefix} {pair}: {reason_code} @ ¥{current_price} → 전량 청산"
-                    )
-                    await self._close_position(pair, reason_code)
-                    continue
-
-                if exit_action == "tighten_stop" and not pos.stop_tightened:
-                    if atr:
-                        await self._apply_stop_tightening(pair, current_price, atr, params)
-
-                # 적응형 트레일링 스탑
-                if atr is not None:
-                    await self._update_trailing_stop(pair, pos, current_price, atr, ema_slope_pct, rsi, params)
-
-            # ── 포지션 없을 때: 진입 ──
-            else:
-                await self._on_entry_signal(pair, signal, current_price, atr, params, signal_data)
+            # ── 오케스트레이터 위임 ──
+            if self._orchestrator is None:
+                logger.error(
+                    f"{self._log_prefix} {pair}: _orchestrator 미설정 "
+                    "— set_orchestrator() 필요. 이번 사이클 스킵."
+                )
+                continue
+            snapshot = await self._build_signal_snapshot(pair, signal_data, params, pos)
+            result = await self._orchestrator.process(snapshot)
+            should_continue = await self._handle_execution_result(
+                pair, result, snapshot, signal_data, params
+            )
+            if should_continue:
+                continue
 
     # ──────────────────────────────────────────
     # 서브클래스 hook (기본 구현 제공)
@@ -573,6 +572,160 @@ class BaseTrendManager(ABC):
                 f"¥{current_sl} → ¥{new_sl} "
                 f"(x{mult:.1f} {'tight' if pos.stop_tightened else 'adaptive'})"
             )
+
+    # ──────────────────────────────────────────
+    # Execution Layer 연동 (Step 4)
+    # ──────────────────────────────────────────
+
+    async def _build_signal_snapshot(
+        self,
+        pair: str,
+        signal_data: dict,
+        params: dict,
+        pos: Optional[Position],
+    ) -> SignalSnapshot:
+        """signal_data dict + 현재 상태 → SignalSnapshot DTO."""
+        pos_dto: Optional[PositionDTO] = None
+        if pos is not None:
+            pos_dto = PositionDTO(
+                pair=pos.pair,
+                entry_price=pos.entry_price,
+                entry_amount=pos.entry_amount,
+                stop_loss_price=pos.stop_loss_price,
+                stop_tightened=pos.stop_tightened,
+                extra=dict(pos.extra),
+            )
+
+        candles_raw = signal_data.get("candles") or []
+        rsi_series_raw = signal_data.get("rsi_series") or []
+
+        # ── v1.5: DataHub에서 매크로/이벤트/교훈 조회 ──
+        macro = None
+        upcoming_events = None
+        relevant_lessons = None
+        news = None
+        sentiment = None
+        if self._data_hub is not None:
+            try:
+                macro = await self._data_hub.get_macro_snapshot()
+            except Exception as e:
+                logger.debug(f"{self._log_prefix} {pair}: DataHub macro 조회 실패: {e}")
+            try:
+                upcoming_events = await self._data_hub.get_upcoming_events()
+            except Exception as e:
+                logger.debug(f"{self._log_prefix} {pair}: DataHub events 조회 실패: {e}")
+            try:
+                relevant_lessons = await self._data_hub.get_lessons(
+                    pair, signal_data["signal"]
+                )
+            except Exception as e:
+                logger.debug(f"{self._log_prefix} {pair}: DataHub lessons 조회 실패: {e}")
+            try:
+                news = await self._data_hub.get_news_summary(pair)
+            except Exception as e:
+                logger.debug(f"{self._log_prefix} {pair}: DataHub news 조회 실패: {e}")
+            try:
+                sentiment = await self._data_hub.get_sentiment()
+            except Exception as e:
+                logger.debug(f"{self._log_prefix} {pair}: DataHub sentiment 조회 실패: {e}")
+
+        return SignalSnapshot(
+            pair=pair,
+            exchange=self._adapter.exchange_name,
+            timestamp=datetime.now(timezone.utc),
+            signal=signal_data["signal"],
+            current_price=signal_data["current_price"],
+            exit_signal=signal_data.get("exit_signal", {}),
+            ema=signal_data.get("ema"),
+            ema_slope_pct=signal_data.get("ema_slope_pct"),
+            rsi=signal_data.get("rsi"),
+            atr=signal_data.get("atr"),
+            stop_loss_price=signal_data.get("stop_loss_price"),
+            position=pos_dto,
+            candles=tuple(candles_raw) if candles_raw else None,
+            rsi_series=tuple(rsi_series_raw) if rsi_series_raw else None,
+            params=params,
+            macro=macro,
+            upcoming_events=upcoming_events,
+            relevant_lessons=relevant_lessons,
+            news=news,
+            sentiment=sentiment,
+        )
+
+    async def _handle_execution_result(
+        self,
+        pair: str,
+        result: Any,             # ExecutionResult — Any로 선언해 순환 import 방지
+        snapshot: SignalSnapshot,
+        signal_data: dict,
+        params: dict,
+    ) -> bool:
+        """ExecutionResult → 실제 실행.
+
+        Returns:
+            True  — 호출자(_candle_monitor)가 continue해야 하는 경우 (청산 후)
+            False — 다음 로직 불필요 (hold / entry 등)
+        """
+        action = result.action
+        pos = self._position.get(pair)
+        current_price = snapshot.current_price
+        atr = snapshot.atr
+        ema_slope_pct = snapshot.ema_slope_pct
+        rsi = snapshot.rsi
+
+        if action == "exit":
+            trigger = result.decision.trigger if result.decision else "orchestrator_exit"
+            logger.info(
+                f"{self._log_prefix} {pair}: {trigger} @ ¥{current_price} → 전량 청산"
+            )
+            await self._close_position(pair, trigger)
+            return True  # continue
+
+        if action == "tighten_stop":
+            if pos is not None and not pos.stop_tightened and atr:
+                await self._apply_stop_tightening(pair, current_price, atr, params)
+            return False
+
+        if action == "entry_long":
+            await self._on_entry_signal(
+                pair, "entry_ok", current_price, atr, params, signal_data
+            )
+            # 진입 성공 시 학습 루프 연결: judgment_id / entry_time / confidence 기록
+            new_pos = self._position.get(pair)
+            if new_pos is not None and result.judgment_id is not None:
+                new_pos.extra["judgment_id"] = result.judgment_id
+                new_pos.extra["entry_time"] = datetime.now(timezone.utc).isoformat()
+                if result.decision is not None:
+                    new_pos.extra["confidence"] = result.decision.confidence
+                    new_pos.extra["side"] = new_pos.extra.get("side", "long")
+            return False
+
+        if action == "entry_short":
+            await self._on_entry_signal(
+                pair, "entry_sell", current_price, atr, params, signal_data
+            )
+            # 진입 성공 시 학습 루프 연결: judgment_id / entry_time / confidence 기록
+            new_pos = self._position.get(pair)
+            if new_pos is not None and result.judgment_id is not None:
+                new_pos.extra["judgment_id"] = result.judgment_id
+                new_pos.extra["entry_time"] = datetime.now(timezone.utc).isoformat()
+                if result.decision is not None:
+                    new_pos.extra["confidence"] = result.decision.confidence
+                    new_pos.extra["side"] = new_pos.extra.get("side", "short")
+            return False
+
+        if action == "blocked":
+            logger.info(
+                f"{self._log_prefix} {pair}: 진입 차단 — {result.reason}"
+            )
+            return False
+
+        # hold: 트레일링 스탑 (포지션 있을 때만)
+        if pos is not None and atr is not None:
+            await self._update_trailing_stop(
+                pair, pos, current_price, atr, ema_slope_pct, rsi, params
+            )
+        return False
 
     async def _on_entry_signal(
         self, pair: str, signal: str, current_price: float,
@@ -642,13 +795,90 @@ class BaseTrendManager(ABC):
                 f"{self._log_prefix} {pair}: Paper 청산 기록 reason={reason} exit_price={exit_price}"
             )
             return
+
+        # 학습 루프: impl 호출 전에 Position 정보 보존 (impl 내에서 position=None 처리됨)
+        pos_before = self._position.get(pair)
+        judgment_id: int | None = pos_before.extra.get("judgment_id") if pos_before else None
+        entry_price_before = pos_before.entry_price if pos_before else None
+        entry_amount_before = pos_before.entry_amount if pos_before else 0.0
+        entry_time_str = pos_before.extra.get("entry_time") if pos_before else None
+        confidence_before: float = pos_before.extra.get("confidence", 0.5) if pos_before else 0.5
+        side_before = pos_before.extra.get("side", "long") if pos_before else "long"
+
         await self._close_position_impl(pair, reason)
+
+        # 학습 루프: outcome backfill
+        if judgment_id is not None and entry_price_before is not None:
+            exit_price = self._latest_price.get(pair, entry_price_before)
+            if side_before == "short":
+                pnl = (entry_price_before - exit_price) * entry_amount_before
+                pnl_pct = (entry_price_before - exit_price) / entry_price_before * 100 if entry_price_before > 0 else 0.0
+            else:
+                pnl = (exit_price - entry_price_before) * entry_amount_before
+                pnl_pct = (exit_price - entry_price_before) / entry_price_before * 100 if entry_price_before > 0 else 0.0
+            try:
+                from datetime import datetime as _dt
+                entry_time = _dt.fromisoformat(entry_time_str) if entry_time_str else datetime.now(timezone.utc)
+            except (ValueError, TypeError):
+                entry_time = datetime.now(timezone.utc)
+            import asyncio as _asyncio
+            _asyncio.create_task(
+                self._update_judgment_outcome(
+                    pair, judgment_id, pnl, pnl_pct, entry_time, confidence_before
+                )
+            )
+
         # T1 트리거: real 청산 완료 직후 全 전략 Score 스냅샷 수집 (P-1)
         if self._snapshot_collector is not None:
             import asyncio
             asyncio.create_task(
                 self._snapshot_collector.collect_all_snapshots("T1_position_close", pair)
             )
+
+    async def _update_judgment_outcome(
+        self,
+        pair: str,
+        judgment_id: int,
+        realized_pnl: float,
+        realized_pnl_pct: float,
+        entry_time: datetime,
+        confidence: float,
+    ) -> None:
+        """ai_judgments 결과 컬럼 UPDATE (학습 루프 Stage 1).
+
+        거래 청산 직후 asyncio.create_task()로 비동기 실행.
+        실패해도 WARNING만 — 거래 흐름 블록하지 않는다.
+        """
+        if self._session_factory is None:
+            return
+        # judgment_model은 orchestrator에만 주입됨 → SessionFactory만으로 update
+        try:
+            from sqlalchemy import update as sa_update
+            from adapters.database.models import AiJudgment  # 공유 테이블
+            outcome = "win" if realized_pnl >= 0 else "loss"
+            now = datetime.now(timezone.utc)
+            hold_hours = (now - entry_time).total_seconds() / 3600
+            # 확신도 오차: |confidence - (1.0 if win else 0.0)|
+            confidence_error = abs(confidence - (1.0 if outcome == "win" else 0.0))
+            async with self._session_factory() as session:
+                await session.execute(
+                    sa_update(AiJudgment)
+                    .where(AiJudgment.id == judgment_id)
+                    .values(
+                        outcome=outcome,
+                        realized_pnl=round(realized_pnl, 2),
+                        hold_duration_hours=round(hold_hours, 4),
+                        confidence_error=round(confidence_error, 4),
+                        updated_at=now,
+                    )
+                )
+                await session.commit()
+            logger.debug(
+                f"{self._log_prefix} {pair}: ai_judgments[{judgment_id}] outcome={outcome} "
+                f"pnl={realized_pnl:.2f} ({realized_pnl_pct:.2f}%) hold={hold_hours:.1f}h"
+            )
+        except Exception as e:
+            logger.warning(f"{self._log_prefix} {pair}: ai_judgments outcome 업데이트 실패 — {e}")
 
     @abstractmethod
     async def _close_position_impl(self, pair: str, reason: str) -> None:

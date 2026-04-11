@@ -27,7 +27,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
-COINMARKET_URL = os.getenv("COINMARKET_URL", "http://localhost:8002")
+TRADING_DATA_URL = os.getenv("TRADING_DATA_URL", "http://localhost:8002")
 
 
 async def fetch_candle_close_from_db(session: AsyncSession, pair: str, closed_at) -> float | None:

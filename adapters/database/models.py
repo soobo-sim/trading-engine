@@ -1050,3 +1050,124 @@ def create_switch_recommendation_model(prefix: str):
         ),
     }
     return type(cls_name, (Base,), attrs)
+
+
+# ──────────────────────────────────────────────────────────────
+# AI 판단 기록 (공유 테이블, prefix 없음)
+# 설계서: trader-common/docs/specs/ai-native/02_JUDGMENT_ENGINE.md §7-4
+# ──────────────────────────────────────────────────────────────
+
+class AiJudgment(Base):
+    """alice-samantha-rachel 3단계 판단 기록.
+
+    v2(TRADING_MODE=ai) 에서 매 4H 봉 시 INSERT.
+    v1(rule_based) source = 'rule_based_v1' 이고 agent 컬럼은 NULL.
+    """
+
+    __tablename__ = "ai_judgments"
+    __table_args__ = (
+        Index("ix_ai_judgments_pair_ts", "pair", "timestamp"),
+        Index("ix_ai_judgments_source", "source"),
+        {"extend_existing": True},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    trigger_type = Column(String(20), nullable=False)    # "regular_4h"|"event"|"daily_briefing"
+    timestamp = Column(DateTime(timezone=True), nullable=False)
+    pair = Column(String(20), nullable=False)
+    exchange = Column(String(10), nullable=False)
+
+    # alice
+    alice_action = Column(String(20), nullable=True)
+    alice_confidence = Column(Float, nullable=True)
+    alice_reasoning = Column(JSON, nullable=True)
+    alice_risk_factors = Column(JSON, nullable=True)
+
+    # samantha
+    samantha_verdict = Column(String(20), nullable=True)
+    samantha_confidence_adj = Column(Float, nullable=True)
+    samantha_reasoning = Column(Text, nullable=True)
+    samantha_missed_risks = Column(JSON, nullable=True)
+
+    # rachel
+    rachel_action = Column(String(20), nullable=True)
+    rachel_confidence = Column(Float, nullable=True)
+    rachel_reasoning = Column(Text, nullable=True)
+    rachel_failure_note = Column(Text, nullable=True)
+
+    # 최종 결정
+    final_action = Column(String(20), nullable=False)
+    final_confidence = Column(Float, nullable=False)
+    final_size_pct = Column(Float, nullable=True)
+    stop_loss = Column(Float, nullable=True)
+    take_profit = Column(Float, nullable=True)
+    source = Column(String(30), nullable=False)           # "ai_v2"|"ai_v2_fallback_v1"|"rule_based_v1"
+
+    # 안전장치 결과
+    guardrail_approved = Column(Boolean, nullable=True)
+    guardrail_violations = Column(JSON, nullable=True)
+
+    # 결과 추적 (사후 업데이트)
+    outcome = Column(String(10), nullable=True)           # "win"|"loss"|None
+    realized_pnl = Column(Float, nullable=True)
+    hold_duration_hours = Column(Float, nullable=True)
+    confidence_error = Column(Float, nullable=True)       # |predicted - actual_success|
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), nullable=True)
+
+    def __repr__(self) -> str:
+        return (
+            f"<AiJudgment(id={self.id}, pair={self.pair!r}, "
+            f"action={self.final_action!r}, source={self.source!r})>"
+        )
+
+
+# ──────────────────────────────────────────────────────────────
+# 레이첼 전략 자문 (공유 테이블, prefix 없음)
+# 설계서: trader-common/docs/specs/ai-native/02_JUDGMENT_ENGINE.md
+# ──────────────────────────────────────────────────────────────
+
+class RachelAdvisory(Base):
+    """레이첼 OpenClaw 에이전트가 저장하는 전략 자문.
+
+    TRADING_MODE=rachel 일 때 candle_monitor()가 이 레코드를 읽어
+    실시간 시그널과 결합하여 진입/청산 판단을 내린다.
+    레이첼이 정기 분석(WORKFLOW_1 등) 완료 후 POST /api/advisories 로 저장.
+    """
+
+    __tablename__ = "rachel_advisories"
+    __table_args__ = (
+        Index("ix_rachel_advisories_pair_exchange_created", "pair", "exchange", "created_at"),
+        {"extend_existing": True},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    pair = Column(String(20), nullable=False)
+    exchange = Column(String(10), nullable=False)
+
+    # 판정
+    action = Column(String(20), nullable=False)            # "entry_long"|"entry_short"|"hold"|"exit"
+    confidence = Column(Float, nullable=False)             # 0.0 ~ 1.0
+    size_pct = Column(Float, nullable=True)                # 포지션 사이즈 비율 (0.0~0.80)
+    stop_loss = Column(Float, nullable=True)
+    take_profit = Column(Float, nullable=True)
+
+    # 컨텍스트
+    regime = Column(String(20), nullable=True)             # "trending"|"ranging"|"uncertain"
+    reasoning = Column(Text, nullable=False)               # 판정 근거 요약
+    risk_notes = Column(Text, nullable=True)               # 리스크 노트
+
+    # 에이전트 요약 (학습 루프용)
+    alice_summary = Column(Text, nullable=True)            # 앨리스 제안 1줄
+    samantha_summary = Column(Text, nullable=True)         # 사만다 감사 1줄
+
+    # 시간
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False)  # 이후 v1 폴백
+
+    def __repr__(self) -> str:
+        return (
+            f"<RachelAdvisory(id={self.id}, pair={self.pair!r}, "
+            f"action={self.action!r}, expires_at={self.expires_at!r})>"
+        )

@@ -34,7 +34,7 @@ def _make_event(
 
 @pytest.fixture
 def event_filter() -> EventFilter:
-    return EventFilter(coinmarket_url="http://mock-coinmarket:8002")
+    return EventFilter(trading_data_url="http://mock-coinmarket:8002")
 
 
 # ── 이벤트 차단 판정 ────────────────────────────────────────

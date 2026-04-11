@@ -11,7 +11,7 @@ from core.analysis.intermarket import IntermarketClient
 
 @pytest.fixture
 def client() -> IntermarketClient:
-    return IntermarketClient(coinmarket_url="http://mock-coinmarket:8002")
+    return IntermarketClient(trading_data_url="http://mock-coinmarket:8002")
 
 
 def _inject_cache(client: IntermarketClient, series: dict) -> None:

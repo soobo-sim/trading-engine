@@ -45,13 +45,13 @@ class EventFilter:
     경제 이벤트 기반 진입 차단 + 스탑 타이트닝.
 
     사용:
-        filter = EventFilter(coinmarket_url="http://coinmarket-data:8002")
+        filter = EventFilter(trading_data_url="http://trading-data:8002")
         blocked, reason = await filter.is_event_blackout("usd_jpy", params)
         factor = await filter.get_tighten_factor("usd_jpy", params)
     """
 
-    def __init__(self, coinmarket_url: str) -> None:
-        self._base_url = coinmarket_url.rstrip("/")
+    def __init__(self, trading_data_url: str) -> None:
+        self._base_url = trading_data_url.rstrip("/")
         # pair → (events_list, fetched_at)
         self._cache: dict[str, tuple[list[dict], datetime]] = {}
 
@@ -141,7 +141,7 @@ class EventFilter:
             return events
         except Exception as e:
             logger.warning(
-                f"[EventFilter] {pair}: coinmarket-data API 조회 실패 ({e}) "
+                f"[EventFilter] {pair}: trading-data API 조회 실패 ({e}) "
                 "— 이벤트 필터 일시 비활성 (진입 허용)"
             )
             # 실패 시 기존 캐시가 있으면 연장 사용, 없으면 빈 리스트
@@ -167,13 +167,13 @@ class EventFilter:
 
 def create_event_filter() -> Optional[EventFilter]:
     """
-    환경변수 COINMARKET_DATA_URL에서 URL 읽어 EventFilter 생성.
+    환경변수 TRADING_DATA_URL에서 URL 읽어 EventFilter 생성.
     URL이 설정되지 않으면 None 반환 (event_filter 비활성).
     """
     url = os.environ.get(
-        "COINMARKET_DATA_URL",
-        "http://coinmarket-data:8002",  # Docker 기본값
+        "TRADING_DATA_URL",
+        "http://trading-data:8002",  # Docker 기본값
     )
     if not url:
         return None
-    return EventFilter(coinmarket_url=url)
+    return EventFilter(trading_data_url=url)
