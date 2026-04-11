@@ -210,6 +210,22 @@ class RachelAdvisoryDecision:
                     take_profit=take_profit,
                     reasoning=f"레이첼 entry_long × signal entry_ok: {advisory.reasoning}",
                 )
+            if signal == "entry_preview":
+                # 프리뷰 시그널: confidence × 0.85, size_pct × 0.7 (미확인 진입 리스크 반영)
+                preview_confidence = round(confidence * 0.85, 4)
+                preview_size = round((size_pct or 0.0) * 0.7, 4)
+                return self._decision(
+                    action="entry_long",
+                    snapshot=snapshot,
+                    confidence=preview_confidence,
+                    size_pct=preview_size,
+                    stop_loss=stop_loss,
+                    take_profit=take_profit,
+                    reasoning=(
+                        f"레이첼 entry_long × entry_preview (confidence={preview_confidence:.2f}, "
+                        f"size={preview_size:.0%}): {advisory.reasoning}"
+                    ),
+                )
             return self._decision(
                 action="hold",
                 snapshot=snapshot,

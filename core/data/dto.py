@@ -154,6 +154,9 @@ class SignalSnapshot:
     # 추가 파라미터 (RuleBasedDecision에서 사이징 등에 필요)
     params: dict = field(default_factory=dict)
 
+    # 미완성 캔들 기반 프리뷰 시그널 여부 (True → 4H 완성 시 재검증 필요)
+    is_preview: bool = False
+
 
 # ──────────────────────────────────────────────────────────────
 # Layer 3: Decision

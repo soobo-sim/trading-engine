@@ -103,6 +103,30 @@ class Order:
 
 
 # ──────────────────────────────────────────
+# Pending Limit Order
+# ──────────────────────────────────────────
+
+@dataclass
+class PendingLimitOrder:
+    """Limit order 진입 대기 상태.
+
+    place_order(BUY, price=X) 후 체결 대기 중인 주문 정보.
+    _pending_limit_orders[pair] 에 저장되며, 60초 사이클마다 체결 여부를 확인한다.
+    """
+    order_id: str
+    pair: str
+    limit_price: float
+    amount: float           # 코인 수량
+    invest_jpy: float       # 투입 JPY (포지션 등록용)
+    placed_at: float        # time.time() — 타임아웃 계산용
+    signal_at_placement: str  # 진입 시 신호 ("entry_ok" | "entry_preview")
+    params: dict            # 진입 시 전략 파라미터 스냅샷
+    atr: Optional[float] = None
+    signal_data: dict = field(default_factory=dict)
+    is_preview: bool = False  # True → 체결 후 extra["preview_entry"]=True 설정
+
+
+# ──────────────────────────────────────────
 # 잔고
 # ──────────────────────────────────────────
 

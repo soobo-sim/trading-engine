@@ -97,6 +97,9 @@ class BaseTrendManager(ABC):
         self._paper_executors: Dict[str, Any] = {}   # pair → PaperExecutor
         self._paper_positions: Dict[str, dict] = {}  # pair → {paper_trade_id, entry_price, direction}
 
+        # Limit Order 대기 상태: pair → PendingLimitOrder
+        self._pending_limit_orders: Dict[str, Any] = {}
+
         # Execution Layer 연결 (Step 4)
         self._orchestrator: Optional[ExecutionOrchestrator] = None
         # Data Layer 연결 (v1.5)
@@ -292,6 +295,7 @@ class BaseTrendManager(ABC):
         entry_price: Optional[float] = None,
         params: Optional[dict] = None,
         side: Optional[str] = None,
+        include_incomplete: bool = False,
     ) -> Optional[dict]:
         ema_period, atr_period = 20, 14
         limit = max(ema_period * 2, atr_period + 1, int((params or {}).get("divergence_lookback", 40)))
@@ -314,6 +318,26 @@ class BaseTrendManager(ABC):
             )
             candles = list(reversed(result.scalars().all()))
 
+        # include_incomplete=True: 미완성 캔들 1개를 추가로 조회해 맨 끝에 붙인다
+        incomplete_candle = None
+        if include_incomplete:
+            async with self._session_factory() as db:
+                result = await db.execute(
+                    select(CandleModel)
+                    .where(
+                        and_(
+                            pair_col == pair,
+                            CandleModel.timeframe == timeframe,
+                            CandleModel.is_complete == False,  # noqa: E712
+                        )
+                    )
+                    .order_by(CandleModel.open_time.desc())
+                    .limit(1)
+                )
+                incomplete_candle = result.scalars().first()
+            if incomplete_candle is not None:
+                candles = candles + [incomplete_candle]
+
         if len(candles) < ema_period + 1:
             logger.debug(f"{self._log_prefix} {pair}: 캔들 부족 ({len(candles)}개)")
             return None
@@ -325,6 +349,9 @@ class BaseTrendManager(ABC):
         if result is not None:
             result["latest_candle_open_time"] = str(candles[-1].open_time)
             result["candles"] = candles
+            if include_incomplete and incomplete_candle is not None:
+                result["has_incomplete"] = True
+                result["incomplete_candle"] = incomplete_candle
         return result
 
     # ──────────────────────────────────────────
@@ -472,8 +499,31 @@ class BaseTrendManager(ABC):
                 f"price={current_price} pos={'있음' if pos else '없음'}"
             )
 
+            # ── Pending Limit Order 체결 확인 ──
+            pending = self._pending_limit_orders.get(pair)
+            if pending is not None:
+                pl_continue = await self._check_pending_limit_order(pair, pending, signal, params)
+                if pl_continue:
+                    continue
+
             # ── EMA 기울기 이력 + 다이버전스 ──
             if latest_candle_key != self._ema_slope_last_key.get(pair):
+                # 새 4H 캔들 완성: 프리뷰 진입 검증
+                cur_pos = self._position.get(pair)
+                if cur_pos is not None and cur_pos.extra.get("preview_entry"):
+                    self._ema_slope_last_key[pair] = latest_candle_key
+                    if signal == "entry_ok":
+                        cur_pos.extra.pop("preview_entry")
+                        logger.info(
+                            f"{self._log_prefix} {pair}: 프리뷰 진입 확인 — signal=entry_ok → 정상 포지션 전환"
+                        )
+                    else:
+                        logger.warning(
+                            f"{self._log_prefix} {pair}: 프리뷰 오판 보호 — signal={signal} → 즉시 청산"
+                        )
+                        await self._close_position(pair, "preview_invalidated")
+                        continue
+
                 slope_history = self._ema_slope_history.setdefault(pair, [])
                 slope_history.append(ema_slope_pct)
                 if len(slope_history) > 3:
@@ -523,6 +573,16 @@ class BaseTrendManager(ABC):
             )
             if should_continue:
                 continue
+
+            # ── 프리뷰 진입 시도 ──
+            # 조건: 포지션 없음 + pending 없음 + 정규 시그널 entry_ok/sell 아님 + opt-in
+            if (
+                self._position.get(pair) is None
+                and pair not in self._pending_limit_orders
+                and signal not in ("entry_ok", "entry_sell")
+                and params.get("preview_entry_enabled", False)
+            ):
+                await self._try_preview_entry(pair, basis_tf, params)
 
     # ──────────────────────────────────────────
     # 서브클래스 hook (기본 구현 제공)
@@ -583,6 +643,7 @@ class BaseTrendManager(ABC):
         signal_data: dict,
         params: dict,
         pos: Optional[Position],
+        is_preview: bool = False,
     ) -> SignalSnapshot:
         """signal_data dict + 현재 상태 → SignalSnapshot DTO."""
         pos_dto: Optional[PositionDTO] = None
@@ -650,6 +711,7 @@ class BaseTrendManager(ABC):
             relevant_lessons=relevant_lessons,
             news=news,
             sentiment=sentiment,
+            is_preview=is_preview,
         )
 
     async def _handle_execution_result(
@@ -687,8 +749,10 @@ class BaseTrendManager(ABC):
             return False
 
         if action == "entry_long":
+            is_preview = getattr(snapshot, "is_preview", False)
+            entry_signal = "entry_preview" if is_preview else "entry_ok"
             await self._on_entry_signal(
-                pair, "entry_ok", current_price, atr, params, signal_data
+                pair, entry_signal, current_price, atr, params, signal_data
             )
             # 진입 성공 시 학습 루프 연결: judgment_id / entry_time / confidence 기록
             new_pos = self._position.get(pair)
@@ -698,11 +762,15 @@ class BaseTrendManager(ABC):
                 if result.decision is not None:
                     new_pos.extra["confidence"] = result.decision.confidence
                     new_pos.extra["side"] = new_pos.extra.get("side", "long")
+            if is_preview and new_pos is not None:
+                new_pos.extra["preview_entry"] = True
             return False
 
         if action == "entry_short":
+            is_preview = getattr(snapshot, "is_preview", False)
+            entry_signal = "entry_preview" if is_preview else "entry_sell"
             await self._on_entry_signal(
-                pair, "entry_sell", current_price, atr, params, signal_data
+                pair, entry_signal, current_price, atr, params, signal_data
             )
             # 진입 성공 시 학습 루프 연결: judgment_id / entry_time / confidence 기록
             new_pos = self._position.get(pair)
@@ -712,6 +780,8 @@ class BaseTrendManager(ABC):
                 if result.decision is not None:
                     new_pos.extra["confidence"] = result.decision.confidence
                     new_pos.extra["side"] = new_pos.extra.get("side", "short")
+            if is_preview and new_pos is not None:
+                new_pos.extra["preview_entry"] = True
             return False
 
         if action == "blocked":
@@ -731,28 +801,208 @@ class BaseTrendManager(ABC):
         self, pair: str, signal: str, current_price: float,
         atr: Optional[float], params: Dict, signal_data: dict
     ) -> None:
-        """진입 시그널 처리. 기본: entry_ok → buy 진입."""
-        if signal == "entry_ok":            # ── 세션 필터 (FX 전용) ───────────────────────────
-            is_fx = getattr(self._adapter, "is_margin_trading", False)
-            if is_fx and not is_allowed_session(params):
-                logger.debug(
-                    f"{self._log_prefix} {pair}: 세션 필터 — 센션 차단"
+        """진입 시그널 처리.
+
+        signal:
+          "entry_ok"      — 4H 완성 시그널, 로직: entry_mode에 따라 market 또는 limit
+          "entry_preview" — 미완성 캔들 프리뷰 시그널, 동일하게 entry_mode 디스패치
+          "entry_sell"    — 숏 진입 (CFD 전용)
+        """
+        is_long_entry = signal in ("entry_ok", "entry_preview")
+        is_short_entry = signal == "entry_sell"
+
+        if not (is_long_entry or is_short_entry):
+            return
+
+        # ── FX 전용 세션 필터 ────────────────────────────────────
+        is_fx = getattr(self._adapter, "is_margin_trading", False)
+        if is_fx and not is_allowed_session(params):
+            logger.debug(f"{self._log_prefix} {pair}: 세션 필터 — 세션 차단")
+            return
+        if is_fx and is_london_open_blackout(params):
+            logger.debug(f"{self._log_prefix} {pair}: 런던 오픈 블랙아웃 — 진입 대기")
+            return
+
+        direction = "long" if is_long_entry else "short"
+        logger.info(
+            f"{self._log_prefix} {pair}: {signal} @ ¥{current_price} → 진입 시도 (dir={direction})"
+        )
+
+        # Paper pair는 실주문 스킵
+        if await self._try_paper_entry(pair, direction, current_price, atr, params):
+            return
+
+        # ── entry_mode 디스패치: market / limit / limit_then_market ──
+        entry_mode = str(params.get("entry_mode", "market"))
+        is_preview_signal = (signal == "entry_preview")
+
+        if entry_mode in ("limit", "limit_then_market"):
+            pending = await self._open_position_limit(
+                pair, current_price, atr, params,
+                signal_data=signal_data,
+                is_preview=is_preview_signal,
+            )
+            if pending is not None:
+                self._pending_limit_orders[pair] = pending
+                logger.info(
+                    f"{self._log_prefix} {pair}: limit order 등록 — "
+                    f"order_id={pending.order_id} price=¥{pending.limit_price:.0f}"
                 )
                 return
-            if is_fx and is_london_open_blackout(params):
-                logger.debug(
-                    f"{self._log_prefix} {pair}: 런던 오픈 블랙아웃 — 진입 대기"
-                )
+            # limit 실패
+            if entry_mode == "limit":
+                logger.info(f"{self._log_prefix} {pair}: limit 진입 실패 — market fallback 없음")
                 return
-            logger.info(f"{self._log_prefix} {pair}: entry_ok @ ¥{current_price} → 진입 시도")
-            # Paper pair는 실주문 스킵
-            if await self._try_paper_entry(pair, "long", current_price, atr, params):
-                return
-            await self._open_position(pair, current_price, atr, params, signal_data=signal_data)
+            logger.info(f"{self._log_prefix} {pair}: limit 실패 — market fallback")
+
+        # market order (default 또는 limit_then_market fallback)
+        await self._open_position(pair, current_price, atr, params, signal_data=signal_data)
 
     def _is_stop_triggered(self, pos: Position, price: float, stop_loss_price: float) -> bool:
         """스탑로스 발동 여부. 기본: 롱(price <= stop)."""
         return price <= stop_loss_price
+
+    async def _try_preview_entry(self, pair: str, basis_tf: str, params: dict) -> None:
+        """미완성 캔들 포함 프리뷰 시그널 계산 → entry_preview 시 오케스트레이터 위임.
+
+        조건:
+          - preview_entry_enabled=True (opt-in)
+          - 미완성 캔들 진행률 ≥ 50% (noise 제거)
+          - tick_count ≥ preview_min_tick_count (유동성 확인)
+          - 직전 완성 캔들 시그널이 entry_ok/entry_sell 아님 (이미 진입됐거나 청산 중 아님)
+        """
+        if self._orchestrator is None:
+            return
+
+        try:
+            preview_data = await self._compute_signal(
+                pair, basis_tf, params=params, include_incomplete=True,
+            )
+        except Exception as e:
+            logger.debug(f"{self._log_prefix} {pair}: 프리뷰 시그널 계산 실패 — {e}")
+            return
+
+        if not preview_data or not preview_data.get("has_incomplete"):
+            return
+
+        if preview_data.get("signal") != "entry_ok":
+            return
+
+        # 미완성 캔들 필터
+        incomplete = preview_data.get("incomplete_candle")
+        if incomplete is not None:
+            min_tick = int(params.get("preview_min_tick_count", 3))
+            tick_count = getattr(incomplete, "tick_count", None)
+            if tick_count is not None and tick_count < min_tick:
+                logger.debug(
+                    f"{self._log_prefix} {pair}: 프리뷰 스킵 — tick_count={tick_count} < {min_tick}"
+                )
+                return
+
+            # 진행률 50% 이상 체크
+            open_time = getattr(incomplete, "open_time", None)
+            close_time = getattr(incomplete, "close_time", None)
+            if open_time is not None and close_time is not None:
+                now = datetime.now(timezone.utc)
+                total = (close_time - open_time).total_seconds()
+                elapsed = (now - open_time).total_seconds()
+                if total > 0 and elapsed / total < 0.5:
+                    logger.debug(
+                        f"{self._log_prefix} {pair}: 프리뷰 스킵 — "
+                        f"캔들 진행률 {elapsed/total*100:.0f}% < 50%"
+                    )
+                    return
+
+        # 프리뷰 시그널로 snapshot 구성: signal을 "entry_preview"로 변경
+        preview_signal_data = {**preview_data, "signal": "entry_preview"}
+        snapshot = await self._build_signal_snapshot(
+            pair, preview_signal_data, params, None, is_preview=True
+        )
+        result = await self._orchestrator.process(snapshot)
+        await self._handle_execution_result(pair, result, snapshot, preview_signal_data, params)
+
+    async def _check_pending_limit_order(
+        self, pair: str, pending: Any, current_signal: str, params: dict
+    ) -> bool:
+        """Pending limit order 상태 확인.
+
+        Returns:
+            True  → _candle_monitor가 continue해야 함 (대기 중 또는 포지션 등록 완료)
+            False → pending 제거됨, 정규 흐름 재시도 가능
+        """
+        from core.exchange.types import OrderStatus
+
+        elapsed = time.time() - pending.placed_at
+        limit_timeout_sec = float(params.get("limit_timeout_sec", 300))
+
+        try:
+            order = await self._adapter.get_order(pending.order_id, pending.pair)
+        except Exception as e:
+            logger.warning(f"{self._log_prefix} {pair}: limit order 조회 실패 — {e}")
+            return True  # 다음 사이클에서 재시도
+
+        if order is None or order.status == OrderStatus.CANCELLED:
+            logger.info(f"{self._log_prefix} {pair}: limit order 취소됨 → pending 제거")
+            del self._pending_limit_orders[pair]
+            return False
+
+        if order.status == OrderStatus.COMPLETED:
+            logger.info(
+                f"{self._log_prefix} {pair}: limit order 체결 완료 "
+                f"order_id={pending.order_id} price=¥{order.price}"
+            )
+            await self._finalize_limit_entry(pair, order, pending)
+            del self._pending_limit_orders[pair]
+            return True  # 포지션 등록 완료 → continue
+
+        # OPEN 상태: 시그널 변경 감지 → 즉시 취소 (추세 이탈 보호)
+        if current_signal not in ("entry_ok", "entry_preview"):
+            logger.info(
+                f"{self._log_prefix} {pair}: 시그널 변경 ({current_signal}) → limit order 취소"
+            )
+            try:
+                await self._adapter.cancel_order(pending.order_id, pending.pair)
+            except Exception as e:
+                logger.warning(f"{self._log_prefix} {pair}: limit order 취소 실패 — {e}")
+            del self._pending_limit_orders[pair]
+            return False
+
+        # 타임아웃 체크
+        if elapsed > limit_timeout_sec:
+            logger.info(
+                f"{self._log_prefix} {pair}: limit order 타임아웃 ({elapsed:.0f}초) — 취소"
+            )
+            try:
+                await self._adapter.cancel_order(pending.order_id, pending.pair)
+            except Exception as e:
+                logger.warning(f"{self._log_prefix} {pair}: limit order 타임아웃 취소 실패 — {e}")
+            del self._pending_limit_orders[pair]
+            # 타임아웃 후 시그널이 여전히 entry_ok면 다음 사이클에서 market fallback 시도
+            return False
+
+        # 대기 중
+        logger.debug(
+            f"{self._log_prefix} {pair}: limit order 대기 중 "
+            f"order_id={pending.order_id} elapsed={elapsed:.0f}s"
+        )
+        return True
+
+    async def _open_position_limit(
+        self, pair: str, price: float, atr: Optional[float], params: Dict,
+        *, signal_data: dict | None = None, is_preview: bool = False,
+    ) -> Optional[Any]:
+        """Limit order 진입 시도. None 반환 → market fallback.
+
+        기본: 미지원 (None). 서브클래스(TrendFollowingManager 등)에서 override.
+        """
+        return None
+
+    async def _finalize_limit_entry(self, pair: str, order: Any, pending: Any) -> None:
+        """Limit order 체결 후 포지션 등록. 서브클래스에서 override.
+
+        기본: 로그만 출력. 서브클래스(TrendFollowingManager)에서 실제 포지션 등록.
+        """
+        logger.info(f"{self._log_prefix} {pair}: limit 체결 — 서브클래스 미구현, 기본 처리 스킵")
 
     # ──────────────────────────────────────────
     # Abstract — 서브클래스 필수 구현

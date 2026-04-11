@@ -9,6 +9,7 @@ signal → action 매핑:
 │ signal          │ position 상태    │ action                          │
 ├─────────────────┼──────────────────┼─────────────────────────────────┤
 │ entry_ok        │ 없음             │ entry_long                      │
+│ entry_preview   │ 없음             │ entry_long (confidence × 0.8)   │
 │ entry_sell      │ 없음             │ entry_short                     │
 │ exit_warning    │ 있음             │ exit (trigger=exit_warning)     │
 │ (exit_signal)   │ 있음 full_exit   │ exit (trigger=full_exit)        │
@@ -20,6 +21,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+from typing import Optional
 
 from core.data.dto import Decision, SignalSnapshot
 
@@ -51,6 +53,13 @@ class RuleBasedDecision:
             if signal == "entry_ok":
                 return self._entry_decision(
                     snapshot, "entry_long", "롱 진입 조건 충족", now
+                )
+            if signal == "entry_preview":
+                # 미완성 캔들 프리뷰 — confidence 할인 (0.7 × 0.8 = 0.56)
+                return self._entry_decision(
+                    snapshot, "entry_long",
+                    "프리뷰 시그널 (미완성 캔들 기반) — 4H 완성 시 재검증", now,
+                    confidence_override=0.56,
                 )
             if signal == "entry_sell":
                 return self._entry_decision(
@@ -104,6 +113,7 @@ class RuleBasedDecision:
         action: str,
         reasoning: str,
         now: datetime,
+        confidence_override: Optional[float] = None,
     ) -> Decision:
         params = snapshot.params
         size_pct = float(params.get("position_size_pct", 1.0))
@@ -111,11 +121,12 @@ class RuleBasedDecision:
         risk_factors: list[str] = []
         if rsi_val is not None and rsi_val > 60:
             risk_factors.append(f"RSI={rsi_val:.1f} — 약간 과열")
+        confidence = confidence_override if confidence_override is not None else 0.7
         return Decision(
             action=action,
             pair=snapshot.pair,
             exchange=snapshot.exchange,
-            confidence=0.7,
+            confidence=confidence,
             size_pct=size_pct,
             stop_loss=snapshot.stop_loss_price,
             take_profit=None,

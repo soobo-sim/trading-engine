@@ -23,14 +23,15 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from datetime import datetime, timezone
-from typing import Dict, Optional, Type
+from typing import Any, Dict, Optional, Type
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from core.exchange.base import ExchangeAdapter
-from core.exchange.types import OrderType, Position
+from core.exchange.types import OrderType, PendingLimitOrder, Position
 from core.strategy.base_trend import BaseTrendManager
 from core.task.supervisor import TaskSupervisor
 
@@ -204,6 +205,118 @@ class TrendFollowingManager(BaseTrendManager):
             )
         except Exception as e:
             logger.error(f"[TrendMgr] {pair}: 진입 주문 오류 — {e}", exc_info=True)
+
+    async def _open_position_limit(
+        self,
+        pair: str,
+        price: float,
+        atr: Optional[float],
+        params: Dict,
+        *,
+        signal_data: dict | None = None,
+        is_preview: bool = False,
+    ) -> Optional[PendingLimitOrder]:
+        """지정가(limit) 진입 주문 발주. 성공 시 PendingLimitOrder 반환, 실패 시 None.
+
+        limit_price = current_price - ATR × limit_offset_atr_ratio (롱 진입이므로 낮을수록 유리)
+        """
+        try:
+            balance = await self._adapter.get_balance()
+            jpy_available = balance.get_available("jpy")
+            position_size_pct = float(params.get("position_size_pct", 10.0))
+            invest_jpy = jpy_available * position_size_pct / 100
+            min_jpy = float(params.get("min_order_jpy", 500))
+
+            if invest_jpy < min_jpy:
+                logger.info(
+                    f"[TrendMgr] {pair}: 투입 JPY({invest_jpy:.0f}) < {min_jpy:.0f}, limit 진입 스킵"
+                )
+                return None
+
+            # limit 가격: 현재가 - ATR × offset_ratio
+            offset_ratio = float(params.get("limit_offset_atr_ratio", 0.15))
+            if atr:
+                limit_price = round(price - atr * offset_ratio, 0)
+            else:
+                limit_price = round(price * 0.999, 0)  # ATR 없으면 0.1% 아래
+
+            if limit_price <= 0:
+                logger.warning(f"[TrendMgr] {pair}: limit_price={limit_price} 유효하지 않음")
+                return None
+
+            # 코인 수량 계산 (limit order는 코인 단위)
+            coin_amount = round(invest_jpy / limit_price, 8)
+
+            order = await self._adapter.place_order(
+                order_type=OrderType.BUY,
+                pair=pair,
+                amount=coin_amount,
+                price=limit_price,
+            )
+
+            logger.info(
+                f"[TrendMgr] {pair}: limit order 발주 "
+                f"order_id={order.order_id} price=¥{limit_price:.0f} amount={coin_amount}"
+            )
+
+            return PendingLimitOrder(
+                order_id=order.order_id,
+                pair=pair,
+                limit_price=limit_price,
+                amount=coin_amount,
+                invest_jpy=invest_jpy,
+                placed_at=time.time(),
+                signal_at_placement="entry_preview" if is_preview else "entry_ok",
+                params=dict(params),
+                atr=atr,
+                signal_data=signal_data or {},
+                is_preview=is_preview,
+            )
+        except Exception as e:
+            logger.error(f"[TrendMgr] {pair}: limit 진입 주문 오류 — {e}", exc_info=True)
+            return None
+
+    async def _finalize_limit_entry(self, pair: str, order: Any, pending: Any) -> None:
+        """Limit order 체결 후 포지션 등록. _open_position 후반부와 동일한 로직."""
+        try:
+            exec_price = order.price or pending.limit_price
+            exec_amount = order.amount
+            if exec_amount == 0 and exec_price > 0:
+                exec_amount = round(pending.invest_jpy / exec_price, 8)
+
+            atr = pending.atr
+            params = pending.params
+            atr_mult = float(params.get("atr_multiplier_stop", 2.0))
+            initial_sl = round(exec_price - atr * atr_mult, 6) if atr else None
+
+            pos = Position(
+                pair=pair,
+                entry_price=exec_price,
+                entry_amount=exec_amount,
+                stop_loss_price=initial_sl,
+            )
+            if pending.is_preview:
+                pos.extra["preview_entry"] = True
+            self._position[pair] = pos
+
+            pos.db_record_id = await self._record_open(
+                pair=pair,
+                order_id=order.order_id,
+                price=exec_price,
+                amount=exec_amount,
+                invest_jpy=pending.invest_jpy,
+                stop_loss_price=initial_sl,
+                strategy_id=params.get("strategy_id"),
+                signal_data=pending.signal_data,
+            )
+
+            logger.info(
+                f"[TrendMgr] {pair}: limit 진입 확정 "
+                f"order_id={order.order_id} price=¥{exec_price} amount={exec_amount} "
+                f"stop_loss=¥{initial_sl} preview={pending.is_preview}"
+            )
+        except Exception as e:
+            logger.error(f"[TrendMgr] {pair}: limit 진입 확정 오류 — {e}", exc_info=True)
 
     # ──────────────────────────────────────────
     # 청산
