@@ -1,8 +1,7 @@
 """
 Telegram 로그 핸들러 — 로그 레벨별 채널 분리 전송.
 
-- TelegramDigestHandler : DEBUG만 → 사만다 채널 (5분 배치)
-- TelegramInfoHandler   : INFO만  → 레이첼 채널 (2분 배치)
+- TelegramDigestHandler : INFO만 → HeartBeat 채널 (5분 배치)
 - TelegramAlertHandler  : WARNING+ → Save Us 그룹 (즉시, 5초 디바운스)
 
 사용:
@@ -49,10 +48,10 @@ def _format_time(ts: float) -> str:
     return datetime.fromtimestamp(ts, tz=JST).strftime("%H:%M:%S")
 
 
-# ── DEBUG 다이제스트 (사만다) ────────────────────────
+# ── INFO 다이제스트 (HeartBeat) ──────────────────────
 
 class TelegramDigestHandler(logging.Handler):
-    """DEBUG 레벨만 버퍼링 → 5분 배치로 사만다 채널 전송."""
+    """INFO 레벨만 버퍼링 → 5분 배치로 HeartBeat 채널 전송."""
 
     def __init__(
         self,
@@ -61,7 +60,7 @@ class TelegramDigestHandler(logging.Handler):
         exchange: str = "??",
         interval_sec: int = 300,
     ):
-        super().__init__(level=logging.DEBUG)
+        super().__init__(level=logging.INFO)
         self._bot_token = bot_token
         self._chat_id = chat_id
         self._exchange = exchange.upper()
@@ -70,8 +69,8 @@ class TelegramDigestHandler(logging.Handler):
         self._task: asyncio.Task | None = None
 
     def emit(self, record: logging.LogRecord) -> None:
-        # DEBUG만 수집 (INFO 이상은 다른 핸들러가 처리)
-        if record.levelno != logging.DEBUG:
+        # INFO만 수집 (DEBUG 제외, WARNING 이상 제외)
+        if record.levelno != logging.INFO:
             return
         self._buffer.append((record.created, record.getMessage()))
 
@@ -105,69 +104,6 @@ class TelegramDigestHandler(logging.Handler):
         lines = [f"{_format_time(ts)} {msg}" for ts, msg in items]
         text = (
             f"📋 [{self._exchange}] 활동 로그 ({self._interval // 60}분, {len(items)}건)\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
-            + "\n".join(lines)
-        )
-        if len(self._buffer) > 0:
-            text += f"\n… 외 {len(self._buffer)}건 다음 배치"
-        await _send_telegram(self._bot_token, self._chat_id, text)
-
-
-# ── INFO 배치 (레이첼) ──────────────────────────────
-
-class TelegramInfoHandler(logging.Handler):
-    """INFO 레벨만 버퍼링 → 2분 배치로 레이첼 채널 전송."""
-
-    def __init__(
-        self,
-        bot_token: str,
-        chat_id: str,
-        exchange: str = "??",
-        interval_sec: int = 120,
-    ):
-        super().__init__(level=logging.INFO)
-        self._bot_token = bot_token
-        self._chat_id = chat_id
-        self._exchange = exchange.upper()
-        self._interval = interval_sec
-        self._buffer: list[tuple[float, str]] = []
-        self._task: asyncio.Task | None = None
-
-    def emit(self, record: logging.LogRecord) -> None:
-        # INFO만 수집 (WARNING 이상 제외)
-        if record.levelno != logging.INFO:
-            return
-        self._buffer.append((record.created, record.getMessage()))
-
-    async def start(self) -> None:
-        if self._task and not self._task.done():
-            return
-        self._task = asyncio.create_task(self._flush_loop(), name="log_info")
-
-    async def stop(self) -> None:
-        if self._task and not self._task.done():
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-        if self._buffer:
-            await self._flush()
-
-    async def _flush_loop(self) -> None:
-        while True:
-            await asyncio.sleep(self._interval)
-            if self._buffer:
-                await self._flush()
-
-    async def _flush(self) -> None:
-        if not self._buffer:
-            return
-        items = self._buffer[:50]
-        self._buffer = self._buffer[50:]
-        lines = [f"{_format_time(ts)} {msg}" for ts, msg in items]
-        text = (
-            f"📌 [{self._exchange}] 상태 변이 ({len(items)}건)\n"
             f"━━━━━━━━━━━━━━━━━━\n"
             + "\n".join(lines)
         )
@@ -229,18 +165,17 @@ class TelegramAlertHandler(logging.Handler):
 
 # ── 세팅 헬퍼 ───────────────────────────────────────
 
-_handlers: list[TelegramDigestHandler | TelegramInfoHandler | TelegramAlertHandler] = []
+_handlers: list[TelegramDigestHandler | TelegramAlertHandler] = []
 
 
 async def setup_telegram_logging(exchange: str) -> None:
     """Telegram 핸들러를 루트 로거에 등록 + 비동기 태스크 시작.
 
     환경변수:
-        TELEGRAM_BOT_TOKEN        — 공유 봇 토큰 (필수)
-        TELEGRAM_HEARTBEAT_CHAT_ID — HeartBeat 채널 (DEBUG 다이제스트, 5분 배치)
-        TELEGRAM_SAVEUS_CHAT_ID    — Save Us 그룹 (INFO 2분 배치 + WARNING+ 즉시)
+        TELEGRAM_BOT_TOKEN         — 공유 봇 토큰 (필수)
+        TELEGRAM_HEARTBEAT_CHAT_ID — HeartBeat 채널 (INFO 다이제스트, 5분 배치)
+        TELEGRAM_SAVEUS_CHAT_ID    — Save Us 그룹 (WARNING+ 즉시)
         LOG_DIGEST_INTERVAL_SEC    — HeartBeat 다이제스트 주기 (기본 300)
-        LOG_INFO_INTERVAL_SEC      — Save Us INFO 배치 주기 (기본 120)
     """
     import os
 
@@ -254,7 +189,7 @@ async def setup_telegram_logging(exchange: str) -> None:
     # 이미 등록된 핸들러 타입 집합 (중복 등록 방어)
     existing_types = {type(h) for h in _handlers}
 
-    # HeartBeat 채널 (DEBUG 다이제스트)
+    # HeartBeat 채널 (INFO 다이제스트)
     heartbeat_chat = os.environ.get("TELEGRAM_HEARTBEAT_CHAT_ID", "")
     if heartbeat_chat and TelegramDigestHandler not in existing_types:
         digest_interval = int(os.environ.get("LOG_DIGEST_INTERVAL_SEC", "300"))
@@ -266,18 +201,9 @@ async def setup_telegram_logging(exchange: str) -> None:
         await h.start()
         _handlers.append(h)
 
-    # Save Us 그룹 (INFO 배치 + WARNING+ 즉시)
+    # Save Us 그룹 (WARNING+ 즉시)
     saveus_chat = os.environ.get("TELEGRAM_SAVEUS_CHAT_ID", "")
     if saveus_chat:
-        if TelegramInfoHandler not in existing_types:
-            info_interval = int(os.environ.get("LOG_INFO_INTERVAL_SEC", "120"))
-            h_info = TelegramInfoHandler(
-                bot_token, saveus_chat,
-                exchange=exchange, interval_sec=info_interval,
-            )
-            root.addHandler(h_info)
-            await h_info.start()
-            _handlers.append(h_info)
         if TelegramAlertHandler not in existing_types:
             h_alert = TelegramAlertHandler(
                 bot_token, saveus_chat, exchange=exchange,

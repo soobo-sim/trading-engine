@@ -3,8 +3,7 @@ core/logging/telegram_handlers.py 단위 테스트.
 
 검증 항목:
 - _send_telegram: 토큰/chat_id 미설정, 성공, 실패, 길이 초과
-- TelegramDigestHandler: DEBUG만 버퍼링, INFO 이상 무시, flush 포맷, 버퍼 초과
-- TelegramInfoHandler: INFO만 버퍼링, WARNING 이상 무시, flush 포맷
+- TelegramDigestHandler: INFO만 버퍼링, DEBUG/WARNING 무시, flush 포맷, 버퍼 초과
 - TelegramAlertHandler: WARNING+ 즉시 전송, 디바운스, 루프 없으면 스킵
 - setup_telegram_logging: 토큰 없으면 스킵, 채널별 핸들러 등록, 환경변수 커스텀 주기
 - shutdown_telegram_logging: 잔여 버퍼 전송, 태스크 취소
@@ -21,7 +20,6 @@ import pytest
 from core.logging.telegram_handlers import (
     TelegramAlertHandler,
     TelegramDigestHandler,
-    TelegramInfoHandler,
     _send_telegram,
     setup_telegram_logging,
     shutdown_telegram_logging,
@@ -117,14 +115,14 @@ class TestTelegramDigestHandler:
         )
         return record
 
-    def test_debug_only_buffered(self):
-        h = TelegramDigestHandler("tok", "chat", exchange="BF", interval_sec=300)
-        h.emit(self._make_record(logging.DEBUG, "debug msg"))
-        assert len(h._buffer) == 1
-
-    def test_info_ignored(self):
+    def test_info_only_buffered(self):
         h = TelegramDigestHandler("tok", "chat", exchange="BF", interval_sec=300)
         h.emit(self._make_record(logging.INFO, "info msg"))
+        assert len(h._buffer) == 1
+
+    def test_debug_ignored(self):
+        h = TelegramDigestHandler("tok", "chat", exchange="BF", interval_sec=300)
+        h.emit(self._make_record(logging.DEBUG, "debug msg"))
         assert len(h._buffer) == 0
 
     def test_warning_ignored(self):
@@ -135,8 +133,8 @@ class TestTelegramDigestHandler:
     @pytest.mark.asyncio
     async def test_flush_sends_buffered_messages(self):
         h = TelegramDigestHandler("tok", "chat", exchange="BF", interval_sec=5)
-        h.emit(self._make_record(logging.DEBUG, "msg1"))
-        h.emit(self._make_record(logging.DEBUG, "msg2"))
+        h.emit(self._make_record(logging.INFO, "msg1"))
+        h.emit(self._make_record(logging.INFO, "msg2"))
 
         sent_texts = []
         with patch(
@@ -154,7 +152,7 @@ class TestTelegramDigestHandler:
     @pytest.mark.asyncio
     async def test_flush_clears_buffer(self):
         h = TelegramDigestHandler("tok", "chat", exchange="BF", interval_sec=5)
-        h.emit(self._make_record(logging.DEBUG, "msg"))
+        h.emit(self._make_record(logging.INFO, "msg"))
 
         with patch("core.logging.telegram_handlers._send_telegram", new_callable=AsyncMock, return_value=True):
             await h._flush()
@@ -166,7 +164,7 @@ class TestTelegramDigestHandler:
         """100건 초과 시 나머지는 다음 배치 표시."""
         h = TelegramDigestHandler("tok", "chat", exchange="BF", interval_sec=5)
         for i in range(120):
-            h.emit(self._make_record(logging.DEBUG, f"msg{i}"))
+            h.emit(self._make_record(logging.INFO, f"msg{i}"))
 
         sent_texts = []
         with patch(
@@ -183,7 +181,7 @@ class TestTelegramDigestHandler:
     async def test_stop_flushes_remaining(self):
         """stop() 시 잔여 버퍼 전송."""
         h = TelegramDigestHandler("tok", "chat", exchange="BF", interval_sec=300)
-        h.emit(self._make_record(logging.DEBUG, "leftover"))
+        h.emit(self._make_record(logging.INFO, "leftover"))
 
         sent_texts = []
         with patch(
@@ -221,86 +219,6 @@ class TestTelegramDigestHandler:
             await task1
         except asyncio.CancelledError:
             pass
-
-
-# ─── TelegramInfoHandler ─────────────────────────────────────
-
-class TestTelegramInfoHandler:
-
-    def _make_record(self, level: int, msg: str) -> logging.LogRecord:
-        return logging.LogRecord(
-            name="test.logger", level=level, pathname="", lineno=0,
-            msg=msg, args=(), exc_info=None,
-        )
-
-    def test_info_only_buffered(self):
-        h = TelegramInfoHandler("tok", "chat", exchange="GMO", interval_sec=120)
-        h.emit(self._make_record(logging.INFO, "info msg"))
-        assert len(h._buffer) == 1
-
-    def test_debug_ignored(self):
-        h = TelegramInfoHandler("tok", "chat", exchange="GMO", interval_sec=120)
-        h.emit(self._make_record(logging.DEBUG, "debug msg"))
-        assert len(h._buffer) == 0
-
-    def test_warning_ignored(self):
-        h = TelegramInfoHandler("tok", "chat", exchange="GMO", interval_sec=120)
-        h.emit(self._make_record(logging.WARNING, "warn msg"))
-        assert len(h._buffer) == 0
-
-    def test_error_ignored(self):
-        h = TelegramInfoHandler("tok", "chat", exchange="GMO", interval_sec=120)
-        h.emit(self._make_record(logging.ERROR, "error msg"))
-        assert len(h._buffer) == 0
-
-    @pytest.mark.asyncio
-    async def test_flush_format_contains_exchange(self):
-        h = TelegramInfoHandler("tok", "chat", exchange="GMO", interval_sec=120)
-        h.emit(self._make_record(logging.INFO, "진입 완료"))
-
-        sent_texts = []
-        with patch(
-            "core.logging.telegram_handlers._send_telegram",
-            new_callable=AsyncMock,
-            side_effect=lambda *a, **k: sent_texts.append(a[2]) or True,
-        ):
-            await h._flush()
-
-        assert "GMO" in sent_texts[0]
-        assert "진입 완료" in sent_texts[0]
-        assert "📌" in sent_texts[0]
-
-    @pytest.mark.asyncio
-    async def test_flush_over_50_items_batches(self):
-        h = TelegramInfoHandler("tok", "chat", exchange="GMO", interval_sec=120)
-        for i in range(60):
-            h.emit(self._make_record(logging.INFO, f"evt{i}"))
-
-        sent_texts = []
-        with patch(
-            "core.logging.telegram_handlers._send_telegram",
-            new_callable=AsyncMock,
-            side_effect=lambda *a, **k: sent_texts.append(a[2]) or True,
-        ):
-            await h._flush()
-
-        assert "외 10건" in sent_texts[0]
-
-    @pytest.mark.asyncio
-    async def test_stop_flushes_remaining(self):
-        h = TelegramInfoHandler("tok", "chat", exchange="GMO", interval_sec=300)
-        h.emit(self._make_record(logging.INFO, "state_change"))
-
-        sent_texts = []
-        with patch(
-            "core.logging.telegram_handlers._send_telegram",
-            new_callable=AsyncMock,
-            side_effect=lambda *a, **k: sent_texts.append(a[2]) or True,
-        ):
-            await h.stop()
-
-        assert len(sent_texts) == 1
-        assert "state_change" in sent_texts[0]
 
 
 # ─── TelegramAlertHandler ────────────────────────────────────
@@ -443,27 +361,8 @@ class TestSetupTelegramLogging:
             await shutdown_telegram_logging()
 
     @pytest.mark.asyncio
-    async def test_saveus_info_handler_registered(self):
-        """SAVEUS_CHAT_ID 설정 시 InfoHandler + AlertHandler 2개 등록."""
-        _handlers.clear()
-        env = {
-            "TELEGRAM_BOT_TOKEN": "tok",
-            "TELEGRAM_SAVEUS_CHAT_ID": "su123",
-        }
-        with patch.dict("os.environ", env, clear=True):
-            await setup_telegram_logging("bitflyer")
-
-        try:
-            assert len(_handlers) == 2
-            types = {type(h) for h in _handlers}
-            assert TelegramInfoHandler in types
-            assert TelegramAlertHandler in types
-        finally:
-            await shutdown_telegram_logging()
-
-    @pytest.mark.asyncio
     async def test_saveus_alert_handler_registered(self):
-        """SAVEUS_CHAT_ID 설정 시 AlertHandler 포함 확인."""
+        """SAVEUS_CHAT_ID 설정 시 AlertHandler 1개만 등록."""
         _handlers.clear()
         env = {
             "TELEGRAM_BOT_TOKEN": "tok",
@@ -473,6 +372,7 @@ class TestSetupTelegramLogging:
             await setup_telegram_logging("bitflyer")
 
         try:
+            assert len(_handlers) == 1
             types = {type(h) for h in _handlers}
             assert TelegramAlertHandler in types
         finally:
@@ -480,7 +380,7 @@ class TestSetupTelegramLogging:
 
     @pytest.mark.asyncio
     async def test_all_channels(self):
-        """HeartBeat + SaveUs 모두 설정 시 핸들러 3개(Digest+Info+Alert) 등록."""
+        """HeartBeat + SaveUs 모두 설정 시 핸들러 2개(Digest+Alert) 등록."""
         _handlers.clear()
         env = {
             "TELEGRAM_BOT_TOKEN": "tok",
@@ -491,10 +391,9 @@ class TestSetupTelegramLogging:
             await setup_telegram_logging("gmofx")
 
         try:
-            assert len(_handlers) == 3
+            assert len(_handlers) == 2
             types = {type(h) for h in _handlers}
             assert TelegramDigestHandler in types
-            assert TelegramInfoHandler in types
             assert TelegramAlertHandler in types
         finally:
             await shutdown_telegram_logging()
@@ -531,7 +430,7 @@ class TestSetupTelegramLogging:
 
         h = _handlers[0]
         record = logging.LogRecord(
-            name="t", level=logging.DEBUG, pathname="", lineno=0,
+            name="t", level=logging.INFO, pathname="", lineno=0,
             msg="残 메시지", args=(), exc_info=None,
         )
         h.emit(record)
@@ -562,26 +461,7 @@ class TestSetupTelegramLogging:
             await setup_telegram_logging("bitflyer")  # 두 번째 호출
 
         try:
-            assert len(_handlers) == 3  # 6이 되면 안 됨
-        finally:
-            await shutdown_telegram_logging()
-
-    @pytest.mark.asyncio
-    async def test_info_custom_interval_env(self):
-        """LOG_INFO_INTERVAL_SEC 환경변수 → InfoHandler 주기 반영."""
-        _handlers.clear()
-        env = {
-            "TELEGRAM_BOT_TOKEN": "tok",
-            "TELEGRAM_SAVEUS_CHAT_ID": "su",
-            "LOG_INFO_INTERVAL_SEC": "60",
-        }
-        with patch.dict("os.environ", env, clear=True):
-            await setup_telegram_logging("bitflyer")
-
-        try:
-            h = _handlers[0]
-            assert isinstance(h, TelegramInfoHandler)
-            assert h._interval == 60
+            assert len(_handlers) == 2  # 4가 되면 안 됨
         finally:
             await shutdown_telegram_logging()
 
@@ -615,8 +495,8 @@ class TestEdgeCases:
 
     @pytest.mark.asyncio
     async def test_info_flush_empty_buffer_no_send(self):
-        """InfoHandler: 빈 버퍼 _flush() 호출 시 _send_telegram 미호출."""
-        h = TelegramInfoHandler("tok", "chat", exchange="GMO", interval_sec=120)
+        """DigestHandler: INFO emit 없이 flush 시 미호출."""
+        h = TelegramDigestHandler("tok", "chat", exchange="BF", interval_sec=300)
 
         call_count = [0]
 
@@ -658,3 +538,68 @@ class TestEdgeCases:
 
         assert len(sent_texts) == 1
         assert "ValueError" in sent_texts[0] or "test error" in sent_texts[0]
+
+
+# ─── 기본값 검증 ─────────────────────────────────────────────
+
+class TestDefaultValues:
+    """HeartBeat DigestHandler 간격 기본값이 5분(300초)임을 명시적으로 검증."""
+
+    def test_digest_handler_default_interval_is_300(self):
+        """TelegramDigestHandler 기본 interval_sec = 300 (5분)."""
+        h = TelegramDigestHandler("tok", "chat", exchange="BF")
+        assert h._interval == 300
+
+    def test_digest_handler_level_is_info(self):
+        """TelegramDigestHandler 핸들러 레벨이 INFO임을 검증."""
+        h = TelegramDigestHandler("tok", "chat", exchange="BF")
+        assert h.level == logging.INFO
+
+    def test_alert_handler_ignores_info(self):
+        """TelegramAlertHandler 핸들러 레벨이 WARNING이므로 INFO는 프레임워크에서 차단됨."""
+        h = TelegramAlertHandler("tok", "chat", exchange="BF", debounce_sec=0)
+        # Python 로깅 프레임워크는 callHandlers()에서 handler.level < record.levelno를 체크
+        # WARNING 레벨 핸들러에 INFO(20)는 전달되지 않음
+        assert h.level == logging.WARNING
+
+    @pytest.mark.asyncio
+    async def test_log_info_interval_sec_env_ignored(self):
+        """LOG_INFO_INTERVAL_SEC 환경변수가 있어도 setup에서 무시됨 (삭제된 기능)."""
+        from core.logging.telegram_handlers import _handlers
+
+        _handlers.clear()
+        env = {
+            "TELEGRAM_BOT_TOKEN": "tok",
+            "TELEGRAM_HEARTBEAT_CHAT_ID": "hb",
+            "LOG_INFO_INTERVAL_SEC": "60",  # 구버전 환경변수, 현재 미사용
+        }
+        with patch.dict("os.environ", env, clear=True):
+            await setup_telegram_logging("bitflyer")
+
+        try:
+            # TelegramInfoHandler가 등록되지 않음을 확인
+            assert len(_handlers) == 1
+            assert isinstance(_handlers[0], TelegramDigestHandler)
+        finally:
+            await shutdown_telegram_logging()
+
+    @pytest.mark.asyncio
+    async def test_setup_digest_default_interval_is_300(self):
+        """LOG_DIGEST_INTERVAL_SEC 미설정 시 DigestHandler._interval == 300."""
+        from core.logging.telegram_handlers import _handlers
+
+        _handlers.clear()
+        env = {
+            "TELEGRAM_BOT_TOKEN": "tok",
+            "TELEGRAM_HEARTBEAT_CHAT_ID": "hb",
+        }
+        with patch.dict("os.environ", env, clear=True):
+            await setup_telegram_logging("bitflyer")
+
+        try:
+            digest_handlers = [h for h in _handlers if isinstance(h, TelegramDigestHandler)]
+            assert len(digest_handlers) == 1
+            assert digest_handlers[0]._interval == 300
+        finally:
+            await shutdown_telegram_logging()
+

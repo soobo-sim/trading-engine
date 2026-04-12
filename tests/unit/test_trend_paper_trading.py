@@ -30,6 +30,7 @@ from adapters.database.models import (
 )
 from adapters.database.session import Base
 from core.exchange.types import OrderType, Position
+from core.strategy.base_trend import _SYNC_INTERVAL_CYCLES
 from core.strategy.trend_following import TrendFollowingManager
 from core.strategy.cfd_trend_following import CfdTrendFollowingManager
 from core.task.supervisor import TaskSupervisor
@@ -564,8 +565,8 @@ class TestSyncPositionGuard:
         trend_manager._params["xrp_jpy"] = params
         await trend_manager._try_paper_entry("xrp_jpy", "long", 100.0, 1.0, params)
 
-        # _sync_counter를 4로 설정하여 다음 ++에서 5가 됨 → 조건 진입
-        trend_manager._sync_counter["xrp_jpy"] = 4
+        # _sync_counter를 29로 설정하여 다음 ++에서 30이 됨 → 조건 진입
+        trend_manager._sync_counter["xrp_jpy"] = 29
 
         sync_called = []
         original_sync = trend_manager._sync_position_state
@@ -580,7 +581,7 @@ class TestSyncPositionGuard:
         if pos is not None:
             cnt = trend_manager._sync_counter.get("xrp_jpy", 0) + 1
             trend_manager._sync_counter["xrp_jpy"] = cnt
-            if cnt % 5 == 0 and "xrp_jpy" not in trend_manager._paper_executors:
+            if cnt % 30 == 0 and "xrp_jpy" not in trend_manager._paper_executors:
                 await trend_manager._sync_position_state("xrp_jpy")
 
         assert "xrp_jpy" not in sync_called
@@ -704,7 +705,7 @@ class TestEdgeCases:
             pair="xrp_jpy", entry_price=100.0,
             entry_amount=100.0, stop_loss_price=90.0,
         )
-        trend_manager._sync_counter["xrp_jpy"] = 4
+        trend_manager._sync_counter["xrp_jpy"] = 29
 
         sync_called = []
         async def _mock_sync(pair):
@@ -715,9 +716,59 @@ class TestEdgeCases:
         if pos is not None:
             cnt = trend_manager._sync_counter.get("xrp_jpy", 0) + 1
             trend_manager._sync_counter["xrp_jpy"] = cnt
-            if cnt % 5 == 0 and "xrp_jpy" not in trend_manager._paper_executors:
+            if cnt % 30 == 0 and "xrp_jpy" not in trend_manager._paper_executors:
                 await trend_manager._sync_position_state("xrp_jpy")
 
         # active pair → 가드 통과 → sync 호출됨
+        assert "xrp_jpy" in sync_called
+
+    def test_sync_interval_cycles_constant(self):
+        """_SYNC_INTERVAL_CYCLES 상수가 30임을 명시 검증 — 60초 × 30 = 30분 주기."""
+        assert _SYNC_INTERVAL_CYCLES == 30
+
+    @pytest.mark.asyncio
+    async def test_sync_not_called_before_interval(self, trend_manager):
+        """주기 미달(29사이클)에서는 sync가 호출되지 않음."""
+        trend_manager._position["xrp_jpy"] = Position(
+            pair="xrp_jpy", entry_price=100.0,
+            entry_amount=100.0, stop_loss_price=90.0,
+        )
+        trend_manager._sync_counter["xrp_jpy"] = 28  # 29→28, cnt+1=29 (미달)
+
+        sync_called = []
+        async def _mock_sync(pair):
+            sync_called.append(pair)
+        trend_manager._sync_position_state = _mock_sync
+
+        pos = trend_manager._position.get("xrp_jpy")
+        if pos is not None:
+            cnt = trend_manager._sync_counter.get("xrp_jpy", 0) + 1
+            trend_manager._sync_counter["xrp_jpy"] = cnt
+            if cnt % _SYNC_INTERVAL_CYCLES == 0 and "xrp_jpy" not in trend_manager._paper_executors:
+                await trend_manager._sync_position_state("xrp_jpy")
+
+        assert "xrp_jpy" not in sync_called
+
+    @pytest.mark.asyncio
+    async def test_sync_called_on_second_interval(self, trend_manager):
+        """두 번째 주기(59→60 사이클)에서도 sync 호출됨."""
+        trend_manager._position["xrp_jpy"] = Position(
+            pair="xrp_jpy", entry_price=100.0,
+            entry_amount=100.0, stop_loss_price=90.0,
+        )
+        trend_manager._sync_counter["xrp_jpy"] = 59  # cnt+1=60
+
+        sync_called = []
+        async def _mock_sync(pair):
+            sync_called.append(pair)
+        trend_manager._sync_position_state = _mock_sync
+
+        pos = trend_manager._position.get("xrp_jpy")
+        if pos is not None:
+            cnt = trend_manager._sync_counter.get("xrp_jpy", 0) + 1
+            trend_manager._sync_counter["xrp_jpy"] = cnt
+            if cnt % _SYNC_INTERVAL_CYCLES == 0 and "xrp_jpy" not in trend_manager._paper_executors:
+                await trend_manager._sync_position_state("xrp_jpy")
+
         assert "xrp_jpy" in sync_called
 

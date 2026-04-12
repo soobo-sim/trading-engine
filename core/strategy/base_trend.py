@@ -50,6 +50,7 @@ from core.task.supervisor import TaskSupervisor
 logger = logging.getLogger(__name__)
 
 _CANDLE_POLL_INTERVAL = 60  # 초
+_SYNC_INTERVAL_CYCLES = 30  # 잔고/포지션 정합성 검사 주기 (사이클 단위, 30사이클 = 30분)
 
 
 class BaseTrendManager(ABC):
@@ -452,12 +453,12 @@ class BaseTrendManager(ABC):
             pos = self._position.get(pair)
             entry_price = pos.entry_price if pos else None
 
-            # 5사이클(5분)마다 정합성 검사
+            # 30사이클(30분)마다 정합성 검사
             if pos is not None:
                 cnt = self._sync_counter.get(pair, 0) + 1
                 self._sync_counter[pair] = cnt
                 # Paper pair는 실잔고 조회 스킵 (entry_amount=0 → ZeroDivisionError 방지)
-                if cnt % 5 == 0 and pair not in self._paper_executors:
+                if cnt % _SYNC_INTERVAL_CYCLES == 0 and pair not in self._paper_executors:
                     await self._sync_position_state(pair)
 
             # 서브클래스 추가 체크 (keep_rate, 보유시간 등)

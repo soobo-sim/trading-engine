@@ -7,14 +7,17 @@ main.setup_logging() 단위 테스트.
   - 파일 핸들러 등록 (TimedRotatingFileHandler, DEBUG)
   - 노이즈 로거 억제 확인 (uvicorn.access / httpx / httpcore / websockets / asyncio)
   - `websockets.client` DEBUG가 파일 핸들러에 도달하지 않음 (핵심 회귀 방지)
+  - JSONFormatter 타임스탬프가 JST (UTC+9) 인지 확인
 """
 from __future__ import annotations
 
+import json
 import logging
 import logging.handlers
 import os
 import sys
 import tempfile
+from datetime import datetime, timedelta, timezone
 
 
 def _call_setup_logging(exchange: str = "test") -> None:
@@ -127,3 +130,44 @@ def test_websockets_debug_does_not_reach_file_handler():
     assert not ws_logger.isEnabledFor(logging.DEBUG)
     assert not ws_logger.isEnabledFor(logging.INFO)
     assert ws_logger.isEnabledFor(logging.WARNING)
+
+
+# ──────────────────────────────────────────────────────────────
+# JSONFormatter 타임스탬프 JST 검증
+# ──────────────────────────────────────────────────────────────
+
+def test_json_formatter_ts_is_jst():
+    """JSONFormatter 의 ts 필드가 JST(+09:00) 오프셋으로 출력되어야 한다."""
+    _call_setup_logging()
+    from main import JSONFormatter
+
+    JST = timezone(timedelta(hours=9))
+    fmt = JSONFormatter(exchange="test")
+
+    record = logging.LogRecord(
+        name="test", level=logging.INFO,
+        pathname="", lineno=0, msg="hello", args=(), exc_info=None,
+    )
+    output = json.loads(fmt.format(record))
+    ts_str = output["ts"]
+    ts = datetime.fromisoformat(ts_str)
+    assert ts.utcoffset() == timedelta(hours=9), (
+        f"ts 타임존이 JST(+09:00)이어야 하는데 실제: {ts.utcoffset()}"
+    )
+
+
+def test_json_formatter_ts_not_utc():
+    """JSONFormatter 의 ts 필드가 UTC(+00:00) 가 아니어야 한다 (회귀 방지)."""
+    _call_setup_logging()
+    from main import JSONFormatter
+
+    fmt = JSONFormatter(exchange="test")
+    record = logging.LogRecord(
+        name="test", level=logging.INFO,
+        pathname="", lineno=0, msg="hello", args=(), exc_info=None,
+    )
+    output = json.loads(fmt.format(record))
+    ts = datetime.fromisoformat(output["ts"])
+    assert ts.utcoffset() != timedelta(0), (
+        "ts가 여전히 UTC로 출력됨 — JST 변경 누락"
+    )
