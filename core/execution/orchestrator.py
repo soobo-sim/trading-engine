@@ -74,6 +74,16 @@ class ExecutionOrchestrator:
         # 즉시 통과: hold / 청산 계열은 안전장치 체크 불필요
         if decision.action in {"hold", "exit", "tighten_stop"}:
             judgment_id = await self._save_judgment(snapshot, decision, guardrail_result=None)
+            if decision.action == "hold":
+                logger.debug(
+                    f"[Orchestrator] {snapshot.pair}: 판단=hold "
+                    f"\u2192 안전장치 생략 (비진입). 근거: {decision.reasoning[:60]}"
+                )
+            else:
+                logger.info(
+                    f"[Orchestrator] {snapshot.pair}: 판단={decision.action} "
+                    f"\u2192 안전장치 생략 (비진입). 근거: {decision.reasoning[:60]}"
+                )
             return ExecutionResult(
                 action=decision.action,
                 executed=False,   # 실제 실행은 매니저가 함
@@ -95,6 +105,10 @@ class ExecutionOrchestrator:
 
         if not result.approved:
             judgment_id = await self._save_judgment(snapshot, decision, guardrail_result=result)
+            logger.info(
+                f"[Orchestrator] {snapshot.pair}: 판단={decision.action} "
+                f"→ 안전장치 거부 → 진입 차단. 위반: {result.rejection_reason}"
+            )
             return ExecutionResult(
                 action="blocked",
                 executed=False,
@@ -118,6 +132,10 @@ class ExecutionOrchestrator:
 
             if not approved:
                 judgment_id = await self._save_judgment(snapshot, decision, guardrail_result=result)
+                logger.info(
+                    f"[Orchestrator] {snapshot.pair}: 판단={decision.action} "
+                    f"→ 안전장치 통과 → 수보오빠 승인 거부/타임아웃"
+                )
                 return ExecutionResult(
                     action="rejected_by_user",
                     executed=False,
@@ -128,6 +146,10 @@ class ExecutionOrchestrator:
 
         # 최종 승인: 매니저에서 실행할 것
         judgment_id = await self._save_judgment(snapshot, decision, guardrail_result=result)
+        logger.info(
+            f"[Orchestrator] {snapshot.pair}: 판단={result.final_decision.action} "
+            f"→ 안전장치 통과 → 실행 대기 (매니저에게 위임)"
+        )
         return ExecutionResult(
             action=result.final_decision.action,
             executed=False,  # 실제 실행은 매니저가 함

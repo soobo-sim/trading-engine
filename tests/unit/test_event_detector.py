@@ -602,3 +602,117 @@ async def test_price_spike_multiple_pairs_only_one_spikes():
     price_spikes = [d for d in detections if d["type"] == "price_spike"]
     assert len(price_spikes) == 1
     assert price_spikes[0]["pair"] == "USD_JPY"
+
+
+# ──────────────────────────────────────────────────────────────
+# 로깅 검증 — EventDetector 서사 로그
+# ──────────────────────────────────────────────────────────────
+
+class TestEventDetectorLogging:
+    """감지 후 의미/영향 INFO 로그가 올바르게 출력되는지 검증."""
+
+    @pytest.mark.asyncio
+    async def test_price_spike_logs_info_with_meaning(self, caplog):
+        """
+        Given: USD_JPY 2.1% 하락 감지
+        When:  _check_price_spike()
+        Then:  INFO 로그 — 'advisory(hold) 등록' + '진입 억제 효과' 메시지 포함
+        """
+        import logging
+        det = EventDetector(
+            data_hub=MagicMock(),
+            advisory_base_url="http://localhost:8001",
+            exchange="bitflyer",
+            pairs=["USD_JPY"],
+        )
+        det._prev_prices["USD_JPY"] = 150.0
+        det._data_hub.get_ticker = AsyncMock(return_value=SimpleNamespace(last=146.85))  # -2.1%
+
+        with caplog.at_level(logging.INFO, logger="core.monitoring.event_detector"):
+            result = await det._check_price_spike("USD_JPY", datetime.now(timezone.utc))
+
+        assert result is not None
+        info = [r for r in caplog.records if r.levelname == "INFO" and "EventDetector" in r.message]
+        assert len(info) == 1
+        assert "advisory(hold)" in info[0].message
+        assert "억제" in info[0].message
+
+    @pytest.mark.asyncio
+    async def test_sentiment_extreme_fear_logs_correct_meaning(self, caplog):
+        """
+        Given: 센티먼트 score=5 (극단 공포)
+        When:  _check_sentiment_extreme()
+        Then:  INFO 로그 — '시장 공포 극심' 메시지 포함
+        """
+        import logging
+        from types import SimpleNamespace
+        det = EventDetector(
+            data_hub=MagicMock(),
+            advisory_base_url="http://localhost:8001",
+            exchange="bitflyer",
+            pairs=["BTC_JPY"],
+        )
+        sentiment = SimpleNamespace(score=5, classification="Extreme Fear")
+        det._data_hub.get_sentiment = AsyncMock(return_value=sentiment)
+
+        with caplog.at_level(logging.INFO, logger="core.monitoring.event_detector"):
+            result = await det._check_sentiment_extreme(datetime.now(timezone.utc))
+
+        assert result is not None
+        info = [r for r in caplog.records if r.levelname == "INFO" and "EventDetector" in r.message]
+        assert len(info) == 1
+        assert "공포 극심" in info[0].message
+
+    @pytest.mark.asyncio
+    async def test_sentiment_extreme_greed_logs_correct_meaning(self, caplog):
+        """
+        Given: 센티먼트 score=95 (극단 탐욕)
+        When:  _check_sentiment_extreme()
+        Then:  INFO 로그 — '과열 탐욕' 메시지 포함
+        """
+        import logging
+        from types import SimpleNamespace
+        det = EventDetector(
+            data_hub=MagicMock(),
+            advisory_base_url="http://localhost:8001",
+            exchange="bitflyer",
+            pairs=["BTC_JPY"],
+        )
+        sentiment = SimpleNamespace(score=95, classification="Extreme Greed")
+        det._data_hub.get_sentiment = AsyncMock(return_value=sentiment)
+
+        with caplog.at_level(logging.INFO, logger="core.monitoring.event_detector"):
+            result = await det._check_sentiment_extreme(datetime.now(timezone.utc))
+
+        assert result is not None
+        info = [r for r in caplog.records if r.levelname == "INFO" and "EventDetector" in r.message]
+        assert len(info) == 1
+        assert "탐욕" in info[0].message
+
+    @pytest.mark.asyncio
+    async def test_handle_detections_summary_log(self, caplog):
+        """
+        Given: 2건 감지
+        When:  _handle_detections() 호출
+        Then:  INFO 로그 — '2건 감지' 포함
+        """
+        import logging
+        det = EventDetector(
+            data_hub=MagicMock(),
+            advisory_base_url="http://localhost:8001",
+            exchange="bitflyer",
+            pairs=["BTC_JPY"],
+        )
+        detections = [
+            {"type": "price_spike", "pair": "BTC_JPY", "detail": "BTC_JPY 하락 2.1%"},
+            {"type": "sentiment_extreme", "pair": None, "detail": "극단 공포 score=5"},
+        ]
+        with patch("httpx.AsyncClient") as mock_http:
+            mock_resp = MagicMock()
+            mock_resp.status_code = 201
+            mock_http.return_value.__aenter__.return_value.post = AsyncMock(return_value=mock_resp)
+            with caplog.at_level(logging.INFO, logger="core.monitoring.event_detector"):
+                await det._handle_detections(detections)
+
+        summary = [r for r in caplog.records if "2건 감지" in r.message]
+        assert len(summary) == 1

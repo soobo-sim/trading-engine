@@ -51,38 +51,39 @@ class RuleBasedDecision:
         # ── 포지션 없음: 진입 판단 ────────────────
         if pos is None:
             if signal == "entry_ok":
-                return self._entry_decision(
+                decision = self._entry_decision(
                     snapshot, "entry_long", "롱 진입 조건 충족", now
                 )
-            if signal == "entry_preview":
+            elif signal == "entry_preview":
                 # 미완성 캔들 프리뷰 — confidence 할인 (0.7 × 0.8 = 0.56)
-                return self._entry_decision(
+                decision = self._entry_decision(
                     snapshot, "entry_long",
                     "프리뷰 시그널 (미완성 캔들 기반) — 4H 완성 시 재검증", now,
                     confidence_override=0.56,
                 )
-            if signal == "entry_sell":
-                return self._entry_decision(
+            elif signal == "entry_sell":
+                decision = self._entry_decision(
                     snapshot, "entry_short", "숏 진입 조건 충족", now
                 )
-            return self._hold(snapshot, f"signal={signal} — 진입 조건 없음", now)
+            else:
+                decision = self._hold(snapshot, f"signal={signal} — 진입 조건 없음", now)
 
         # ── 포지션 있음: 청산 우선순위 ────────────
         # 1) exit_warning (EMA 이탈 하드 청산)
-        if signal == "exit_warning":
-            return self._exit_decision(
+        elif signal == "exit_warning":
+            decision = self._exit_decision(
                 snapshot, "exit_warning",
                 f"exit_warning @ {snapshot.current_price} — EMA20 이탈", now,
             )
 
         # 2) full_exit (exit_signal 기반 전량 청산)
-        if exit_action == "full_exit":
+        elif exit_action == "full_exit":
             trigger = self._resolve_full_exit_trigger(exit_signal)
-            return self._exit_decision(snapshot, trigger, exit_reason, now)
+            decision = self._exit_decision(snapshot, trigger, exit_reason, now)
 
         # 3) tighten_stop (스탑 타이트닝, 아직 적용 안 됐을 때만)
-        if exit_action == "tighten_stop" and not pos.stop_tightened:
-            return Decision(
+        elif exit_action == "tighten_stop" and not pos.stop_tightened:
+            decision = Decision(
                 action="tighten_stop",
                 pair=snapshot.pair,
                 exchange=snapshot.exchange,
@@ -99,11 +100,25 @@ class RuleBasedDecision:
             )
 
         # 4) hold (트레일링 스탑은 Execution Layer에서 처리)
-        return self._hold(
-            snapshot,
-            f"signal={signal} exit={exit_action} — 포지션 유지",
-            now,
-        )
+        else:
+            decision = self._hold(
+                snapshot,
+                f"signal={signal} exit={exit_action} — 포지션 유지",
+                now,
+            )
+
+        # 서사 로그: hold=DEBUG, 그 외 상태 변이=INFO
+        if decision.action == "hold":
+            logger.debug(
+                f"[RuleBasedDecision] {snapshot.pair}: signal={signal} pos={'있음' if pos else '없음'} "
+                f"→ hold. {decision.reasoning[:60]}"
+            )
+        else:
+            logger.info(
+                f"[RuleBasedDecision] {snapshot.pair}: signal={signal} pos={'있음' if pos else '없음'} "
+                f"→ {decision.action}. {decision.reasoning[:60]}"
+            )
+        return decision
 
     # ── 헬퍼 ─────────────────────────────────────
 

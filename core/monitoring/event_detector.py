@@ -190,6 +190,10 @@ class EventDetector:
                 f"[EventDetector] {pair} 가격 급변 감지: "
                 f"{prev_price:.0f} → {current_price:.0f} ({change_pct:.1f}% {direction})"
             )
+            logger.info(
+                f"[EventDetector] {pair}: 60초 내 {change_pct:.1f}% {direction} → "
+                f"advisory(hold) 등록. 다음 4H 사이클에서 진입 억제 효과"
+            )
             self._mark_detected(detection_key)
             return {
                 "type": "price_spike",
@@ -238,6 +242,10 @@ class EventDetector:
                 f"[EventDetector] 센티먼트 급변 감지: "
                 f"{prev_score} → {current_score} (Δ{delta_abs:.0f}pt {direction})"
             )
+            logger.info(
+                f"[EventDetector] 센티먼트 {delta_abs:.0f}pt {direction} ({prev_score} → {current_score}) → "
+                f"advisory(hold) 등록. AI 판단에서 시장 심리 변화 반영"
+            )
             self._mark_detected(detection_key)
             return {
                 "type": "sentiment_shift",
@@ -274,8 +282,17 @@ class EventDetector:
             return None
 
         direction = "극단 공포" if current_score <= 10 else "극단 탐욕"
+        score_meaning = (
+            "시장 공포 극심 — 역발상적 매수 기회 모니터링"
+            if current_score <= 10
+            else "과열 탐욕 — 리스크 경계 필요"
+        )
         logger.warning(
             f"[EventDetector] 센티먼트 극단치 감지: score={current_score} ({direction})"
+        )
+        logger.info(
+            f"[EventDetector] 센티먼트 score={current_score} ({direction}): {score_meaning}. "
+            f"advisory(hold) 등록 → 다음 사이클 AI 판단에 반영"
         )
         self._mark_detected(detection_key)
         return {
@@ -321,6 +338,10 @@ class EventDetector:
                     f"[EventDetector] 경제 이벤트 임박: {event.name} "
                     f"({time_until.total_seconds()/60:.0f}분 후, {event.currency})"
                 )
+                logger.info(
+                    f"[EventDetector] {event.name}: {time_until.total_seconds()/60:.0f}분 후 발표 ({event.currency}). "
+                    f"advisory(hold) 등록 → 발표 전후 변동성 대비 진입 억제"
+                )
                 self._mark_detected(detection_key)
                 detections.append({
                     "type": "event_imminent",
@@ -342,6 +363,12 @@ class EventDetector:
 
     async def _handle_detections(self, detections: list[dict]) -> None:
         """감지 결과 처리 — advisory POST + Telegram 알림."""
+        telegram_status = "전송" if self._telegram_notifier else "미설정"
+        logger.info(
+            f"[EventDetector] 폴링 완료: {len(detections)}건 감지 → "
+            f"advisory {len(detections)}건 등록, "
+            f"Telegram {telegram_status}"
+        )
         for detection in detections:
             detail = detection.get("detail", str(detection))
             pair = detection.get("pair") or (self._pairs[0] if self._pairs else "UNKNOWN")

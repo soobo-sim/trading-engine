@@ -462,3 +462,72 @@ class TestConfidenceToSizeBoundaries:
     def test_exactly_0_85_boundary(self):
         """0.85 경계 = 0.60."""
         assert confidence_to_size(0.85) == pytest.approx(0.60, abs=1e-10)
+
+
+# ──────────────────────────────────────────────────────────────
+# 로깅 검증 — AiDecision 3단 체인 성공 시 INFO 로그
+# ──────────────────────────────────────────────────────────────
+
+class TestAiDecisionLogging:
+    """3단 체인 성공 시 INFO 로그가 올바른 포맷으로 출력되는지 검증."""
+
+    def _make_client(self) -> ILlmClient:  # type: ignore[return]
+        m = AsyncMock(spec=ILlmClient)
+        m.chat.side_effect = [
+            _alice_response(),
+            _samantha_response(),
+            _rachel_response(),
+        ]
+        return m
+
+    @pytest.mark.asyncio
+    async def test_info_log_emitted_on_success(self, caplog):
+        """
+        Given: Alice/Samantha/Rachel 모두 성공
+        When:  decide() 호출
+        Then:  INFO 로그 1건 — [AiDecision] + pair + Alice + 화살표 + Rachel 포함
+        """
+        import logging
+        client = self._make_client()
+        dec = AiDecision(llm_client=client)
+        with caplog.at_level(logging.INFO, logger="core.decision.ai_decision"):
+            await dec.decide(_snapshot())
+        info_logs = [r for r in caplog.records if r.levelname == "INFO" and "AiDecision" in r.message]
+        assert len(info_logs) == 1
+        msg = info_logs[0].message
+        assert "USD_JPY" in msg
+        assert "Alice=" in msg
+        assert "Rachel=" in msg
+        assert "\u2192" in msg  # →
+
+    @pytest.mark.asyncio
+    async def test_info_log_contains_action_and_confidence(self, caplog):
+        """
+        Given: Rachel execute(final_confidence=0.70, size=0.40) (기본값)
+        When:  decide() 호출
+        Then:  INFO 로그에 확신/사이즈 퍼센트 포함
+        """
+        import logging
+        client = self._make_client()
+        dec = AiDecision(llm_client=client)
+        with caplog.at_level(logging.INFO, logger="core.decision.ai_decision"):
+            await dec.decide(_snapshot())
+        msg = [r.message for r in caplog.records if "AiDecision" in r.message][0]
+        assert "70%" in msg   # final_confidence=0.70
+        assert "40%" in msg   # final_size_pct=0.40
+
+    @pytest.mark.asyncio
+    async def test_no_info_log_on_alice_fallback(self, caplog):
+        """
+        Given: Alice 실패 → v1 폴백
+        When:  decide() 호출
+        Then:  AiDecision INFO 로그 없음 (v1 폴백 경로는 조용)
+        """
+        import logging
+        client = AsyncMock(spec=ILlmClient)
+        client.chat.side_effect = LlmCallError("timeout")
+        dec = AiDecision(llm_client=client)
+        with caplog.at_level(logging.INFO, logger="core.decision.ai_decision"):
+            await dec.decide(_snapshot())
+        info_logs = [r for r in caplog.records if r.levelname == "INFO" and "AiDecision" in r.message]
+        assert len(info_logs) == 0

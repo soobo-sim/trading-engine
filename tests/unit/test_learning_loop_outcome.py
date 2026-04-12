@@ -592,3 +592,317 @@ async def test_paper_pair_skips_backfill(db_and_factory):
         row = (await session.execute(select(AiJudgment).where(AiJudgment.id == judgment_id))).scalar_one()
 
     assert row.outcome is None
+
+
+# ── 서사 로그 검증 ─────────────────────────────────────────────────────────────
+
+
+class TestNarrativeLogging:
+    """실행→학습 서사 로그가 올바른 레벨·내용으로 출력되는지 검증."""
+
+    @pytest.mark.asyncio
+    async def test_entry_long_judgment_linked_logs_info(self, db_and_factory, caplog):
+        """
+        Given: entry_long + judgment_id=42, position 생성 성공
+        When:  _handle_execution_result()
+        Then:  INFO '판단→실행 연결' 로그 — judgment_id + 확신도 + side 포함
+        """
+        import logging
+        db_factory, _ = db_and_factory
+        mgr = _make_minimal_manager(session_factory=db_factory)
+
+        pair = "USD_JPY"
+        mgr._params[pair] = {}
+        mgr._latest_price[pair] = 150.50
+
+        async def _mock_open(p, price, atr, params, *, signal_data=None):
+            mgr._position[p] = Position(pair=p, entry_price=price, entry_amount=1000.0)
+
+        mgr._open_position = _mock_open  # type: ignore[assignment]
+
+        result = _make_execution_result(action="entry_long", judgment_id=42, confidence=0.70)
+        with caplog.at_level(logging.INFO, logger="core.strategy.base_trend"):
+            await mgr._handle_execution_result(
+                pair, result, _make_snapshot(), _make_signal_data(), {}
+            )
+
+        info = [r for r in caplog.records if "판단→실행 연결" in r.message and r.levelname == "INFO"]
+        assert len(info) == 1
+        assert "judgment_id=42" in info[0].message
+        assert "확신도=70%" in info[0].message
+        assert "side=long" in info[0].message
+
+    @pytest.mark.asyncio
+    async def test_entry_long_no_judgment_id_no_link_log(self, db_and_factory, caplog):
+        """
+        Given: entry_long + judgment_id=None (v1 모드)
+        When:  _handle_execution_result()
+        Then:  '판단→실행 연결' INFO 로그 없음
+        """
+        import logging
+        db_factory, _ = db_and_factory
+        mgr = _make_minimal_manager(session_factory=db_factory)
+
+        pair = "USD_JPY"
+        mgr._params[pair] = {}
+        mgr._latest_price[pair] = 150.50
+
+        async def _mock_open(p, price, atr, params, *, signal_data=None):
+            mgr._position[p] = Position(pair=p, entry_price=price, entry_amount=1000.0)
+
+        mgr._open_position = _mock_open  # type: ignore[assignment]
+
+        result = _make_execution_result(action="entry_long", judgment_id=None)
+        with caplog.at_level(logging.INFO, logger="core.strategy.base_trend"):
+            await mgr._handle_execution_result(
+                pair, result, _make_snapshot(), _make_signal_data(), {}
+            )
+
+        info = [r for r in caplog.records if "판단→실행 연결" in r.message]
+        assert len(info) == 0
+
+    @pytest.mark.asyncio
+    async def test_entry_short_judgment_linked_logs_side_short(self, db_and_factory, caplog):
+        """
+        Given: entry_short + judgment_id=99
+        When:  _handle_execution_result()
+        Then:  INFO 로그 — side=short 포함
+        """
+        import logging
+        db_factory, _ = db_and_factory
+        mgr = _make_minimal_manager(session_factory=db_factory)
+
+        pair = "USD_JPY"
+        mgr._params[pair] = {}
+        mgr._latest_price[pair] = 150.50
+
+        async def _mock_on_entry(p, signal, price, atr, params, signal_data):
+            mgr._position[p] = Position(pair=p, entry_price=price, entry_amount=1000.0)
+
+        mgr._on_entry_signal = _mock_on_entry  # type: ignore[method-assign]
+
+        result = _make_execution_result(action="entry_short", judgment_id=99, confidence=0.65)
+        snap = SignalSnapshot(
+            pair=pair, exchange="gmo_fx",
+            timestamp=datetime(2026, 4, 11, 4, 0, 0, tzinfo=timezone.utc),
+            signal="entry_sell", current_price=150.50,
+            exit_signal={"action": "hold"},
+        )
+        with caplog.at_level(logging.INFO, logger="core.strategy.base_trend"):
+            await mgr._handle_execution_result(
+                pair, result, snap,
+                {"signal": "entry_sell", "current_price": 150.50, "exit_signal": {"action": "hold"}},
+                {}
+            )
+
+        info = [r for r in caplog.records if "판단→실행 연결" in r.message and r.levelname == "INFO"]
+        assert len(info) == 1
+        assert "side=short" in info[0].message
+        assert "judgment_id=99" in info[0].message
+
+    @pytest.mark.asyncio
+    async def test_close_position_learning_link_logs_info(self, db_and_factory, caplog):
+        """
+        Given: Position에 judgment_id 있음
+        When:  _close_position()
+        Then:  INFO '청산→학습 연결' 로그 — judgment_id + pnl + side 포함
+        """
+        import logging
+        import asyncio
+        db_factory, judgment_id = db_and_factory
+        mgr = _make_minimal_manager(session_factory=db_factory)
+
+        pair = "USD_JPY"
+        mgr._params[pair] = {}
+        mgr._latest_price[pair] = 151.0
+
+        pos = Position(pair=pair, entry_price=150.0, entry_amount=1000.0)
+        pos.extra["judgment_id"] = judgment_id
+        pos.extra["entry_time"] = datetime(2026, 4, 11, 0, 0, 0, tzinfo=timezone.utc).isoformat()
+        pos.extra["confidence"] = 0.70
+        pos.extra["side"] = "long"
+        mgr._position[pair] = pos
+
+        with caplog.at_level(logging.INFO, logger="core.strategy.base_trend"):
+            await mgr._close_position(pair, "stop_loss")
+            await asyncio.sleep(0)
+
+        info = [r for r in caplog.records if "청산→학습 연결" in r.message and r.levelname == "INFO"]
+        assert len(info) == 1
+        assert f"judgment_id={judgment_id}" in info[0].message
+        assert "side=long" in info[0].message
+
+    @pytest.mark.asyncio
+    async def test_close_position_no_judgment_no_learning_log(self, caplog):
+        """
+        Given: Position에 judgment_id 없음 (v1 모드)
+        When:  _close_position()
+        Then:  '청산→학습 연결' INFO 없음
+        """
+        import logging
+        mgr = _make_minimal_manager(session_factory=None)
+
+        pair = "USD_JPY"
+        mgr._params[pair] = {}
+        mgr._latest_price[pair] = 151.0
+
+        pos = Position(pair=pair, entry_price=150.0, entry_amount=1000.0)
+        mgr._position[pair] = pos
+
+        with caplog.at_level(logging.INFO, logger="core.strategy.base_trend"):
+            await mgr._close_position(pair, "stop_loss")
+
+        info = [r for r in caplog.records if "청산→학습 연결" in r.message]
+        assert len(info) == 0
+
+    @pytest.mark.asyncio
+    async def test_update_judgment_outcome_logs_info_not_debug(self, db_and_factory, caplog):
+        """
+        Given: _update_judgment_outcome 정상 실행
+        When:  호출
+        Then:  INFO 로그 (기존 DEBUG에서 변경) — outcome + pnl + hold 포함
+        """
+        import logging
+        db_factory, judgment_id = db_and_factory
+        mgr = _make_minimal_manager(session_factory=db_factory)
+
+        entry_time = datetime(2026, 4, 11, 0, 0, 0, tzinfo=timezone.utc)
+        with caplog.at_level(logging.DEBUG, logger="core.strategy.base_trend"):
+            await mgr._update_judgment_outcome(
+                "USD_JPY", judgment_id, realized_pnl=500.0, realized_pnl_pct=0.5,
+                entry_time=entry_time, confidence=0.70,
+            )
+
+        outcome_logs = [r for r in caplog.records if f"ai_judgments[{judgment_id}]" in r.message]
+        assert len(outcome_logs) == 1
+        assert outcome_logs[0].levelname == "INFO"
+        assert "outcome=win" in outcome_logs[0].message
+        assert "pnl=500.00" in outcome_logs[0].message
+
+    @pytest.mark.asyncio
+    async def test_update_judgment_outcome_no_debug_level_log(self, db_and_factory, caplog):
+        """
+        Given: _update_judgment_outcome 정상 실행
+        When:  호출
+        Then:  동일 메시지가 DEBUG 레벨로 출력되지 않음 (INFO로만)
+        """
+        import logging
+        db_factory, judgment_id = db_and_factory
+        mgr = _make_minimal_manager(session_factory=db_factory)
+
+        entry_time = datetime(2026, 4, 11, 0, 0, 0, tzinfo=timezone.utc)
+        with caplog.at_level(logging.DEBUG, logger="core.strategy.base_trend"):
+            await mgr._update_judgment_outcome(
+                "USD_JPY", judgment_id, realized_pnl=500.0, realized_pnl_pct=0.5,
+                entry_time=entry_time, confidence=0.70,
+            )
+
+        debug_logs = [
+            r for r in caplog.records
+            if f"ai_judgments[{judgment_id}]" in r.message and r.levelname == "DEBUG"
+        ]
+        assert len(debug_logs) == 0
+
+    @pytest.mark.asyncio
+    async def test_post_analyzer_log_contains_pair(self, db_and_factory, caplog):
+        """
+        Given: PostAnalyzer.analyze() 정상 실행
+        When:  호출
+        Then:  INFO 로그 — pair 포함 (기존 judgment_id만 있던 형식에서 변경)
+        """
+        import logging
+        from core.learning.post_analyzer import PostAnalyzer
+
+        db_factory, judgment_id = db_and_factory
+
+        llm_client = AsyncMock()
+        llm_client.chat = AsyncMock(return_value={"analysis": "테스트 사후 분석"})
+
+        from adapters.database.models import AiJudgment as _AiJudgment
+        analyzer = PostAnalyzer(
+            llm_client=llm_client,
+            session_factory=db_factory,
+            judgment_model=_AiJudgment,
+        )
+
+        with caplog.at_level(logging.INFO, logger="core.learning.post_analyzer"):
+            await analyzer.analyze(
+                judgment_id=judgment_id,
+                outcome="win",
+                realized_pnl=500.0,
+                hold_duration_hours=4.2,
+            )
+
+        info = [r for r in caplog.records if r.levelname == "INFO" and "사후 분석 완료" in r.message]
+        assert len(info) == 1
+        assert "USD_JPY" in info[0].message        # pair 포함 확인
+        assert f"judgment_id={judgment_id}" in info[0].message
+
+    @pytest.mark.asyncio
+    async def test_entry_long_decision_none_logs_zero_confidence(self, db_and_factory, caplog):
+        """
+        Given: entry_long + judgment_id=42, decision=None (비정상 케이스)
+        When:  _handle_execution_result()
+        Then:  INFO '판단→실행 연결' 로그 — 확신도=0% (fallback), judgment_id 포함
+        """
+        import logging
+        from core.data.dto import ExecutionResult as _ExecResult
+
+        db_factory, _ = db_and_factory
+        mgr = _make_minimal_manager(session_factory=db_factory)
+
+        pair = "USD_JPY"
+        mgr._params[pair] = {}
+        mgr._latest_price[pair] = 150.50
+
+        async def _mock_open(p, price, atr, params, *, signal_data=None):
+            mgr._position[p] = Position(pair=p, entry_price=price, entry_amount=1000.0)
+
+        mgr._open_position = _mock_open  # type: ignore[assignment]
+
+        # decision=None이지만 judgment_id는 있는 경우
+        result = _ExecResult(action="entry_long", executed=False, decision=None, judgment_id=42)
+
+        with caplog.at_level(logging.INFO, logger="core.strategy.base_trend"):
+            await mgr._handle_execution_result(
+                pair, result, _make_snapshot(), _make_signal_data(), {}
+            )
+
+        info = [r for r in caplog.records if "판단→실행 연결" in r.message and r.levelname == "INFO"]
+        assert len(info) == 1
+        assert "확신도=0%" in info[0].message
+        assert "judgment_id=42" in info[0].message
+
+    @pytest.mark.asyncio
+    async def test_close_position_negative_pnl_no_plus_sign(self, db_and_factory, caplog):
+        """
+        Given: 손실 청산 (exit_price < entry_price, long)
+        When:  _close_position()
+        Then:  '청산→학습 연결' 로그 — pnl 앞에 '+' 없음, 음수값 그대로 포함
+        """
+        import logging
+        import asyncio
+
+        db_factory, judgment_id = db_and_factory
+        mgr = _make_minimal_manager(session_factory=db_factory)
+
+        pair = "USD_JPY"
+        mgr._params[pair] = {}
+        mgr._latest_price[pair] = 148.0  # entry 150.0보다 낮음 → 손실
+
+        pos = Position(pair=pair, entry_price=150.0, entry_amount=1000.0)
+        pos.extra["judgment_id"] = judgment_id
+        pos.extra["entry_time"] = datetime(2026, 4, 11, 0, 0, 0, tzinfo=timezone.utc).isoformat()
+        pos.extra["confidence"] = 0.70
+        pos.extra["side"] = "long"
+        mgr._position[pair] = pos
+
+        with caplog.at_level(logging.INFO, logger="core.strategy.base_trend"):
+            await mgr._close_position(pair, "stop_loss")
+            await asyncio.sleep(0)
+
+        info = [r for r in caplog.records if "청산→학습 연결" in r.message and r.levelname == "INFO"]
+        assert len(info) == 1
+        # pnl = (148 - 150) * 1000 = -2000
+        assert "-2000円" in info[0].message
+        assert "+-2000円" not in info[0].message  # '+' 앞에 붙지 않아야 함

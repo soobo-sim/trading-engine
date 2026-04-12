@@ -357,3 +357,92 @@ async def test_approval_gate_called_for_entry_short():
 
     assert result.action == "entry_short"
     approval.request_approval.assert_awaited_once()
+
+
+# ──────────────────────────────────────────────────────────────
+# 로깅 검증 — Orchestrator 파이프라인 서사 로그
+# ──────────────────────────────────────────────────────────────
+
+class TestOrchestratorLogging:
+    """process() 각 분기에서 INFO 로그가 올바른 내용으로 출력되는지 검증."""
+
+    @pytest.mark.asyncio
+    async def test_hold_path_logs_debug_not_info(self, caplog):
+        """
+        Given: decision=hold (안전장치 생략 경로)
+        When:  process() 호출
+        Then:  hold는 반복 빈도 높음 → DEBUG. INFO 로그 없음.
+        """
+        import logging
+        orch = _make_orchestrator(decision=_decision("hold"), guardrail_approved=True)
+        with caplog.at_level(logging.DEBUG, logger="core.execution.orchestrator"):
+            await orch.process(_snapshot())
+        info = [r for r in caplog.records if "Orchestrator" in r.message and r.levelname == "INFO"]
+        assert len(info) == 0
+        debug = [r for r in caplog.records if "Orchestrator" in r.message and r.levelname == "DEBUG"]
+        assert len(debug) == 1
+        assert "안전장치 생략" in debug[0].message
+
+    @pytest.mark.asyncio
+    async def test_exit_path_logs_info(self, caplog):
+        """
+        Given: decision=exit (안전장치 생략, 청산)
+        When:  process() 호출
+        Then:  INFO 로그 1건 — '안전장치 생략' 메시지 포함
+        """
+        import logging
+        orch = _make_orchestrator(decision=_decision("exit"), guardrail_approved=True)
+        with caplog.at_level(logging.INFO, logger="core.execution.orchestrator"):
+            await orch.process(_snapshot())
+        info = [r for r in caplog.records if "Orchestrator" in r.message and r.levelname == "INFO"]
+        assert len(info) == 1
+        assert "안전장치 생략" in info[0].message
+
+    @pytest.mark.asyncio
+    async def test_blocked_path_logs_info(self, caplog):
+        """
+        Given: guardrail 거부
+        When:  process() 호출
+        Then:  INFO 로그 1건 — '진입 차단' 메시지 포함
+        """
+        import logging
+        orch = _make_orchestrator(decision=_decision("entry_long"), guardrail_approved=False)
+        with caplog.at_level(logging.INFO, logger="core.execution.orchestrator"):
+            await orch.process(_snapshot())
+        info = [r for r in caplog.records if "Orchestrator" in r.message and r.levelname == "INFO"]
+        assert len(info) == 1
+        assert "\uc9c4\uc785 \ucc28\ub2e8" in info[0].message
+
+    @pytest.mark.asyncio
+    async def test_approved_path_logs_info(self, caplog):
+        """
+        Given: guardrail 승인
+        When:  process() 호출
+        Then:  INFO 로그 1건 — '실행 대기' 메시지 포함
+        """
+        import logging
+        orch = _make_orchestrator(decision=_decision("entry_long"), guardrail_approved=True)
+        with caplog.at_level(logging.INFO, logger="core.execution.orchestrator"):
+            await orch.process(_snapshot())
+        info = [r for r in caplog.records if "Orchestrator" in r.message and r.levelname == "INFO"]
+        assert len(info) == 1
+        assert "\uc2e4\ud589 \ub300\uae30" in info[0].message
+
+    @pytest.mark.asyncio
+    async def test_tighten_stop_path_logs_info_not_debug(self, caplog):
+        """
+        Given: decision=tighten_stop (청산 계열 — hold와 달리 비빈번)
+        When:  process() 호출
+        Then:  INFO 로그 1건 — '안전장치 생략' 메시지 포함 (DEBUG 아님)
+        """
+        import logging
+        orch = _make_orchestrator(decision=_decision("tighten_stop"), guardrail_approved=True)
+        with caplog.at_level(logging.DEBUG, logger="core.execution.orchestrator"):
+            await orch.process(_snapshot())
+        info = [r for r in caplog.records if "Orchestrator" in r.message and r.levelname == "INFO"]
+        assert len(info) == 1
+        assert "안전장치 생략" in info[0].message
+        debug = [r for r in caplog.records if "Orchestrator" in r.message and r.levelname == "DEBUG"]
+        assert len(debug) == 0
+
+

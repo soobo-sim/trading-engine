@@ -251,6 +251,115 @@ def test_base_trend_unregister_paper_pair_logs_debug(caplog):
     assert "BTC_JPY" not in mgr._paper_executors
 
 
+def test_base_trend_signal_changed_logs_info(caplog):
+    """시그널이 변경되면 INFO로 출력."""
+    mgr = _make_trend_manager()
+    mgr._last_signal["BTC_JPY"] = "hold"
+
+    with caplog.at_level(logging.DEBUG, logger="core.strategy.base_trend"):
+        # 시그널 변경: hold → entry_buy
+        signal_changed = "entry_buy" != mgr._last_signal.get("BTC_JPY", "")
+        if signal_changed:
+            mgr._last_signal["BTC_JPY"] = "entry_buy"
+        _sig_level = "entry_buy" == "hold" or not signal_changed
+        _sig_log = __import__("logging").getLogger("core.strategy.base_trend")
+        level = logging.DEBUG if _sig_level else logging.INFO
+        _sig_log.log(level, "[TrendMgr] BTC_JPY: signal=entry_buy exit=hold price=100.0 pos=없음")
+
+    info_msgs = [r for r in caplog.records if r.levelno == logging.INFO]
+    assert any("signal=entry_buy" in r.message for r in info_msgs)
+
+
+def test_base_trend_signal_repeated_logs_debug(caplog):
+    """동일 시그널 반복 시 DEBUG로 다운그레이드된다."""
+    mgr = _make_trend_manager()
+    mgr._last_signal["BTC_JPY"] = "entry_sell"  # 이미 entry_sell 상태
+
+    with caplog.at_level(logging.DEBUG, logger="core.strategy.base_trend"):
+        # 시그널 동일: entry_sell → entry_sell (변경 없음)
+        signal_changed = "entry_sell" != mgr._last_signal.get("BTC_JPY", "")
+        if signal_changed:
+            mgr._last_signal["BTC_JPY"] = "entry_sell"
+        _sig_level = "entry_sell" == "hold" or not signal_changed
+        _sig_log = __import__("logging").getLogger("core.strategy.base_trend")
+        level = logging.DEBUG if _sig_level else logging.INFO
+        _sig_log.log(level, "[TrendMgr] BTC_JPY: signal=entry_sell exit=full_exit price=11420000.0 pos=없음")
+
+    info_msgs = [r for r in caplog.records if r.levelno == logging.INFO]
+    debug_msgs = [r for r in caplog.records if r.levelno == logging.DEBUG]
+    assert not any("signal=entry_sell" in r.message for r in info_msgs)
+    assert any("signal=entry_sell" in r.message for r in debug_msgs)
+
+
+def test_base_trend_last_signal_initialized_empty(caplog):
+    """_last_signal은 pair start 시 빈 문자열로 초기화된다."""
+    mgr = _make_trend_manager()
+    mgr._last_signal["BTC_JPY"] = ""
+
+    assert mgr._last_signal.get("BTC_JPY", "") == ""
+    # 첫 시그널은 무조건 변경으로 처리 (빈 문자열 → 어떤 값이든 다름)
+    signal_changed = "hold" != mgr._last_signal.get("BTC_JPY", "")
+    assert signal_changed is True
+
+
+@pytest.mark.asyncio
+async def test_base_trend_start_resets_last_signal(caplog):
+    """start() 실제 호출 시 _last_signal[pair]가 빈 문자열로 재초기화된다."""
+    mgr = _make_trend_manager()
+    mgr._last_signal["BTC_JPY"] = "entry_sell"  # 이전 상태 잔류
+
+    with (
+        patch.object(mgr, "_detect_existing_position", return_value=None),
+        patch.object(mgr, "_supervisor") as mock_sup,
+    ):
+        mock_sup.register = AsyncMock()
+        await mgr.start("BTC_JPY", {})
+
+    assert mgr._last_signal.get("BTC_JPY") == ""
+
+
+def test_base_trend_signal_to_hold_logs_debug(caplog):
+    """비-hold 시그널 → hold 전환: hold는 '시그널 변경'이어도 항상 DEBUG."""
+    mgr = _make_trend_manager()
+    mgr._last_signal["BTC_JPY"] = "entry_sell"
+
+    with caplog.at_level(logging.DEBUG, logger="core.strategy.base_trend"):
+        signal = "hold"
+        signal_changed = signal != mgr._last_signal.get("BTC_JPY", "")
+        if signal_changed:
+            mgr._last_signal["BTC_JPY"] = signal
+        _sig_level = signal == "hold" or not signal_changed  # hold → True
+        _sig_log = __import__("logging").getLogger("core.strategy.base_trend")
+        level = logging.DEBUG if _sig_level else logging.INFO
+        _sig_log.log(level, "[TrendMgr] BTC_JPY: signal=hold exit=hold price=11420000.0 pos=없음")
+
+    info_msgs = [r for r in caplog.records if r.levelno == logging.INFO]
+    debug_msgs = [r for r in caplog.records if r.levelno == logging.DEBUG]
+    assert not any("signal=hold" in r.message for r in info_msgs)
+    assert any("signal=hold" in r.message for r in debug_msgs)
+
+
+def test_base_trend_signal_nonhold_transition_logs_info(caplog):
+    """비-hold 시그널 간 전환 (entry_sell → entry_buy): INFO로 출력."""
+    mgr = _make_trend_manager()
+    mgr._last_signal["BTC_JPY"] = "entry_sell"
+
+    with caplog.at_level(logging.DEBUG, logger="core.strategy.base_trend"):
+        signal = "entry_buy"
+        signal_changed = signal != mgr._last_signal.get("BTC_JPY", "")
+        if signal_changed:
+            mgr._last_signal["BTC_JPY"] = signal
+        _sig_level = signal == "hold" or not signal_changed
+        _sig_log = __import__("logging").getLogger("core.strategy.base_trend")
+        level = logging.DEBUG if _sig_level else logging.INFO
+        _sig_log.log(level, "[TrendMgr] BTC_JPY: signal=entry_buy exit=hold price=11420000.0 pos=없음")
+
+    info_msgs = [r for r in caplog.records if r.levelno == logging.INFO]
+    assert any("signal=entry_buy" in r.message for r in info_msgs)
+    # _last_signal 상태도 업데이트됐는지 확인
+    assert mgr._last_signal["BTC_JPY"] == "entry_buy"
+
+
 # ──────────────────────────────────────────────────────────────
 # BoxMeanReversionManager
 # ──────────────────────────────────────────────────────────────

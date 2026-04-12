@@ -101,6 +101,9 @@ class BaseTrendManager(ABC):
         # Limit Order 대기 상태: pair → PendingLimitOrder
         self._pending_limit_orders: Dict[str, Any] = {}
 
+        # 시그널 변경 감지용 (동일 시그널 반복 출력 억제)
+        self._last_signal: Dict[str, str] = {}
+
         # Execution Layer 연결 (Step 4)
         self._orchestrator: Optional[ExecutionOrchestrator] = None
         # Data Layer 연결 (v1.5)
@@ -121,6 +124,7 @@ class BaseTrendManager(ABC):
         self._ema_slope_last_key[pair] = None
         self._close_fail_count[pair] = 0
         self._close_fail_until[pair] = 0
+        self._last_signal[pair] = ""
 
         pos = await self._detect_existing_position(pair)
         self._position[pair] = pos
@@ -501,8 +505,12 @@ class BaseTrendManager(ABC):
             if realtime_price is not None and ema is not None:
                 signal = self._check_exit_warning(pair, signal, realtime_price, ema, pos)
 
-            # 시그널 로그: hold=DEBUG, 그 외(매매 이벤트)=INFO
-            _sig_log = logger.debug if signal == "hold" else logger.info
+            # 시그널 로그: hold=DEBUG, 시그널 변경=INFO, 동일 반복=DEBUG
+            signal_changed = signal != self._last_signal.get(pair, "")
+            if signal_changed:
+                self._last_signal[pair] = signal
+            _sig_level = signal == "hold" or not signal_changed
+            _sig_log = logger.debug if _sig_level else logger.info
             _sig_log(
                 f"{self._log_prefix} {pair}: signal={signal} exit={exit_action} "
                 f"price={current_price} pos={'있음' if pos else '없음'}"
@@ -771,6 +779,12 @@ class BaseTrendManager(ABC):
                 if result.decision is not None:
                     new_pos.extra["confidence"] = result.decision.confidence
                     new_pos.extra["side"] = new_pos.extra.get("side", "long")
+                logger.info(
+                    f"{self._log_prefix} {pair}: 판단→실행 연결 — "
+                    f"judgment_id={result.judgment_id}, "
+                    f"확신도={new_pos.extra.get('confidence', 0.0):.0%}, "
+                    f"side={new_pos.extra.get('side', 'long')}"
+                )
             if is_preview and new_pos is not None:
                 new_pos.extra["preview_entry"] = True
             return False
@@ -789,6 +803,12 @@ class BaseTrendManager(ABC):
                 if result.decision is not None:
                     new_pos.extra["confidence"] = result.decision.confidence
                     new_pos.extra["side"] = new_pos.extra.get("side", "short")
+                logger.info(
+                    f"{self._log_prefix} {pair}: 판단→실행 연결 — "
+                    f"judgment_id={result.judgment_id}, "
+                    f"확신도={new_pos.extra.get('confidence', 0.0):.0%}, "
+                    f"side={new_pos.extra.get('side', 'short')}"
+                )
             if is_preview and new_pos is not None:
                 new_pos.extra["preview_entry"] = True
             return False
@@ -1124,6 +1144,12 @@ class BaseTrendManager(ABC):
                 entry_time = _dt.fromisoformat(entry_time_str) if entry_time_str else datetime.now(timezone.utc)
             except (ValueError, TypeError):
                 entry_time = datetime.now(timezone.utc)
+            logger.info(
+                f"{self._log_prefix} {pair}: 청산→학습 연결 — "
+                f"judgment_id={judgment_id}, "
+                f"pnl={'+'if pnl >= 0 else ''}{pnl:.0f}円 ({pnl_pct:+.2f}%), "
+                f"side={side_before}"
+            )
             import asyncio as _asyncio
             _asyncio.create_task(
                 self._update_judgment_outcome(
@@ -1176,7 +1202,7 @@ class BaseTrendManager(ABC):
                     )
                 )
                 await session.commit()
-            logger.debug(
+            logger.info(
                 f"{self._log_prefix} {pair}: ai_judgments[{judgment_id}] outcome={outcome} "
                 f"pnl={realized_pnl:.2f} ({realized_pnl_pct:.2f}%) hold={hold_hours:.1f}h"
             )

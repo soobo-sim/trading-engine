@@ -537,3 +537,91 @@ async def test_gr05_exit_always_bypasses(guardrail_with_balance, session_factory
     result = await guardrail_with_balance.check(d, _make_snapshot())
     assert result.approved is True
 
+
+# ──────────────────────────────────────────────────────────────
+# 로깅 검증 — Guardrails 승인 INFO 로그
+# ──────────────────────────────────────────────────────────────
+
+class TestGuardrailsLogging:
+    """진입 승인 시 INFO 로그 (기존 DEBUG → INFO 변경) 검증."""
+
+    @pytest.mark.asyncio
+    async def test_approval_logs_info(self, guardrail, caplog):
+        """
+        Given: 진입 가능 상태 (GR-01~05 모두 통과)
+        When:  check(entry_long)
+        Then:  INFO 로그 — '[Guardrail] ... 진입 승인' 메시지 포함
+        """
+        import logging
+        d = _make_decision("entry_long")
+        with caplog.at_level(logging.INFO, logger="core.safety.guardrails"):
+            result = await guardrail.check(d, _make_snapshot())
+        assert result.approved is True
+        info = [r for r in caplog.records if r.levelname == "INFO" and "진입 승인" in r.message]
+        assert len(info) == 1
+        assert "Guardrail" in info[0].message
+
+    @pytest.mark.asyncio
+    async def test_approval_log_contains_trade_count_and_size(self, guardrail, caplog):
+        """
+        Given: 진입 승인
+        When:  check(entry_long)
+        Then:  INFO 로그 — '금일 거래' + '사이즈' 포함
+        """
+        import logging
+        d = _make_decision("entry_long")
+        with caplog.at_level(logging.INFO, logger="core.safety.guardrails"):
+            await guardrail.check(d, _make_snapshot())
+        info = [r for r in caplog.records if "진입 승인" in r.message]
+        assert len(info) == 1
+        assert "금일 거래" in info[0].message
+        assert "사이즈" in info[0].message
+
+    @pytest.mark.asyncio
+    async def test_rejection_logs_warning_not_info(self, guardrail, session_factory, caplog):
+        """
+        Given: GR-01 위반 상태 (당일 거래 max+1)
+        When:  check(entry_long)
+        Then:  WARNING 로그 — '진입 거부' 메시지 (INFO 아님)
+        """
+        import logging
+        # max_trades=3 기본값. 완료된 거래 3개 삽입 (오늘 날짜 기준)
+        today = datetime.now(timezone.utc).replace(hour=6, minute=0, second=0, microsecond=0)
+        async with session_factory() as db:
+            for i in range(3):
+                db.add(TstTrade(
+                    order_id=f"test-order-{i:04d}",
+                    order_type="market_buy",
+                    amount=0.01,
+                    price=5_000_000.0,
+                    status="completed",
+                    reasoning="테스트",
+                    created_at=today,
+                    pair="BTC_JPY",
+                ))
+            await db.commit()
+        d = _make_decision("entry_long")
+        with caplog.at_level(logging.DEBUG, logger="core.safety.guardrails"):
+            result = await guardrail.check(d, _make_snapshot())
+        assert result.approved is False
+        warn = [r for r in caplog.records if r.levelname == "WARNING" and "진입 거부" in r.message]
+        assert len(warn) == 1
+        info = [r for r in caplog.records if r.levelname == "INFO" and "진입 승인" in r.message]
+        assert len(info) == 0
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("action", ["exit", "tighten_stop", "hold"])
+    async def test_non_entry_action_skips_guardrails_and_no_info_log(self, guardrail, caplog, action):
+        """
+        Given: decision=exit/tighten_stop/hold
+        When:  check() 호출
+        Then:  approved=True, INFO/WARNING 로그 없음 (GR 검사 완전 생략)
+        """
+        import logging
+        d = _make_decision(action)
+        with caplog.at_level(logging.DEBUG, logger="core.safety.guardrails"):
+            result = await guardrail.check(d, _make_snapshot())
+        assert result.approved is True
+        info = [r for r in caplog.records if r.levelname in {"INFO", "WARNING"}]
+        assert len(info) == 0
+

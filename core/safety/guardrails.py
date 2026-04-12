@@ -95,11 +95,15 @@ class AiGuardrails:
 
         violations: list[str] = []
         final_decision = decision
+        _today_count: int | None = None  # GR-01 조회 결과 재활용
 
         # GR-01: 일일 최대 거래 횟수
-        gr01 = await self._check_gr01()
-        if gr01 is not None:
-            violations.append(gr01)
+        max_trades = int(
+            self._settings.get("max_trades_per_day", self._DEFAULT_MAX_TRADES_PER_DAY)
+        )
+        _today_count = await self._count_today_trades()
+        if _today_count >= max_trades:
+            violations.append(f"GR-01: 당일 거래 {_today_count}/{max_trades}회 초과")
 
         # GR-02: 일일 최대 손실률
         gr02 = await self._check_gr02()
@@ -132,9 +136,11 @@ class AiGuardrails:
                 f"[Guardrail] {decision.pair} 진입 거부 — {reason}"
             )
         else:
-            logger.debug(
-                f"[Guardrail] {decision.pair} 진입 승인 "
-                f"(size={final_decision.size_pct:.0%})"
+            today_count = _today_count if _today_count is not None else 0
+            logger.info(
+                f"[Guardrail] {decision.pair} 진입 승인 — "
+                f"금일 거래 {today_count}/{max_trades}, "
+                f"사이즈 {final_decision.size_pct:.0%}"
             )
 
         return GuardrailResult(

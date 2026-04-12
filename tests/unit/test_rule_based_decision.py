@@ -302,3 +302,83 @@ async def test_source_is_always_rule_based_v1():
         result = await dec.decide(snapshot)
         assert result.source == "rule_based_v1", f"signal={signal}: source={result.source}"
 
+
+# ──────────────────────────────────────────────────────────────
+# 로깅 검증 — RuleBasedDecision 서사 로그
+# ──────────────────────────────────────────────────────────────
+
+class TestRuleBasedDecisionLogging:
+    """decide() 분기별 로그 레벨과 메시지 내용 검증."""
+
+    @pytest.mark.asyncio
+    async def test_entry_long_logs_info(self, caplog):
+        """
+        Given: signal=entry_ok, 포지션 없음
+        When:  decide()
+        Then:  INFO 로그 1건 — action=entry_long 포함
+        """
+        import logging
+        dec = RuleBasedDecision()
+        snapshot = _make_snapshot("entry_ok", position=None)
+        with caplog.at_level(logging.INFO, logger="core.decision.rule_based"):
+            result = await dec.decide(snapshot)
+        assert result.action == "entry_long"
+        info = [r for r in caplog.records if r.levelname == "INFO" and "RuleBasedDecision" in r.message]
+        assert len(info) == 1
+        assert "entry_long" in info[0].message
+
+    @pytest.mark.asyncio
+    async def test_hold_logs_debug_not_info(self, caplog):
+        """
+        Given: signal=hold, 포지션 없음
+        When:  decide()
+        Then:  INFO 로그 없음 (DEBUG만)
+        """
+        import logging
+        dec = RuleBasedDecision()
+        snapshot = _make_snapshot("hold", position=None)
+        with caplog.at_level(logging.DEBUG, logger="core.decision.rule_based"):
+            result = await dec.decide(snapshot)
+        assert result.action == "hold"
+        info = [r for r in caplog.records if r.levelname == "INFO" and "RuleBasedDecision" in r.message]
+        assert len(info) == 0
+        debug = [r for r in caplog.records if r.levelname == "DEBUG" and "RuleBasedDecision" in r.message]
+        assert len(debug) == 1
+        assert "hold" in debug[0].message
+
+    @pytest.mark.asyncio
+    async def test_exit_warning_logs_info(self, caplog):
+        """
+        Given: signal=exit_warning, 포지션 있음
+        When:  decide()
+        Then:  INFO 로그 1건 — action=exit 포함
+        """
+        import logging
+        dec = RuleBasedDecision()
+        snapshot = _make_snapshot("exit_warning", position=_pos())
+        with caplog.at_level(logging.INFO, logger="core.decision.rule_based"):
+            result = await dec.decide(snapshot)
+        assert result.action == "exit"
+        info = [r for r in caplog.records if r.levelname == "INFO" and "RuleBasedDecision" in r.message]
+        assert len(info) == 1
+        assert "exit" in info[0].message
+
+    @pytest.mark.asyncio
+    async def test_tighten_stop_logs_info(self, caplog):
+        """
+        Given: exit_action=tighten_stop, stop_tightened=False
+        When:  decide()
+        Then:  INFO 로그 1건 — action=tighten_stop 포함 (DEBUG 아님)
+        """
+        import logging
+        dec = RuleBasedDecision()
+        snapshot = _make_snapshot("no_signal", exit_action="tighten_stop", position=_pos(stop_tightened=False))
+        with caplog.at_level(logging.DEBUG, logger="core.decision.rule_based"):
+            result = await dec.decide(snapshot)
+        assert result.action == "tighten_stop"
+        info = [r for r in caplog.records if r.levelname == "INFO" and "RuleBasedDecision" in r.message]
+        assert len(info) == 1
+        assert "tighten_stop" in info[0].message
+        debug = [r for r in caplog.records if r.levelname == "DEBUG" and "RuleBasedDecision" in r.message]
+        assert len(debug) == 0
+

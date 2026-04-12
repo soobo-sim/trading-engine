@@ -122,8 +122,8 @@ class PostAnalyzer:
                 )
                 await session.commit()
             logger.info(
-                f"[PostAnalyzer] judgment_id={judgment_id} post_analysis 저장 완료 "
-                f"({len(analysis_text)}자)"
+                f"[PostAnalyzer] {judgment.pair}: 사후 분석 완료 "
+                f"(judgment_id={judgment_id}, {len(analysis_text)}자)"
             )
         except Exception as e:
             logger.warning(f"[PostAnalyzer] DB 업데이트 실패 (스킵): {e}")

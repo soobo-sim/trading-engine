@@ -147,7 +147,16 @@ class AiDecision:
             )
             rachel = self._auto_verdict(alice, samantha)
 
-        return self._verdict_to_decision(rachel, alice, samantha, snapshot)
+        decision = self._verdict_to_decision(rachel, alice, samantha, snapshot)
+        logger.info(
+            f"[AiDecision] {snapshot.pair}: "
+            f"Alice={alice.action}(확신 {alice.confidence:.0%}) → "
+            f"Samantha={samantha.verdict}(조정 {samantha.confidence_adjustment:.0%}) → "
+            f"Rachel={rachel.final_action}(확신 {rachel.final_confidence:.0%}, "
+            f"사이즈 {rachel.final_size_pct:.0%}) | "
+            f"근거: {rachel.reasoning[:80]}"
+        )
+        return decision
 
     # ── LLM 호출 ──────────────────────────────────────────────
 
