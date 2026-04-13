@@ -244,3 +244,16 @@ class GmoCoinTrendManager(CfdTrendFollowingManager):
             )
         except Exception as e:
             logger.error(f"[GmocMgr] {product_code}: 청산 오류 — {e}", exc_info=True)
+
+    # ──────────────────────────────────────────
+    # 진입 전 체크 오버라이드
+    # ──────────────────────────────────────────
+
+    async def _pre_entry_checks(self, pair: str, side: str, params: dict) -> bool:
+        """GMO Coin 전용 진입 전 검사.
+
+        GMO Coin 레버레지는 keep_rate / FX 주말 휴장 개념 없음.
+        부모(CfdTrendFollowingManager)의 keep_rate 차단 로직을 완전히 교체한다.
+        """
+        # GMO Coin은 keep_rate / FX 시장 휴장 체크 불필요 → 통과
+        return True
