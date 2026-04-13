@@ -10,6 +10,8 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 
+JST = timezone(timedelta(hours=9))
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import desc, select
@@ -154,7 +156,7 @@ async def create_advisory(
 
     logger.info(
         f"[Advisory] 저장 완료: pair={advisory.pair} action={advisory.action} "
-        f"confidence={advisory.confidence:.2f} expires={expires_at.isoformat()}"
+        f"confidence={advisory.confidence:.2f} expires={expires_at.astimezone(JST).isoformat()}"
     )
     return _to_response(advisory)
 

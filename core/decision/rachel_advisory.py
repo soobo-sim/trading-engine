@@ -86,13 +86,14 @@ class RachelAdvisoryDecision:
     async def _fetch_advisory(self, pair: str, exchange: str):
         """DB에서 최신 미만료 advisory 조회."""
         now = datetime.now(timezone.utc)
+        pair_upper = pair.upper()  # btc_jpy → BTC_JPY (레이첼은 대문자로 저장)
         model = self._advisory_model
         try:
             async with self._session_factory() as session:
                 stmt = (
                     select(model)
                     .where(
-                        model.pair == pair,
+                        model.pair == pair_upper,
                         model.exchange == exchange,
                         model.expires_at > now,
                     )

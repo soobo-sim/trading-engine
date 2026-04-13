@@ -579,3 +579,54 @@ async def test_adjust_risk_empty_adjustments_still_returns_adjust_risk():
 
     assert result.action == "adjust_risk"
     assert result.meta.get("adjustments") == {}
+
+
+@pytest.mark.asyncio
+async def test_fetch_advisory_normalizes_pair_to_uppercase():
+    """
+    Given: snapshot.pair='btc_jpy' (소문자 — GMO Coin 스타일)
+           DB에 저장된 advisory pair='BTC_JPY' (대문자 — 레이첼 저장 형식)
+    When:  _fetch_advisory('btc_jpy', 'gmo_coin')
+    Then:  pair.upper()='BTC_JPY'로 변환하여 DB 조회 → 레코드 반환
+
+    재현: GMO Coin candle_monitor는 pair='btc_jpy' 소문자로 SignalSnapshot을
+    생성하지만 레이첼은 POST /api/advisories 에 pair='BTC_JPY' 대문자로 저장.
+    쿼리 WHERE pair='btc_jpy'가 'BTC_JPY'와 불일치 → "advisory 없음" 오경고.
+    """
+    from sqlalchemy import select as sa_select
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from adapters.database.models import RachelAdvisory
+    from adapters.database.session import Base
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+    async with engine.begin() as conn:
+        target = [Base.metadata.tables["rachel_advisories"]]
+        await conn.run_sync(lambda sc: Base.metadata.create_all(sc, tables=target))
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+    # 대문자 BTC_JPY로 저장
+    async with factory() as session:
+        row = RachelAdvisory(
+            pair="BTC_JPY",
+            exchange="gmo_coin",
+            action="hold",
+            confidence=0.3,
+            reasoning="대소문자 정규화 테스트용 advisory (20자 이상)",
+            expires_at=datetime(2099, 1, 1, tzinfo=timezone.utc),
+        )
+        session.add(row)
+        await session.commit()
+
+    dec = RachelAdvisoryDecision(
+        session_factory=factory,
+        advisory_model=RachelAdvisory,
+        fallback=AsyncMock(),
+    )
+
+    # 소문자 btc_jpy로 조회 → 대문자 변환 후 매칭되어야 함
+    result = await dec._fetch_advisory("btc_jpy", "gmo_coin")
+    assert result is not None, "pair 소문자 입력 시에도 advisory를 찾아야 함"
+    assert result.pair == "BTC_JPY"
+    assert result.action == "hold"
+
+    await engine.dispose()

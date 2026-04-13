@@ -208,6 +208,33 @@ async def activate_strategy(
     row.status = "active"
     row.activated_at = datetime.now(timezone.utc)
     await db.commit()
+
+    # ── Hot Activation: 런타임 즉시 기동 ──
+    try:
+        registry = state.strategy_registry
+        params = row.parameters or {}
+        hot_pair = params.get("pair") or params.get("product_code")
+        hot_style = params.get("trading_style")
+        if registry and hot_pair and hot_style:
+            hot_pair = state.normalize_pair(hot_pair)
+            # 해당 pair 실행 중인 모든 전략 중단 (기존 active + paper 포함)
+            await registry.stop_pair_all_managers(hot_pair)
+            # 새 전략 실전 모드 기동
+            start_params = {**params, "strategy_id": row.id}
+            if not await registry.start_strategy(hot_style, hot_pair, start_params):
+                logger.warning(
+                    f"[HotActivation] 전략 {row.id} 런타임 기동 실패 "
+                    f"(style={hot_style}, pair={hot_pair})"
+                )
+            else:
+                logger.info(
+                    f"[HotActivation] 전략 {row.id} 즉시 기동 완료 "
+                    f"(style={hot_style}, pair={hot_pair})"
+                )
+    except Exception as e:
+        # DB는 이미 committed — 런타임 실패는 다음 재시작 시 복구
+        logger.warning(f"[HotActivation] 런타임 기동 중 에러 (DB 상태 유지): {e}")
+
     await db.refresh(row)
     return _strategy_to_dict(row)
 
@@ -244,6 +271,25 @@ async def archive_strategy(
             logger.warning(f"성과 카드 생성 실패 (strategy_id={strategy_id}): {e}")
 
     await db.commit()
+
+    # ── Hot Deactivation: 런타임 즉시 중단 ──
+    try:
+        registry = state.strategy_registry
+        params = row.parameters or {}
+        hot_pair = params.get("pair") or params.get("product_code")
+        hot_style = params.get("trading_style")
+        if registry and hot_pair and hot_style:
+            hot_pair = state.normalize_pair(hot_pair)
+            manager = registry.get(hot_style)
+            if manager and manager.is_running(hot_pair):
+                await manager.stop(hot_pair)
+                logger.info(
+                    f"[HotDeactivation] 전략 {row.id} 런타임 중단 완료 "
+                    f"(style={hot_style}, pair={hot_pair})"
+                )
+    except Exception as e:
+        logger.warning(f"[HotDeactivation] 런타임 중단 중 에러 (DB 상태 유지): {e}")
+
     await db.refresh(row)
     return _strategy_to_dict(row)
 

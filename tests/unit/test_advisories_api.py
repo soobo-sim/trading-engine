@@ -296,6 +296,25 @@ async def test_get_latest_include_expired_returns_expired(db_factory):
     assert resp.json()["is_expired"] is True
 
 
+def test_post_advisory_log_expires_in_jst(db_factory, caplog):
+    """
+    Given: 유효한 advisory POST 요청
+    When:  POST /api/advisories
+    Then:  로그 메시지의 expires 값이 JST (+09:00) 형식으로 출력되어야 함
+    """
+    import logging
+
+    client = _build_client(db_factory)
+    with caplog.at_level(logging.INFO, logger="api.routes.advisories"):
+        resp = client.post("/api/advisories", json=_VALID_BODY)
+
+    assert resp.status_code == 201
+    log_msgs = [r.message for r in caplog.records if "저장 완료" in r.message]
+    assert len(log_msgs) == 1, "저장 완료 로그가 1건이어야 함"
+    assert "+09:00" in log_msgs[0], f"JST 시간대가 아님: {log_msgs[0]}"
+    assert "+00:00" not in log_msgs[0], f"UTC 시간대 출력됨: {log_msgs[0]}"
+
+
 @pytest.mark.asyncio
 async def test_get_latest_exchange_isolation(db_factory):
     """

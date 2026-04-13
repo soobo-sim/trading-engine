@@ -55,3 +55,18 @@ class StrategyRegistry:
         await manager.start(pair, params)
         logger.debug(f"[Registry] {type(manager).__name__} 기동: pair={pair}")
         return True
+
+    async def stop_pair_all_managers(self, pair: str) -> None:
+        """모든 매니저에서 해당 pair를 중단한다.
+
+        activate 시 기존 전략 정리(paper 포함) + archive 시 중단에 공용.
+        실행 중이 아닌 매니저는 skip.
+        예외 발생 시 WARNING 로그 후 계속 진행.
+        """
+        for style, manager in self._managers.items():
+            try:
+                if manager.is_running(pair):
+                    await manager.stop(pair)
+                    logger.debug(f"[Registry] {style} {pair}: 중단 완료")
+            except Exception as e:
+                logger.warning(f"[Registry] {style} {pair}: 중단 중 에러 (계속 진행) — {e}")
