@@ -121,6 +121,10 @@ class TelegramApprovalGate:
 
         approved = response == "approve"
 
+        # 승인 시각 기록 — _open_position TTL 체크용 (BUG-031)
+        if approved:
+            decision.meta["approved_at"] = datetime.now(timezone.utc).isoformat()
+
         # 결과 반영 (실패해도 무시)
         status_map = {
             "approve": "✅ 승인됨",
@@ -315,6 +319,8 @@ class AutoApprovalGate:
                 f"[AutoApprovalGate] {decision.pair} 자동 승인 "
                 f"(confidence={decision.confidence:.2f}, size={decision.size_pct:.0%})"
             )
+            # 승인 시각 기록 — TTL 체크용 (BUG-031)
+            decision.meta["approved_at"] = datetime.now(timezone.utc).isoformat()
             asyncio.create_task(self._send_post_report(decision))
             return True
 

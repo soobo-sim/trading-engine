@@ -792,6 +792,9 @@ class BaseTrendManager(ABC):
         if action == "entry_long":
             is_preview = getattr(snapshot, "is_preview", False)
             entry_signal = "entry_preview" if is_preview else "entry_ok"
+            # approved_at을 signal_data에 병합 (BUG-031 TTL 체크용)
+            if result.decision and result.decision.meta.get("approved_at"):
+                signal_data = {**signal_data, "approved_at": result.decision.meta["approved_at"]}
             await self._on_entry_signal(
                 pair, entry_signal, current_price, atr, params, signal_data
             )
@@ -822,6 +825,9 @@ class BaseTrendManager(ABC):
                 return False
             is_preview = getattr(snapshot, "is_preview", False)
             entry_signal = "entry_preview" if is_preview else "entry_sell"
+            # approved_at을 signal_data에 병합 (BUG-031 TTL 체크용)
+            if result.decision and result.decision.meta.get("approved_at"):
+                signal_data = {**signal_data, "approved_at": result.decision.meta["approved_at"]}
             await self._on_entry_signal(
                 pair, entry_signal, current_price, atr, params, signal_data
             )

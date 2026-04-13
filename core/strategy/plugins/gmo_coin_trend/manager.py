@@ -18,6 +18,7 @@ GMO Coin 어댑터 주문 시맨틱:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
@@ -55,6 +56,62 @@ class GmoCoinTrendManager(CfdTrendFollowingManager):
         MARKET_SELL: coin_size를 직접 전달.
         """
         try:
+            # ── BUG-031: approve 후 파이프라인 (① 재ticker, ② 시그널 재평가, ③ TTL 30s) ──
+            APPROVE_TTL_SEC = 30
+            sd = signal_data or {}
+
+            # ③ TTL 체크: approve 후 30초 초과 시 만료
+            approved_at_str = sd.get("approved_at")
+            if approved_at_str:
+                try:
+                    approved_at = datetime.fromisoformat(approved_at_str)
+                    elapsed = (datetime.now(timezone.utc) - approved_at).total_seconds()
+                    if elapsed > APPROVE_TTL_SEC:
+                        logger.warning(
+                            f"[GmocMgr] {product_code}: 승인 TTL 만료 ({elapsed:.0f}s > {APPROVE_TTL_SEC}s) → 진입 차단"
+                        )
+                        return
+                except Exception:
+                    pass
+
+            # ① 최신 ticker 재취득 — approve 시점 가격으로 슬리피지 재계산
+            signal_price = price  # 원본 시그널 가격 보존 (슬리피지 기준)
+            try:
+                latest_ticker = await self._adapter.get_ticker(product_code)
+                latest_price = latest_ticker.ask if side == "buy" else latest_ticker.bid
+                if latest_price and latest_price > 0:
+                    price = latest_price  # 이후 계산에 최신 가격 사용
+            except Exception as e:
+                logger.warning(f"[GmocMgr] {product_code}: 최신 ticker 재취득 실패 — {e}. 원래 가격 유지")
+
+            # ② 시그널 재평가 — EMA/RSI/slope 전체 재계산
+            if approved_at_str:  # approve 게이트를 통과한 경우만
+                basis_tf = str(params.get("basis_timeframe", "4h"))
+                try:
+                    fresh_signal = await self._compute_signal(product_code, basis_tf, params=params)
+                    if fresh_signal is None:
+                        logger.warning(f"[GmocMgr] {product_code}: 재평가 시그널 계산 실패 → 진입 차단")
+                        return
+                    sig = fresh_signal.get("signal", "no_signal")
+                    if sig not in ("entry_ok", "entry_sell", "entry_preview"):
+                        logger.info(
+                            f"[GmocMgr] {product_code}: 시그널 소멸 (approve 후 재평가={sig}) → 진입 차단"
+                        )
+                        # Telegram 알림 (fire-and-forget)
+                        try:
+                            from core.task.auto_reporter import send_telegram_message
+                            asyncio.ensure_future(
+                                send_telegram_message(
+                                    f"[GmocMgr] {product_code} 시그널 소멸\napprove 후 재평가 결과: {sig}\n진입 차단됨"
+                                )
+                            )
+                        except Exception:
+                            pass
+                        return
+                except Exception as e:
+                    logger.warning(f"[GmocMgr] {product_code}: 시그널 재평가 실패 — {e}. 원래 시그널 유지")
+            # ──────────────────────────────────────────────────────────
+
             if not hasattr(self._adapter, "get_collateral"):
                 logger.error(f"[GmocMgr] {product_code}: 어댑터에 get_collateral 없음")
                 return
@@ -96,19 +153,15 @@ class GmoCoinTrendManager(CfdTrendFollowingManager):
                 )
                 return
 
-            # 슬리피지 체크 (매수 시만)
+            # 슬리피지 체크 (매수 시만) — 시그널 원가 vs 현재 ask 비교
             max_slippage_pct = float(params.get("max_slippage_pct", 0.3))
-            try:
-                ticker = await self._adapter.get_ticker(product_code)
-                if side == "buy" and ticker.ask > 0:
-                    slippage = (ticker.ask - price) / price * 100
-                    if slippage > max_slippage_pct:
-                        logger.warning(
-                            f"[GmocMgr] {product_code}: 슬리피지 초과 {slippage:.3f}%, 스킵"
-                        )
-                        return
-            except Exception as e:
-                logger.warning(f"[GmocMgr] {product_code}: 시세 조회 실패 — {e}")
+            if side == "buy" and price > 0:
+                slippage = (price - signal_price) / signal_price * 100
+                if slippage > max_slippage_pct:
+                    logger.warning(
+                        f"[GmocMgr] {product_code}: 슬리피지 초과 {slippage:.3f}%, 스킵"
+                    )
+                    return
 
             # GMO Coin 어댑터 주문 시맨틱:
             #   MARKET_BUY: JPY 금액 전달 → 어댑터가 jpy / ticker.ask 로 BTC 변환
