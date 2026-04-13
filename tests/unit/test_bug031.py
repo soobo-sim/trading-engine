@@ -126,20 +126,19 @@ async def test_t03_signal_expired_blocks():
 # ──────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_t04_signal_reeval_failure_uses_original():
-    """재평가 예외 → WARNING + 원래 시그널로 계속 진행."""
+async def test_t04_signal_reeval_failure_blocks():
+    """재평가 예외 → fail-safe → 진입 차단."""
     mgr, adapter = _make_manager()
 
     approved_at = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat()
     signal_data = {"approved_at": approved_at}
 
-    with patch.object(mgr, "_compute_signal", AsyncMock(side_effect=RuntimeError("DB down"))), \
-         patch.object(mgr, "_record_open", AsyncMock()):
+    with patch.object(mgr, "_compute_signal", AsyncMock(side_effect=RuntimeError("DB down"))):
         await mgr._open_position("btc_jpy", "buy", 5_000_000.0, None,
                                    mgr._params["btc_jpy"], signal_data=signal_data)
 
-    # 재평가 실패해도 주문 실행
-    adapter.place_order.assert_called_once()
+    # 재평가 실패 → fail-safe → 주문 차단
+    adapter.place_order.assert_not_called()
 
 
 # ──────────────────────────────────────────────────────────────

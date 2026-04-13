@@ -109,7 +109,8 @@ class GmoCoinTrendManager(CfdTrendFollowingManager):
                             pass
                         return
                 except Exception as e:
-                    logger.warning(f"[GmocMgr] {product_code}: 시그널 재평가 실패 — {e}. 원래 시그널 유지")
+                    logger.warning(f"[GmocMgr] {product_code}: 시그널 재평가 실패 — {e}. fail-safe → 진입 차단")
+                    return
             # ──────────────────────────────────────────────────────────
 
             if not hasattr(self._adapter, "get_collateral"):

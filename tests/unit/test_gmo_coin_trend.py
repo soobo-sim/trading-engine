@@ -160,8 +160,10 @@ async def test_open_position_sell_passes_coin_size():
 
     call_kwargs = mgr._adapter.place_order.call_args
     assert call_kwargs.kwargs["order_type"] == OrderType.MARKET_SELL
-    # amount는 coin_size = invest_jpy / price ≈ 100000 / 11500000 ≈ 0.00869565
-    expected_coin = round(collateral / price, 8)
+    # BUG-031: 재ticker 후 bid=11_400_000 으로 price 갱신됨
+    refreshed_price = 11_400_000.0
+    invest_jpy = collateral * float(params.get("position_size_pct", 100.0)) / 100.0
+    expected_coin = round(invest_jpy / refreshed_price, 8)
     assert call_kwargs.kwargs["amount"] == pytest.approx(expected_coin, rel=1e-4)
     # coin_size는 작은 소수
     assert call_kwargs.kwargs["amount"] < 1.0
