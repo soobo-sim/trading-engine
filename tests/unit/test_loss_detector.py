@@ -312,3 +312,40 @@ async def test_d2_trigger_webhook_failure_keeps_status():
     # status 변경 없음
     assert review.pipeline_status == "pending_pipeline"
 
+
+# =============================================================================
+# E: gmoc prefix 전용 — DB 컬럼 누락 회귀 방지 (UndefinedColumnError 재발 방지)
+# =============================================================================
+
+# E1: gmoc TrendPosition 모델에 loss_webhook_sent 컬럼이 존재한다
+def test_e1_gmoc_trend_position_has_loss_webhook_sent():
+    """2026-04-12 BUG: create_gmo_coin_tables.sql에 loss_webhook_sent 누락 → 회귀 방지."""
+    GmocTrendPosition = create_trend_position_model("gmoc")
+    cols = {c.name for c in GmocTrendPosition.__table__.columns}
+    assert "loss_webhook_sent" in cols, f"loss_webhook_sent 없음. cols={cols}"
+
+
+# E2: gmoc TrendPosition 모델에 entry_* 스냅샷 컬럼 5개가 모두 존재한다
+def test_e2_gmoc_trend_position_has_entry_snapshot_columns():
+    GmocTrendPosition = create_trend_position_model("gmoc")
+    cols = {c.name for c in GmocTrendPosition.__table__.columns}
+    expected = {"entry_rsi", "entry_ema_slope", "entry_atr", "entry_regime", "entry_bb_width"}
+    missing = expected - cols
+    assert not missing, f"누락된 컬럼: {missing}"
+
+
+# E3: gmoc prefix로 detect_and_notify_losses 호출 시 손실 감지 정상 동작
+@pytest.mark.asyncio
+async def test_e3_gmoc_detect_and_notify_losses_works():
+    GmocTrendPosition = create_trend_position_model("gmoc")
+    pos = _make_position(realized_pnl_jpy=Decimal("-999"))
+
+    from core.task.loss_detector import detect_and_notify_losses
+    db = _make_db([pos])
+
+    with patch("core.task.loss_detector._record_loss", new_callable=AsyncMock, return_value=True):
+        count = await detect_and_notify_losses(db, GmocTrendPosition, prefix="gmoc")
+
+    assert count == 1
+    assert pos.loss_webhook_sent is True
+

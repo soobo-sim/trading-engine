@@ -8,7 +8,7 @@ from typing import Any
 from sqlalchemy import and_, desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .display import JST
+from .display import JST, get_box_narrative_situation, get_box_narrative_outlook
 from .alerts import (
     _prev_raw_cache,
     _last_alert_time,
@@ -115,9 +115,10 @@ def build_box_telegram_text(prefix: str, time_str: str, pair: str, data: dict) -
     has_position = pos is not None
     is_margin = data.get("is_margin_trading", False)
     current_price = data["current_price"]
+    position_label = data.get("position_label", "no_box")
 
     if box:
-        lines.append(f"¥{current_price:,.2f} {data['position_label']} (폭 {box['box_width_pct']:.1f}%)")
+        lines.append(f"¥{current_price:,.2f} {position_label} (폭 {box['box_width_pct']:.1f}%)")
         lines.append(f"하단¥{box['lower_bound']:,.2f} {box['bar_chart']} 상단¥{box['upper_bound']:,.2f}")
         if box.get("age_warning"):
             lines.append(f"   {box['age_warning']}")
@@ -163,19 +164,18 @@ def build_box_telegram_text(prefix: str, time_str: str, pair: str, data: dict) -
 
     # ── 포지션 유무에 따른 분기 ──
     if has_position:
-        # ── 포지션 보유 모드: 청산/익절/손절 조건 표시 ──
         entry_price = pos["entry_price"]
         entry_amount = pos["entry_amount"]
         pnl = pos["unrealized_pnl_jpy"]
         pnl_pct = pos["unrealized_pnl_pct"]
         pnl_sign = "+" if pnl >= 0 else ""
-        pos_side = pos.get("side", "buy")  # 방향: 'buy'=롱, 'sell'=숏
+        pos_side = pos.get("side", "buy")
         pos_icon = "📈" if pos_side == "buy" else "📉"
         pos_label = "롱" if pos_side == "buy" else "숏"
-        lines.append(
-            f"{pos_icon} {pos_label} 보유: {entry_amount:.0f}{currency} @ ¥{entry_price:,.2f} | "
-            f"미실현 {pnl_sign}¥{pnl:,.0f} ({pnl_sign}{pnl_pct:.2f}%)"
-        )
+
+        lines.append(f"{pos_icon} {pos_label} 보유")
+        lines.append(f" · 진입 {entry_amount:.0f}{currency} @ ¥{entry_price:,.2f}")
+        lines.append(f" · 미실현 {pnl_sign}¥{pnl:,.0f} ({pnl_sign}{pnl_pct:.2f}%)")
 
         if box:
             near_bound_pct = float(data.get("near_bound_pct", 1.5))
@@ -185,7 +185,6 @@ def build_box_telegram_text(prefix: str, time_str: str, pair: str, data: dict) -
             lower_val = box["lower_bound"]
 
             if pos_side == "buy":
-                # 롱: 익절=near_upper, 손절=박스하단이탈+가격SL
                 tp_low = upper * (1 - near_bound_pct / 100)
                 tp_high = upper * (1 + near_bound_pct / 100)
                 tp_low_pct = (tp_low - current_price) / current_price * 100
@@ -204,7 +203,6 @@ def build_box_telegram_text(prefix: str, time_str: str, pair: str, data: dict) -
                     f"가격SL ¥{sl_price:,.2f} (-{stop_loss_pct:.1f}%)"
                 )
             else:
-                # 숏: 익절=near_lower, 손절=박스상단이탈+가격SL
                 tp_low = lower_val * (1 - near_bound_pct / 100)
                 tp_high = lower_val * (1 + near_bound_pct / 100)
                 tp_low_pct = (current_price - tp_high) / current_price * 100
@@ -222,7 +220,6 @@ def build_box_telegram_text(prefix: str, time_str: str, pair: str, data: dict) -
                     f"🛑 손절: 박스 무효화 ¥{inv_price:,.2f} (현재가 +{inv_pct:.1f}%) / "
                     f"가격SL ¥{sl_price:,.2f} (+{stop_loss_pct:.1f}%)"
                 )
-            # 거래소 SL 상태 (FX 전용: is_margin_trading=True)
             if is_margin:
                 exchange_sl_status = pos.get("exchange_sl_status")
                 exchange_sl_price = pos.get("exchange_sl_price")
@@ -232,18 +229,29 @@ def build_box_telegram_text(prefix: str, time_str: str, pair: str, data: dict) -
                     lines.append("🛡️ 거래소SL ❌등록실패")
                 else:
                     lines.append("🛡️ 거래소SL ⚠️미등록")
+
+        sit = get_box_narrative_situation(True, position_label, bool(box), pos_side, pnl_pct)
+        lines.append(f"📊 지금: {sit}")
+        out = get_box_narrative_outlook(True, position_label, pos_side)
+        if out:
+            lines.append(f"⚡ 전망: {out}")
+
     else:
-        # ── 포지션 없음: 진입 대기 모드 (현행) ──
+        # ── 포지션 없음: 진입 대기 모드 ──
         met = data.get("conditions_met", 0)
         total = data.get("conditions_total", 3)
         entry_blockers = data.get("entry_blockers", [])
-        has_box = "✅박스" if box else "❌박스"
-        has_balance = "✅잔고"
-        has_strategy = "✅전략"
-        if entry_blockers:
-            lines.append(f"🚫 {met}/{total} | {has_box} {has_balance} {has_strategy} | {entry_blockers[0]}")
+
+        if box:
+            if entry_blockers:
+                lines.append(f"🚫 {met}/{total} 진입까지:")
+                for b in entry_blockers:
+                    lines.append(f" · {b}")
+            else:
+                lines.append(f"✅ {met}/{total} 진입 조건 충족")
         else:
-            lines.append(f"✅ {met}/{total} 진입 조건 충족 | {has_box} {has_balance} {has_strategy}")
+            sit = get_box_narrative_situation(False, "no_box", False)
+            lines.append(f"📊 지금: {sit}")
 
         next_min_str = data.get("next_candle_minutes_str", "")
         tf_label = data.get("basis_timeframe", "4h")
@@ -257,13 +265,13 @@ def build_box_telegram_text(prefix: str, time_str: str, pair: str, data: dict) -
     # ── 잔고 라인 (FX/현물 분기) ──
     jpy_part = f"JPY ¥{data['jpy_available']:,.0f}"
     if is_margin:
-        # FX: 통화 현물 라인 제거, JPY만 표시
         lines.append(f"{jpy_part}" if has_position else f"{jpy_part} | 포지션 미보유")
     else:
         coin_part = f"{currency} {data['coin_available']:.2f}개"
         lines.append(f"{jpy_part} {coin_part}" if has_position else f"{jpy_part} {coin_part} | 포지션 미보유")
 
     return "\n".join(lines)
+
 def build_box_memory_block(prefix: str, time_str: str, pair: str, data: dict) -> str:
     strategy_name = data.get("strategy_name", "unknown")
     strategy_id = data.get("strategy_id", "?")

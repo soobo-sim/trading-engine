@@ -527,7 +527,7 @@ class TestCfdPaperEntry:
                 select(PaperTrade).where(PaperTrade.strategy_id == 53)
             )).scalars().first()
         assert row is not None
-        assert row.direction == "sell"
+        assert row.direction == "short"  # base 경로: direction="short" (BUG-034 수정 후)
 
     @pytest.mark.asyncio
     async def test_cfd_paper_exit_records_correct_reason(self, cfd_manager, db_session_factory):

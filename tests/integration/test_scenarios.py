@@ -255,6 +255,7 @@ class TestTrendEntryExitScenario:
         trend_mgr._params["xrp_jpy"] = self.PARAMS
         await trend_mgr._open_position(
             "xrp_jpy",
+            "buy",
             signal_data["current_price"],
             signal_data["atr"],
             self.PARAMS,
@@ -291,7 +292,7 @@ class TestTrendEntryExitScenario:
 
         signal_data = await trend_mgr._compute_signal("xrp_jpy", "4h", params=self.PARAMS)
         await trend_mgr._open_position(
-            "xrp_jpy", signal_data["current_price"], signal_data["atr"], self.PARAMS,
+            "xrp_jpy", "buy", signal_data["current_price"], signal_data["atr"], self.PARAMS,
         )
         entry_pos = trend_mgr.get_position("xrp_jpy")
         assert entry_pos is not None
@@ -353,7 +354,7 @@ class TestTrendTrailingStop:
 
         signal_data = await trend_mgr._compute_signal("xrp_jpy", "4h", params=self.PARAMS)
         await trend_mgr._open_position(
-            "xrp_jpy", signal_data["current_price"], signal_data["atr"], self.PARAMS,
+            "xrp_jpy", "buy", signal_data["current_price"], signal_data["atr"], self.PARAMS,
         )
 
         pos = trend_mgr.get_position("xrp_jpy")
@@ -382,7 +383,7 @@ class TestTrendTrailingStop:
 
         signal_data = await trend_mgr._compute_signal("xrp_jpy", "4h", params=self.PARAMS)
         await trend_mgr._open_position(
-            "xrp_jpy", signal_data["current_price"], signal_data["atr"], self.PARAMS,
+            "xrp_jpy", "buy", signal_data["current_price"], signal_data["atr"], self.PARAMS,
         )
 
         pos = trend_mgr.get_position("xrp_jpy")
@@ -405,7 +406,7 @@ class TestTrendTrailingStop:
 
         signal_data = await trend_mgr._compute_signal("xrp_jpy", "4h", params=self.PARAMS)
         await trend_mgr._open_position(
-            "xrp_jpy", signal_data["current_price"], signal_data["atr"], self.PARAMS,
+            "xrp_jpy", "buy", signal_data["current_price"], signal_data["atr"], self.PARAMS,
         )
 
         pos = trend_mgr.get_position("xrp_jpy")
@@ -449,7 +450,7 @@ class TestTrendBugFixes:
 
         signal_data = await trend_mgr._compute_signal("xrp_jpy", "4h", params=self.PARAMS)
         await trend_mgr._open_position(
-            "xrp_jpy", signal_data["current_price"], signal_data["atr"], self.PARAMS,
+            "xrp_jpy", "buy", signal_data["current_price"], signal_data["atr"], self.PARAMS,
         )
 
         # 잔고를 정확히 맞추고 청산

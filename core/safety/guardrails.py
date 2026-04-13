@@ -20,7 +20,7 @@ import logging
 from datetime import datetime, timezone, timedelta
 from typing import Protocol, Type, runtime_checkable
 
-from sqlalchemy import func, select
+from sqlalchemy import String, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from core.data.dto import Decision, GuardrailResult, SignalSnapshot, modify_decision
@@ -176,7 +176,7 @@ class AiGuardrails:
             result = await db.execute(
                 select(func.count(Trade.id)).where(
                     Trade.created_at >= today_start,
-                    func.lower(Trade.status) == "completed",
+                    func.lower(cast(Trade.status, String)) == "completed",
                 )
             )
             total = result.scalar() or 0

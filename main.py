@@ -117,6 +117,7 @@ from core.analysis.event_filter import create_event_filter
 from core.analysis.intermarket import create_intermarket_client
 from core.strategy.box_mean_reversion import BoxMeanReversionManager
 from core.strategy.cfd_trend_following import CfdTrendFollowingManager
+from core.strategy.gmo_coin_trend import GmoCoinTrendManager
 from core.strategy.trend_following import TrendFollowingManager
 from core.strategy.registry import StrategyRegistry
 from core.strategy.snapshot_collector import SnapshotCollector
@@ -147,6 +148,15 @@ _EXCHANGE_CONFIG = {
         "env_base_url": "GMOFX_BASE_URL",
         "default_base_url": "https://forex-api.coin.z.com",
     },
+    "gmo_coin": {
+        "prefix": "gmoc",
+        "pair_column": "pair",
+        "order_id_length": 40,
+        "env_api_key": "GMO_COIN_API_KEY",
+        "env_api_secret": "GMO_COIN_API_SECRET",
+        "env_base_url": "GMO_COIN_BASE_URL",
+        "default_base_url": "https://api.coin.z.com",
+    },
 }
 
 
@@ -160,6 +170,9 @@ def _create_adapter(exchange: str):
     if exchange == "gmofx":
         from adapters.gmo_fx.client import GmoFxAdapter
         return GmoFxAdapter(api_key=api_key, api_secret=api_secret, base_url=base_url)
+    elif exchange == "gmo_coin":
+        from adapters.gmo_coin.client import GmoCoinAdapter
+        return GmoCoinAdapter(api_key=api_key, api_secret=api_secret, base_url=base_url)
     else:
         from adapters.bitflyer.client import BitFlyerAdapter
         return BitFlyerAdapter(api_key=api_key, api_secret=api_secret, base_url=base_url)
@@ -240,15 +253,36 @@ async def lifespan(app: FastAPI):
         pair_column=pair_column,
         switch_recommender=switch_recommender,
     )
-    trend_manager = TrendFollowingManager(
-        adapter=adapter,
-        supervisor=supervisor,
-        session_factory=session_factory,
-        candle_model=models.candle,
-        trend_position_model=models.trend_position,
-        pair_column=pair_column,
-        snapshot_collector=snapshot_collector,
-    )
+    if exchange == "gmo_coin":
+        trend_manager = GmoCoinTrendManager(
+            adapter=adapter,
+            supervisor=supervisor,
+            session_factory=session_factory,
+            candle_model=models.candle,
+            cfd_position_model=models.cfd_position,
+            pair_column=pair_column,
+            snapshot_collector=snapshot_collector,
+        )
+    elif exchange == "gmofx":
+        trend_manager = CfdTrendFollowingManager(
+            adapter=adapter,
+            supervisor=supervisor,
+            session_factory=session_factory,
+            candle_model=models.candle,
+            cfd_position_model=models.cfd_position,
+            pair_column=pair_column,
+            snapshot_collector=snapshot_collector,
+        )
+    else:
+        trend_manager = TrendFollowingManager(
+            adapter=adapter,
+            supervisor=supervisor,
+            session_factory=session_factory,
+            candle_model=models.candle,
+            trend_position_model=models.trend_position,
+            pair_column=pair_column,
+            snapshot_collector=snapshot_collector,
+        )
     box_manager = BoxMeanReversionManager(
         adapter=adapter,
         supervisor=supervisor,

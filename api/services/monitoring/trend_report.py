@@ -19,6 +19,8 @@ from .display import (
     get_market_summary,
     get_position_summary,
     get_entry_blockers,
+    get_entry_blockers_short,
+    get_wait_direction,
 )
 from .alerts import (
     _prev_raw_cache,
@@ -33,35 +35,80 @@ logger = logging.getLogger(__name__)
 
 def build_telegram_text(prefix: str, time_str: str, pair: str, data: dict) -> str:
     icon = data["trend_icon"]
-    lines = [f"[{prefix}] {time_str} | {pair} {icon}추세추종"]
+    currency = pair.split("_")[0].upper()
+    lines = []
 
     if data["position"]:
         p = data["position"]
-        lines.append(f"¥{data['current_price']:,.0f} → {data['position_summary']}")
-        lines.append(f"{data['ema_state']} {data['rsi_state']} {data['volatility_state']}")
-        lines.append(f"손절 ¥{p['stop_loss_price']:,.0f} (거리 ¥{p['trailing_stop_distance']:,.0f})")
-        currency = pair.split("_")[0].upper()
-        lines.append(
-            f"보유 {p['entry_amount']}{currency} @ ¥{p['entry_price']:,.0f}"
-            f" | 미실현 ¥{p['unrealized_pnl_jpy']:,.0f} ({p['unrealized_pnl_pct']:.2f}%)"
-        )
+        pnl_jpy = p["unrealized_pnl_jpy"]
+        pnl_pct = p["unrealized_pnl_pct"]
+        pnl_sign = "+" if pnl_jpy >= 0 else ""
+        current_price = data["current_price"]
+
+        p_side = p.get("side", "buy")
+        side_label = "롱" if p_side == "buy" else "숏"
+        lines.append(f"[{prefix}] {time_str} | {pair} {icon}추세추종 — {side_label} 보유")
+        lines.append(f"📍 ¥{current_price:,.0f}")
+        lines.append(f"💰 미실현 {pnl_sign}¥{pnl_jpy:,.0f} ({pnl_sign}{pnl_pct:.2f}%)")
+        lines.append(f" · 진입 {p['entry_amount']}{currency} @ ¥{p['entry_price']:,.0f}")
+        stop = p.get("stop_loss_price", 0)
+        distance = p.get("trailing_stop_distance", 0)
+        stop_pct = (stop - current_price) / current_price * 100 if stop and current_price > 0 else 0.0
+        lines.append(f" · 손절 ¥{stop:,.0f} (현재가 {stop_pct:.2f}%, 거리 ¥{distance:,.0f})")
+
+        situation = data.get("position_summary") or "보유 유지"
+        lines.append(f"📊 지금: {situation}")
+
+        exit_sig = data.get("exit_signal")
+        if exit_sig:
+            action = exit_sig.get("action", "hold")
+            if action == "full_exit":
+                outlook = "즉시 청산 실행 중"
+            elif action == "tighten_stop":
+                outlook = "추세 약화 — 스탑 조임 중. 추가 하락 시 자동 청산"
+            elif pnl_pct > 5.0:
+                outlook = "큰 수익 구간 — 트레일링 스탑이 수익 보호 중"
+            elif pnl_pct < -1.0:
+                outlook = "손절선 접근 중 — 반등 없으면 자동 청산"
+            else:
+                outlook = "추세 이어지면 트레일링 스탑 자동 상향"
+            lines.append(f"⚡ 전망: {outlook}")
+
+        lines.append(f"💰 ¥{data['jpy_available']:,.0f}")
     else:
-        lines.append(f"¥{data['current_price']:,.0f} → {data['market_summary']}")
-        lines.append(f"{data['ema_state']} {data['rsi_state']} {data['volatility_state']}")
+        wait_dir = data.get("wait_direction")  # None = 현물 (롱 전용)
+        if wait_dir == "short":
+            lines.append(f"[{prefix}] {time_str} | {pair} {icon}추세추종 — 숏 대기중")
+            lines.append(f"📍 ¥{data['current_price']:,.0f}")
+            lines.append("💡 진입 조건: 가격이 EMA 아래에서 우하향할 때 매도")
+        elif wait_dir == "neutral":
+            lines.append(f"[{prefix}] {time_str} | {pair} {icon}추세추종 — 관망중")
+            lines.append(f"📍 ¥{data['current_price']:,.0f}")
+            lines.append("💡 롱: EMA 위 우상향 매수 / 숏: EMA 아래 우하향 매도")
+        elif wait_dir == "long":
+            lines.append(f"[{prefix}] {time_str} | {pair} {icon}추세추종 — 롱 대기중")
+            lines.append(f"📍 ¥{data['current_price']:,.0f}")
+            lines.append("💡 진입 조건: 가격이 EMA 위에서 우상향할 때 매수")
+        else:
+            # wait_dir is None (현물 / spot) — 기존 동작 유지
+            lines.append(f"[{prefix}] {time_str} | {pair} {icon}추세추종 — 대기중")
+            lines.append(f"📍 ¥{data['current_price']:,.0f}")
+            lines.append("💡 진입 조건: 가격이 EMA 위에서 우상향할 때 매수")
+
+        situation = data.get("market_summary") or "관망"
+        lines.append(f"📊 지금: {situation}")
+
         met = data.get("conditions_met", 0)
         total = data.get("conditions_total", 5)
-        if data["entry_blockers"]:
-            short_parts = []
-            for b in data["entry_blockers"]:
-                if "→" in b:
-                    parts = b.split("→", 1)
-                    short_parts.append(f"{parts[0].strip()}→{parts[1].strip()}")
-                else:
-                    short_parts.append(b)
-            lines.append(f"🚫 {met}/{total} | {' | '.join(short_parts)}")
+        blockers = data.get("entry_blockers", [])
+        if blockers:
+            lines.append(f"🚫 {met}/{total} 진입까지:")
+            for b in blockers:
+                lines.append(f" · {b}")
         else:
             lines.append(f"✅ {met}/{total} 진입 조건 충족")
-        lines.append(f"JPY ¥{data['jpy_available']:,.0f} | 대기중")
+
+        lines.append(f"💰 ¥{data['jpy_available']:,.0f}")
 
     return "\n".join(lines)
 
@@ -232,7 +279,20 @@ async def generate_trend_report(
     conditions_total = 5
     conditions_met = conditions_total - len(entry_blockers) if not position_data else conditions_total
     market_summary = get_market_summary(ema_slope_pct, rsi, signal) if not position_data else None
-
+    # wait_direction: _supports_short=True 매니저(GMO Coin 등)는 CFD 분기 적용
+    supports_short = getattr(trend_manager, "_supports_short", False)
+    if supports_short and not position_data:
+        wait_direction = get_wait_direction(True, signal, current_price, ema, ema_slope_pct)
+        if wait_direction == "short":
+            entry_blockers = get_entry_blockers_short(
+                signal, current_price, ema, ema_slope_pct, rsi,
+                rsi_min=float(params.get("entry_rsi_min_short", 35.0)),
+                rsi_max=float(params.get("entry_rsi_max_short", 60.0)),
+                slope_threshold=float(params.get("ema_slope_short_threshold", -0.05)),
+            )
+            conditions_met = max(0, conditions_total - len(entry_blockers))
+    else:
+        wait_direction = None  # spot (BF 등) — 기존 동작 유지
     # 7. 텍스트 조립용 데이터
     report_data = {
         "current_price": current_price,
@@ -244,7 +304,9 @@ async def generate_trend_report(
         "market_summary": market_summary,
         "position_summary": position_summary,
         "position": position_data,
+        "exit_signal": exit_signal if position_data else None,
         "entry_blockers": entry_blockers,
+        "wait_direction": wait_direction,
         "conditions_met": conditions_met,
         "conditions_total": conditions_total,
         "jpy_available": jpy_available,

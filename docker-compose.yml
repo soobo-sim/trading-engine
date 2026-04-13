@@ -82,6 +82,45 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # GMO Coin 레버리지 트레이더 (trading-engine, EXCHANGE=gmo_coin)
+  gmo-coin-trader:
+    build:
+      context: ..
+      dockerfile: trading-engine/Dockerfile
+      target: production
+    container_name: gmo-coin-trader
+    ports:
+      - "127.0.0.1:8004:8004"
+    environment:
+      - EXCHANGE=gmo_coin
+      - PORT=8004
+      - LOG_LEVEL=info
+      - TZ=Asia/Tokyo
+      - DATABASE_URL=postgresql+asyncpg://trader:trader_password_123@trader-postgres:5432/trader_db
+    env_file:
+      - .env
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8004", "--log-level", "info"]
+    volumes:
+      - ./logs/gmo_coin:/app/logs
+      - ./core:/app/core
+      - ./adapters:/app/adapters
+      - ./api:/app/api
+      - ./main.py:/app/main.py
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8004/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - trader-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 networks:
   trader-network:
     external: true

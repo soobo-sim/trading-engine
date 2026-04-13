@@ -257,7 +257,7 @@ class TestOpenPosition:
             "max_slippage_pct": 1.0,
         }
         manager._params["xrp_jpy"] = params
-        await manager._open_position("xrp_jpy", 100.0, 5.0, params)
+        await manager._open_position("xrp_jpy", "buy", 100.0, 5.0, params)
 
         pos = manager._position.get("xrp_jpy")
         assert pos is not None
@@ -280,7 +280,7 @@ class TestOpenPosition:
         fake_adapter.set_balance("jpy", 100.0)
         params = {"position_size_pct": 10.0, "min_order_jpy": 500}
         manager._params["xrp_jpy"] = params
-        await manager._open_position("xrp_jpy", 100.0, 5.0, params)
+        await manager._open_position("xrp_jpy", "buy", 100.0, 5.0, params)
         assert manager._position.get("xrp_jpy") is None
 
     @pytest.mark.asyncio
@@ -294,7 +294,7 @@ class TestOpenPosition:
             "max_slippage_pct": 0.3,
         }
         manager._params["xrp_jpy"] = params
-        await manager._open_position("xrp_jpy", 90.0, 5.0, params)
+        await manager._open_position("xrp_jpy", "buy", 90.0, 5.0, params)
         assert manager._position.get("xrp_jpy") is None
 
 
@@ -319,7 +319,7 @@ class TestClosePosition:
             "trading_fee_rate": 0.002,
         }
         manager._params["xrp_jpy"] = params
-        await manager._open_position("xrp_jpy", 100.0, 5.0, params)
+        await manager._open_position("xrp_jpy", "buy", 100.0, 5.0, params)
         assert manager._position.get("xrp_jpy") is not None
 
         await manager._close_position("xrp_jpy", "exit_warning")

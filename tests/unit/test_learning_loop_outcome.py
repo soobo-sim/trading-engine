@@ -70,6 +70,7 @@ def _make_minimal_manager(session_factory=None):
     class _TestMgr(BaseTrendManager):
         _task_prefix = "test"
         _log_prefix = "[TestMgr]"
+        _supports_short = True  # 학습 루프 테스트: 숏 차단 없이 판단 연결 검증
 
         async def _detect_existing_position(self, pair):
             return None
@@ -77,7 +78,7 @@ def _make_minimal_manager(session_factory=None):
         async def _sync_position_state(self, pair):
             pass
 
-        async def _open_position(self, pair, price, atr, params, *, signal_data=None):
+        async def _open_position(self, pair, side, price, atr, params, *, signal_data=None):
             pass
 
         async def _close_position_impl(self, pair, reason):
@@ -299,7 +300,7 @@ async def test_entry_long_saves_judgment_id_in_position(db_and_factory):
     mgr._latest_price[pair] = 150.50
 
     # _open_position 호출 시 Position을 생성해 _position에 저장하는 모킹
-    async def _mock_open_position(p, price, atr, params, *, signal_data=None):
+    async def _mock_open_position(p, side, price, atr, params, *, signal_data=None):
         mgr._position[p] = Position(
             pair=p, entry_price=price, entry_amount=1000.0
         )
@@ -333,7 +334,7 @@ async def test_entry_long_no_judgment_id_skips_extra(db_and_factory):
     mgr._params[pair] = {}
     mgr._latest_price[pair] = 150.50
 
-    async def _mock_open_position(p, price, atr, params, *, signal_data=None):
+    async def _mock_open_position(p, side, price, atr, params, *, signal_data=None):
         mgr._position[p] = Position(pair=p, entry_price=price, entry_amount=1000.0)
 
     mgr._open_position = _mock_open_position  # type: ignore[assignment]
@@ -615,7 +616,7 @@ class TestNarrativeLogging:
         mgr._params[pair] = {}
         mgr._latest_price[pair] = 150.50
 
-        async def _mock_open(p, price, atr, params, *, signal_data=None):
+        async def _mock_open(p, side, price, atr, params, *, signal_data=None):
             mgr._position[p] = Position(pair=p, entry_price=price, entry_amount=1000.0)
 
         mgr._open_position = _mock_open  # type: ignore[assignment]
@@ -647,7 +648,7 @@ class TestNarrativeLogging:
         mgr._params[pair] = {}
         mgr._latest_price[pair] = 150.50
 
-        async def _mock_open(p, price, atr, params, *, signal_data=None):
+        async def _mock_open(p, side, price, atr, params, *, signal_data=None):
             mgr._position[p] = Position(pair=p, entry_price=price, entry_amount=1000.0)
 
         mgr._open_position = _mock_open  # type: ignore[assignment]
@@ -855,7 +856,7 @@ class TestNarrativeLogging:
         mgr._params[pair] = {}
         mgr._latest_price[pair] = 150.50
 
-        async def _mock_open(p, price, atr, params, *, signal_data=None):
+        async def _mock_open(p, side, price, atr, params, *, signal_data=None):
             mgr._position[p] = Position(pair=p, entry_price=price, entry_amount=1000.0)
 
         mgr._open_position = _mock_open  # type: ignore[assignment]

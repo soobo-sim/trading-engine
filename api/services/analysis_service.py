@@ -280,6 +280,7 @@ async def get_trade_stats(
 
     TradeModel = state.models.trade
     TrendPosModel = state.models.trend_position
+    BoxPosModel = state.models.box_position
     StrategyModel = state.models.strategy
     # Trade 모델의 pair 속성은 항상 `pair` (DB 컬럼명은 거래소별로 다르지만 ORM 속성은 통일). BUG-027
     pair_col = TradeModel.pair
@@ -303,6 +304,21 @@ async def get_trade_stats(
         .order_by(TrendPosModel.closed_at.asc())
     )
     trend_positions = trend_result.scalars().all()
+
+    # box_positions 조회 (BUG-028): pair 컬럼명은 거래소별로 다름 (BF: product_code)
+    box_pair_col = getattr(BoxPosModel, state.pair_column)
+    box_result = await db.execute(
+        select(BoxPosModel)
+        .where(
+            and_(
+                box_pair_col == pair,
+                BoxPosModel.status == "closed",
+                BoxPosModel.closed_at >= since,
+            )
+        )
+        .order_by(BoxPosModel.closed_at.asc())
+    )
+    box_positions = box_result.scalars().all()
 
     sell_trades = [t for t in trades if t.order_type in ("sell", "market_sell")]
     buy_trades = [t for t in trades if t.order_type in ("buy", "market_buy")]
@@ -338,6 +354,23 @@ async def get_trade_stats(
             pnl_list.append(pnl)
             total_pnl += pnl
             total += 1
+            if pnl > 0:
+                wins += 1
+                current_consecutive_losses = 0
+            else:
+                losses += 1
+                current_consecutive_losses += 1
+                max_consecutive_losses = max(max_consecutive_losses, current_consecutive_losses)
+            if pos.realized_pnl_pct is not None:
+                total_pnl_pct += float(pos.realized_pnl_pct)
+
+    # box_positions 병합 (BUG-028)
+    for pos in box_positions:
+        pnl = float(pos.realized_pnl_jpy) if pos.realized_pnl_jpy is not None else None
+        total += 1
+        if pnl is not None:
+            pnl_list.append(pnl)
+            total_pnl += pnl
             if pnl > 0:
                 wins += 1
                 current_consecutive_losses = 0
@@ -390,6 +423,19 @@ async def get_trade_stats(
                 by_strategy[sname]["wins"] += 1
             else:
                 by_strategy[sname]["losses"] += 1
+    # box_positions 전략별 집계: strategy_id 없으므로 "box_mean_reversion" 고정 (BUG-028)
+    for pos in box_positions:
+        sname = "box_mean_reversion"
+        if sname not in by_strategy:
+            by_strategy[sname] = {"wins": 0, "losses": 0, "pnl_jpy": 0.0, "trades": 0}
+        by_strategy[sname]["trades"] += 1
+        pnl = float(pos.realized_pnl_jpy) if pos.realized_pnl_jpy is not None else None
+        if pnl is not None:
+            by_strategy[sname]["pnl_jpy"] += pnl
+            if pnl > 0:
+                by_strategy[sname]["wins"] += 1
+            else:
+                by_strategy[sname]["losses"] += 1
 
     for s_data in by_strategy.values():
         sv = s_data["wins"] + s_data["losses"]
@@ -403,7 +449,7 @@ async def get_trade_stats(
         "success": True,
         "pair": pair,
         "days": days,
-        "total_trades": len(trades) + len(trend_positions),
+        "total_trades": len(trades) + len(trend_positions) + len(box_positions),
         "buy_trades": len(buy_trades),
         "sell_trades": total,
         "valid_sell_trades": valid_count,

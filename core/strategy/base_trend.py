@@ -59,6 +59,7 @@ class BaseTrendManager(ABC):
     # 서브클래스에서 설정
     _task_prefix: str = "trend"      # "trend" or "cfd"
     _log_prefix: str = "[TrendMgr]"  # "[TrendMgr]" or "[CfdMgr]"
+    _supports_short: bool = False     # 숏 진입 지원 여부. CfdTrendFollowingManager만 True
 
     def __init__(
         self,
@@ -217,7 +218,7 @@ class BaseTrendManager(ABC):
 
         # 인메모리 포지션 생성 (스탑로스 모니터 유지 + 트레일링 스탑 동작)
         atr_mult = float(params.get("atr_multiplier_stop", 2.0))
-        if direction == "sell":
+        if direction in ("sell", "short"):
             initial_sl = round(current_price + atr * atr_mult, 6) if atr else None
         else:
             initial_sl = round(current_price - atr * atr_mult, 6) if atr else None
@@ -511,9 +512,14 @@ class BaseTrendManager(ABC):
                 self._last_signal[pair] = signal
             _sig_level = signal == "hold" or not signal_changed
             _sig_log = logger.debug if _sig_level else logger.info
+            if pos:
+                _side = {"buy": "롱", "sell": "숏"}.get(pos.extra.get("side", "buy"), pos.extra.get("side", "buy"))
+                _pos_label = f" {_side} 보유중"
+            else:
+                _pos_label = ""
             _sig_log(
-                f"{self._log_prefix} {pair}: signal={signal} exit={exit_action} "
-                f"price={current_price} pos={'있음' if pos else '없음'}"
+                f"{self._log_prefix} {pair}: {self._describe_signal(signal, pos)} "
+                f"(¥{current_price:,.0f}{_pos_label})"
             )
 
             # ── Pending Limit Order 체결 확인 ──
@@ -618,6 +624,24 @@ class BaseTrendManager(ABC):
         """시그널 계산 후 후처리 hook. 기본: pass-through."""
         return signal
 
+    def _describe_signal(self, signal: str, pos: Optional[Position]) -> str:
+        """시그널을 운영자가 이해할 수 있는 서술로 변환."""
+        has_pos = pos is not None
+        if signal == "exit_warning":
+            return "추세 이탈, 청산 경고" if has_pos else "추세 약세, 진입 보류"
+        if signal in ("entry_ok", "entry_buy"):
+            return "추세 유지 중" if has_pos else "롱 진입 조건 충족"
+        _descriptions = {
+            "entry_sell":    "숏 진입 조건 충족",
+            "entry_short":   "숏 진입 조건 충족",
+            "entry_preview": "프리뷰 진입 검토",
+            "wait_dip":      "RSI 과매수, 눌림 대기",
+            "wait_regime":   "박스권, 추세 전환 대기",
+            "no_signal":     "시그널 없음",
+            "hold":          "대기",
+        }
+        return _descriptions.get(signal, signal)
+
     def _check_exit_warning(
         self, pair: str, signal: str, realtime_price: float, ema: float, pos: Position
     ) -> str:
@@ -625,7 +649,7 @@ class BaseTrendManager(ABC):
         if realtime_price < ema and signal != "exit_warning":
             logger.info(
                 f"{self._log_prefix} {pair}: 실시간 가격 ¥{realtime_price} < EMA20 ¥{ema:.4f} "
-                f"→ exit_warning 즉각 보정"
+                f"→ 추세 이탈 감지 (즉각 보정)"
             )
             return "exit_warning"
         return signal
@@ -790,6 +814,12 @@ class BaseTrendManager(ABC):
             return False
 
         if action == "entry_short":
+            if not self._supports_short:
+                logger.warning(
+                    f"{self._log_prefix} {pair}: entry_short 차단 — "
+                    f"롱 전용 매니저. 숏이 필요하면 cfd_trend_following 사용"
+                )
+                return False
             is_preview = getattr(snapshot, "is_preview", False)
             entry_signal = "entry_preview" if is_preview else "entry_sell"
             await self._on_entry_signal(
@@ -897,6 +927,12 @@ class BaseTrendManager(ABC):
             return
 
         direction = "long" if is_long_entry else "short"
+        side = "sell" if direction == "short" else "buy"
+
+        # ── 서브클래스 훅: keep_rate, FX 주말/시장 체크 등 ──────────────────
+        if not await self._pre_entry_checks(pair, side, params):
+            return
+
         logger.info(
             f"{self._log_prefix} {pair}: {signal} @ ¥{current_price} → 진입 시도 (dir={direction})"
         )
@@ -929,7 +965,7 @@ class BaseTrendManager(ABC):
             logger.info(f"{self._log_prefix} {pair}: limit 실패 — market fallback")
 
         # market order (default 또는 limit_then_market fallback)
-        await self._open_position(pair, current_price, atr, params, signal_data=signal_data)
+        await self._open_position(pair, side, current_price, atr, params, signal_data=signal_data)
 
     def _is_stop_triggered(self, pos: Position, price: float, stop_loss_price: float) -> bool:
         """스탑로스 발동 여부. 기본: 롱(price <= stop)."""
@@ -1091,9 +1127,26 @@ class BaseTrendManager(ABC):
         """실잔고/실포지션과 인메모리 비교 → 갱신."""
         ...
 
+    async def _pre_entry_checks(self, pair: str, side: str, params: Dict) -> bool:
+        """진입 전 추가 검사. 서브클래스에서 오버라이드.
+
+        Returns:
+            True = 진입 허용, False = 차단
+        """
+        return True
+
     @abstractmethod
-    async def _open_position(self, pair: str, price: float, atr: Optional[float], params: Dict, *, signal_data: dict | None = None) -> None:
-        """진입 주문 실행."""
+    async def _open_position(self, pair: str, side: str, price: float, atr: Optional[float], params: Dict, *, signal_data: dict | None = None) -> None:
+        """진입 주문 실행.
+
+        Args:
+            pair: 통화 페어
+            side: "buy" 또는 "sell"
+            price: 현재가
+            atr: ATR 값
+            params: 전략 파라미터
+            signal_data: 시그널 스냅샷
+        """
         ...
 
     async def _close_position(self, pair: str, reason: str) -> None:

@@ -19,6 +19,8 @@ from .display import (
     get_market_summary,
     get_position_summary,
     get_entry_blockers,
+    get_entry_blockers_short,
+    get_wait_direction,
 )
 from .alerts import (
     _prev_raw_cache,
@@ -130,10 +132,23 @@ async def generate_cfd_report(
         }
         position_summary = get_position_summary(exit_signal, rsi, unrealized_pnl_pct)
 
-    entry_blockers = get_entry_blockers(
-        signal, current_price, ema, ema_slope_pct, rsi,
-        slope_min=float(params.get("ema_slope_entry_min", 0.0)),
-    ) if not position_data else []
+    # 대기 방향 결정 (CFD = supports_short)
+    wait_direction = get_wait_direction(True, signal, current_price, ema, ema_slope_pct) if not position_data else None
+
+    if wait_direction == "short" and not position_data:
+        entry_blockers = get_entry_blockers_short(
+            signal, current_price, ema, ema_slope_pct, rsi,
+            rsi_min=float(params.get("entry_rsi_min_short", 35.0)),
+            rsi_max=float(params.get("entry_rsi_max_short", 60.0)),
+            slope_threshold=float(params.get("ema_slope_short_threshold", -0.05)),
+        )
+    elif not position_data:
+        entry_blockers = get_entry_blockers(
+            signal, current_price, ema, ema_slope_pct, rsi,
+            slope_min=float(params.get("ema_slope_entry_min", 0.0)),
+        )
+    else:
+        entry_blockers = []
 
     # keep_rate 블로커 추가
     keep_rate_warn = params.get("keep_rate_warn", 250)
@@ -141,6 +156,8 @@ async def generate_cfd_report(
         entry_blockers.append(f"keep_rate {collateral_data['keep_rate']:.0f}% < {keep_rate_warn}%")
 
     entry_conditions_met = len(entry_blockers) == 0 and not position_data
+    conditions_total = 5
+    conditions_met = max(0, conditions_total - len(entry_blockers)) if not position_data else conditions_total
     market_summary = get_market_summary(ema_slope_pct, rsi, signal) if not position_data else None
 
     # 6. 아이콘/상태 조립
@@ -161,6 +178,10 @@ async def generate_cfd_report(
         "position_summary": position_summary,
         "position": position_data,
         "entry_blockers": entry_blockers,
+        "wait_direction": wait_direction,
+        "conditions_met": conditions_met,
+        "conditions_total": conditions_total,
+        "exit_signal": exit_signal if position_data else None,
         "jpy_available": collateral_data["collateral"] if collateral_data else 0,
         "coin_available": position_data["entry_amount"] if position_data else 0,
         "ema20": ema,

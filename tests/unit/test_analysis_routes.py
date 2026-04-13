@@ -241,18 +241,18 @@ class TestTradeStats:
 
     @pytest.mark.asyncio
     async def test_combined_stats(self, setup):
-        """포지션 시드 후 trade-stats에서 trend_positions 포함 검증 (BUG-027)."""
+        """포지션 시드 후 trade-stats에서 trend_positions + box_positions 포함 검증 (BUG-027/028)."""
         client, factory = setup
         await _seed_positions(factory)
 
-        # trade-stats는 Trade 테이블 + trend_positions 모두 집계 (BUG-027 수정)
+        # trade-stats는 Trade 테이블 + trend_positions + box_positions 모두 집계 (BUG-028 수정)
         resp = await client.get("/api/analysis/trade-stats?pair=xrp_jpy&days=365")
         assert resp.status_code == 200
         data = resp.json()
-        # trend_positions 2건 시드됨 (승2, 패0)
-        assert data["total_trades"] == 2
-        assert data["wins"] == 2
-        assert data["losses"] == 0
+        # trend 2건(승2) + box 2건(승1,패1) = 4건
+        assert data["total_trades"] == 4
+        assert data["wins"] == 3
+        assert data["losses"] == 1
 
         # 포지션 통합 검증은 box-history 엔드포인트
         resp = await client.get("/api/analysis/box-history?pair=xrp_jpy&days=30")
@@ -283,6 +283,209 @@ class TestTradeStats:
         reasons = resp.json()["summary"]["exit_reason_distribution"]
         assert "trend:trailing_stop" in reasons
         assert "trend:ema_breakdown" in reasons
+
+    # ── BUG-028 검증 케이스 ──────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_trade_stats_includes_box_pnl(self, setup):
+        """trade-stats total_pnl_jpy에 box_positions pnl 합산 (BUG-028)."""
+        client, factory = setup
+        await _seed_positions(factory)
+
+        resp = await client.get("/api/analysis/trade-stats?pair=xrp_jpy&days=365")
+        assert resp.status_code == 200
+        data = resp.json()
+        # box: 1800 + (-300) = 1500, trend: 5000 + 2250 = 7250 → total = 8750
+        assert data["total_pnl_jpy"] == 8750.0
+        # by_strategy에 box_mean_reversion 포함
+        assert "box_mean_reversion" in data["by_strategy"]
+        box_s = data["by_strategy"]["box_mean_reversion"]
+        assert box_s["wins"] == 1
+        assert box_s["losses"] == 1
+        assert box_s["pnl_jpy"] == 1500.0
+        assert box_s["trades"] == 2
+
+    @pytest.mark.asyncio
+    async def test_trade_stats_box_only(self, setup):
+        """trade-stats: trend 없이 box_positions만 있어도 집계 (BUG-028)."""
+        client, factory = setup
+        now = datetime.now(timezone.utc)
+        async with factory() as db:
+            box = AnlBox(
+                pair="xrp_jpy",
+                upper_bound=Decimal("110"),
+                lower_bound=Decimal("90"),
+                upper_touch_count=3,
+                lower_touch_count=3,
+                tolerance_pct=Decimal("2.0"),
+                status="active",
+                created_at=now - timedelta(days=5),
+            )
+            db.add(box)
+            await db.flush()
+            bp = AnlBoxPosition(
+                pair="xrp_jpy",
+                box_id=box.id,
+                side="buy",
+                entry_order_id="only-entry",
+                entry_price=Decimal("91"),
+                entry_amount=Decimal("100"),
+                exit_order_id="only-exit",
+                exit_price=Decimal("109"),
+                exit_amount=Decimal("100"),
+                exit_jpy=Decimal("10900"),
+                exit_reason="near_upper_exit",
+                realized_pnl_jpy=Decimal("500"),
+                realized_pnl_pct=Decimal("5.0"),
+                status="closed",
+                created_at=now - timedelta(days=4),
+                closed_at=now - timedelta(days=3),
+            )
+            db.add(bp)
+            await db.commit()
+
+        resp = await client.get("/api/analysis/trade-stats?pair=xrp_jpy&days=365")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total_trades"] == 1
+        assert data["wins"] == 1
+        assert data["losses"] == 0
+        assert data["win_rate"] == 100.0
+        assert data["total_pnl_jpy"] == 500.0
+
+    @pytest.mark.asyncio
+    async def test_trade_stats_box_null_pnl(self, setup):
+        """trade-stats: box_position realized_pnl_jpy=NULL 시 카운트 포함 승/패 제외 (BUG-028)."""
+        client, factory = setup
+        now = datetime.now(timezone.utc)
+        async with factory() as db:
+            box = AnlBox(
+                pair="xrp_jpy",
+                upper_bound=Decimal("110"),
+                lower_bound=Decimal("90"),
+                upper_touch_count=3,
+                lower_touch_count=3,
+                tolerance_pct=Decimal("2.0"),
+                status="active",
+                created_at=now - timedelta(days=5),
+            )
+            db.add(box)
+            await db.flush()
+            bp = AnlBoxPosition(
+                pair="xrp_jpy",
+                box_id=box.id,
+                side="buy",
+                entry_order_id="null-pnl-entry",
+                entry_price=Decimal("91"),
+                entry_amount=Decimal("100"),
+                realized_pnl_jpy=None,
+                status="closed",
+                created_at=now - timedelta(days=4),
+                closed_at=now - timedelta(days=3),
+            )
+            db.add(bp)
+            await db.commit()
+
+        resp = await client.get("/api/analysis/trade-stats?pair=xrp_jpy&days=365")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total_trades"] == 1   # 카운트는 포함
+        assert data["wins"] == 0
+        assert data["losses"] == 0
+        assert data["win_rate"] is None    # valid_count == 0
+
+    @pytest.mark.asyncio
+    async def test_trade_stats_box_period_filter(self, setup):
+        """trade-stats: closed_at < since인 box_position은 집계 제외 (기간 필터 검증, BUG-028)."""
+        client, factory = setup
+        now = datetime.now(timezone.utc)
+        async with factory() as db:
+            box = AnlBox(
+                pair="xrp_jpy",
+                upper_bound=Decimal("110"),
+                lower_bound=Decimal("90"),
+                upper_touch_count=3,
+                lower_touch_count=3,
+                tolerance_pct=Decimal("2.0"),
+                status="active",
+                created_at=now - timedelta(days=40),
+            )
+            db.add(box)
+            await db.flush()
+            # 30일 이전에 종료된 포지션 → days=7 쿼리에서 제외되어야 함
+            bp_old = AnlBoxPosition(
+                pair="xrp_jpy",
+                box_id=box.id,
+                side="buy",
+                entry_order_id="old-entry",
+                entry_price=Decimal("91"),
+                entry_amount=Decimal("100"),
+                realized_pnl_jpy=Decimal("999"),
+                status="closed",
+                created_at=now - timedelta(days=35),
+                closed_at=now - timedelta(days=30),  # 30일 전
+            )
+            # 1일 전에 종료된 포지션 → 포함되어야 함
+            bp_recent = AnlBoxPosition(
+                pair="xrp_jpy",
+                box_id=box.id,
+                side="buy",
+                entry_order_id="recent-entry",
+                entry_price=Decimal("91"),
+                entry_amount=Decimal("100"),
+                realized_pnl_jpy=Decimal("200"),
+                status="closed",
+                created_at=now - timedelta(days=2),
+                closed_at=now - timedelta(days=1),  # 1일 전
+            )
+            db.add_all([bp_old, bp_recent])
+            await db.commit()
+
+        resp = await client.get("/api/analysis/trade-stats?pair=xrp_jpy&days=7")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total_trades"] == 1        # recent만 포함
+        assert data["total_pnl_jpy"] == 200.0   # old의 999는 제외
+
+    @pytest.mark.asyncio
+    async def test_trade_stats_box_pair_filter(self, setup):
+        """trade-stats: 다른 pair의 box_position은 집계 제외 (pair 필터 검증, BUG-028)."""
+        client, factory = setup
+        now = datetime.now(timezone.utc)
+        async with factory() as db:
+            box = AnlBox(
+                pair="btc_jpy",
+                upper_bound=Decimal("5000000"),
+                lower_bound=Decimal("4500000"),
+                upper_touch_count=2,
+                lower_touch_count=2,
+                tolerance_pct=Decimal("1.0"),
+                status="active",
+                created_at=now - timedelta(days=5),
+            )
+            db.add(box)
+            await db.flush()
+            # btc_jpy pair 포지션 → xrp_jpy 쿼리에서 제외되어야 함
+            bp_other = AnlBoxPosition(
+                pair="btc_jpy",
+                box_id=box.id,
+                side="buy",
+                entry_order_id="btc-entry",
+                entry_price=Decimal("4600000"),
+                entry_amount=Decimal("0.01"),
+                realized_pnl_jpy=Decimal("50000"),
+                status="closed",
+                created_at=now - timedelta(days=4),
+                closed_at=now - timedelta(days=3),
+            )
+            db.add(bp_other)
+            await db.commit()
+
+        resp = await client.get("/api/analysis/trade-stats?pair=xrp_jpy&days=365")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total_trades"] == 0
+        assert data["total_pnl_jpy"] == 0.0
 
 
 class TestBoxHistory:

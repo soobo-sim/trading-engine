@@ -163,3 +163,109 @@ def test_strategy_snapshot_has_position_default_false() -> None:
     GmoSnapshot = create_strategy_snapshot_model("gmo")
     col = GmoSnapshot.__table__.columns["has_position"]
     assert str(col.server_default.arg) == "false"
+
+
+def test_strategy_snapshot_gmoc_tablename() -> None:
+    """GMO Coin prefix: __tablename__ == 'gmoc_strategy_snapshots'."""
+    GmocSnapshot = create_strategy_snapshot_model("gmoc")
+    assert GmocSnapshot.__tablename__ == "gmoc_strategy_snapshots"
+
+
+def test_strategy_snapshot_gmoc_classname() -> None:
+    """GMO Coin prefix: 클래스명 == 'GmocStrategySnapshot' (GmoStrategySnapshot 아님)."""
+    GmocSnapshot = create_strategy_snapshot_model("gmoc")
+    assert GmocSnapshot.__name__ == "GmocStrategySnapshot"
+
+
+def test_strategy_snapshot_gmoc_fk_targets_gmoc_strategies() -> None:
+    """gmoc_strategy_snapshots의 strategy_id FK가 gmoc_strategies.id를 참조해야 한다 (gmo_strategies 아님)."""
+    GmocSnapshot = create_strategy_snapshot_model("gmoc")
+    fk = list(GmocSnapshot.__table__.columns["strategy_id"].foreign_keys)[0]
+    assert fk.target_fullname == "gmoc_strategies.id"
+
+
+def test_switch_recommendation_gmoc_tablename() -> None:
+    """GMO Coin prefix: __tablename__ == 'gmoc_switch_recommendations'."""
+    from adapters.database.models import create_switch_recommendation_model
+    GmocSwitch = create_switch_recommendation_model("gmoc")
+    assert GmocSwitch.__tablename__ == "gmoc_switch_recommendations"
+
+
+def test_switch_recommendation_gmoc_required_columns() -> None:
+    """gmoc_switch_recommendations 필수 컬럼 존재 확인."""
+    from adapters.database.models import create_switch_recommendation_model
+    GmocSwitch = create_switch_recommendation_model("gmoc")
+    cols = GmocSwitch.__table__.columns
+    for col_name in ("trigger_type", "triggered_at", "current_strategy_id",
+                     "recommended_strategy_id", "decision", "created_at"):
+        assert col_name in cols, f"컬럼 누락: {col_name}"
+
+
+def test_switch_recommendation_gmoc_fk_targets_gmoc_strategies() -> None:
+    """gmoc_switch_recommendations의 FK가 gmoc_strategies.id를 참조해야 한다."""
+    from adapters.database.models import create_switch_recommendation_model
+    GmocSwitch = create_switch_recommendation_model("gmoc")
+    fk = list(GmocSwitch.__table__.columns["current_strategy_id"].foreign_keys)[0]
+    assert fk.target_fullname == "gmoc_strategies.id"
+
+
+# ──────────────────────────────────────────────────────────────
+# BUG-032: create_box_position_model — 9개 확장 컬럼 존재 확인
+# ──────────────────────────────────────────────────────────────
+
+def test_box_position_gmoc_tablename() -> None:
+    """gmoc prefix: __tablename__ == 'gmoc_box_positions'."""
+    GmocBoxPos = create_box_position_model("gmoc", pair_column="pair", order_id_length=40)
+    assert GmocBoxPos.__tablename__ == "gmoc_box_positions"
+
+
+def test_box_position_has_exchange_position_id() -> None:
+    """BUG-032: exchange_position_id 컬럼이 ORM 모델에 존재해야 한다 (gmoc 포함)."""
+    GmocBoxPos = create_box_position_model("gmoc", pair_column="pair", order_id_length=40)
+    cols = GmocBoxPos.__table__.columns
+    assert "exchange_position_id" in cols
+    assert cols["exchange_position_id"].nullable is True
+
+
+def test_box_position_has_loss_webhook_sent() -> None:
+    """BUG-032: loss_webhook_sent 컬럼이 ORM 모델에 존재하며 NOT NULL DEFAULT false."""
+    GmocBoxPos = create_box_position_model("gmoc", pair_column="pair", order_id_length=40)
+    col = GmocBoxPos.__table__.columns["loss_webhook_sent"]
+    assert str(col.server_default.arg) == "false"
+    assert col.nullable is False
+
+
+def test_box_position_has_ifdoco_columns() -> None:
+    """BUG-032: IFD-OCO 관련 4개 컬럼이 ORM 모델에 존재해야 한다."""
+    GmocBoxPos = create_box_position_model("gmoc", pair_column="pair", order_id_length=40)
+    cols = GmocBoxPos.__table__.columns
+    for col_name in ("ifdoco_root_order_id", "ifdoco_status", "tp_price", "sl_price_registered"):
+        assert col_name in cols, f"컬럼 누락: {col_name}"
+
+
+def test_box_position_has_exchange_sl_columns() -> None:
+    """BUG-032: 거래소 SL 이중화 3개 컬럼이 ORM 모델에 존재해야 한다."""
+    GmocBoxPos = create_box_position_model("gmoc", pair_column="pair", order_id_length=40)
+    cols = GmocBoxPos.__table__.columns
+    for col_name in ("exchange_sl_order_id", "exchange_sl_price", "exchange_sl_status"):
+        assert col_name in cols, f"컬럼 누락: {col_name}"
+
+
+def test_box_position_all_9_columns_present() -> None:
+    """BUG-032: 9개 확장 컬럼 전체가 ck/bf/gmoc 모두에 존재해야 한다."""
+    expected_cols = (
+        "exchange_position_id",
+        "loss_webhook_sent",
+        "exchange_sl_order_id",
+        "exchange_sl_price",
+        "exchange_sl_status",
+        "ifdoco_root_order_id",
+        "ifdoco_status",
+        "tp_price",
+        "sl_price_registered",
+    )
+    for prefix in ("ck", "bf", "gmoc"):
+        Model = create_box_position_model(prefix, pair_column="pair", order_id_length=40)
+        cols = Model.__table__.columns
+        for col_name in expected_cols:
+            assert col_name in cols, f"{prefix}_box_positions.{col_name} 누락"

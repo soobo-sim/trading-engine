@@ -361,3 +361,57 @@ async def test_auto_approve_post_report_failure_does_not_block():
         await asyncio.sleep(0)
 
     assert result is True
+
+
+# ──────────────────────────────────────────────────────────────
+# AutoApprovalGate — max_auto_size=0.60 (운영 설정값) 검증
+# AUTO_APPROVAL_MAX_SIZE=0.60 (.env) 변경에 따른 경계값 테스트
+# ──────────────────────────────────────────────────────────────
+
+
+def test_auto_approve_size_0_50_with_max_0_60_passes():
+    """
+    Given: max_auto_size=0.60 (운영 설정값), size=0.50 (GMO Coin 전략 position_size_pct)
+    Then:  자동 승인 조건 충족 — GMO Coin 숏 진입 시 수동 승인 요청 불필요
+    """
+    tg_gate = TelegramApprovalGate(bot_token="tok", chat_id="chat")
+    gate = AutoApprovalGate(telegram_gate=tg_gate, min_confidence=0.65, max_auto_size=0.60)
+
+    d = _make_decision(confidence=0.7, size_pct=0.50, meta={})
+    assert gate._should_auto_approve(d) is True
+
+
+def test_auto_approve_size_0_60_boundary_passes():
+    """
+    Given: max_auto_size=0.60, size=0.60 (경계값 정확히 일치)
+    Then:  자동 승인 통과 (≤ 조건)
+    """
+    tg_gate = TelegramApprovalGate(bot_token="tok", chat_id="chat")
+    gate = AutoApprovalGate(telegram_gate=tg_gate, min_confidence=0.65, max_auto_size=0.60)
+
+    d = _make_decision(confidence=0.7, size_pct=0.60, meta={})
+    assert gate._should_auto_approve(d) is True
+
+
+def test_auto_approve_size_0_61_exceeds_max_0_60():
+    """
+    Given: max_auto_size=0.60, size=0.61 (경계 초과)
+    Then:  자동 승인 조건 미충족 → 수동 승인 폴백
+    """
+    tg_gate = TelegramApprovalGate(bot_token="tok", chat_id="chat")
+    gate = AutoApprovalGate(telegram_gate=tg_gate, min_confidence=0.65, max_auto_size=0.60)
+
+    d = _make_decision(confidence=0.8, size_pct=0.61, meta={})
+    assert gate._should_auto_approve(d) is False
+
+
+def test_auto_approve_size_0_80_still_blocked_with_max_0_60():
+    """
+    Given: max_auto_size=0.60, size=0.80 (어제 스크린샷 케이스 — 기존 40% 한도에서 수동승인 받던 경우)
+    Then:  여전히 자동 승인 불가 → 수동 승인 필요 (사이즈가 비정상적으로 클 경우 보호)
+    """
+    tg_gate = TelegramApprovalGate(bot_token="tok", chat_id="chat")
+    gate = AutoApprovalGate(telegram_gate=tg_gate, min_confidence=0.65, max_auto_size=0.60)
+
+    d = _make_decision(confidence=0.7, size_pct=0.80, meta={})
+    assert gate._should_auto_approve(d) is False

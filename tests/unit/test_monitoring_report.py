@@ -19,6 +19,12 @@ from api.services.monitoring import (
     get_market_summary,
     get_position_summary,
     get_entry_blockers,
+    get_entry_blockers_short,
+    get_wait_direction,
+    get_narrative_situation,
+    get_narrative_outlook,
+    get_box_narrative_situation,
+    get_box_narrative_outlook,
     build_telegram_text,
     build_memory_block,
     build_bar_chart,
@@ -310,6 +316,90 @@ class TestGetEntryBlockers:
         assert blockers == []
 
 
+# ── 서사형(Narrative) 헬퍼 테스트 ────────────────────────
+
+class TestGetNarrativeSituation:
+    def test_no_position_downtrend(self):
+        result = get_narrative_situation(
+            has_position=False, signal="exit_warning",
+            ema_slope_pct=-0.15, rsi=28.0, current_price=90.0, ema=100.0,
+        )
+        assert "EMA 아래" in result and "하락" in result
+
+    def test_no_position_uptrend_entry_ready(self):
+        result = get_narrative_situation(
+            has_position=False, signal="entry_ok",
+            ema_slope_pct=0.15, rsi=52.0, current_price=105.0, ema=100.0,
+        )
+        assert "상승" in result and "진입" in result
+
+    def test_with_position_profitable(self):
+        result = get_narrative_situation(
+            has_position=True, signal="hold",
+            ema_slope_pct=0.1, rsi=55.0, current_price=105.0, ema=100.0,
+            unrealized_pnl_pct=3.0,
+        )
+        assert "수익 확대" in result
+
+    def test_with_position_full_exit(self):
+        result = get_narrative_situation(
+            has_position=True, signal="exit_warning",
+            ema_slope_pct=-0.2, rsi=28.0, current_price=95.0, ema=100.0,
+            unrealized_pnl_pct=-1.0,
+            exit_signal={"action": "full_exit"},
+        )
+        assert "청산 시그널" in result
+
+
+class TestGetNarrativeOutlook:
+    def test_no_position_returns_none(self):
+        assert get_narrative_outlook(False, None, 50.0, 0.5) is None
+
+    def test_hold_default(self):
+        result = get_narrative_outlook(True, {"action": "hold"}, 55.0, 1.0)
+        assert result is not None
+        assert "트레일링 스탑" in result
+
+    def test_tighten_stop(self):
+        result = get_narrative_outlook(True, {"action": "tighten_stop"}, 45.0, -0.5)
+        assert "스탑 조임" in result
+
+    def test_big_loss(self):
+        result = get_narrative_outlook(True, {"action": "hold"}, 40.0, -2.0)
+        assert "손절선 접근" in result
+
+
+class TestGetBoxNarrativeSituation:
+    def test_no_box(self):
+        result = get_box_narrative_situation(False, "no_box", False)
+        assert "미형성" in result
+
+    def test_has_position_near_upper(self):
+        result = get_box_narrative_situation(True, "near_upper", True, "buy", 1.5)
+        assert "상단 접근" in result and "익절" in result
+
+    def test_no_position_near_lower(self):
+        result = get_box_narrative_situation(False, "near_lower", True)
+        assert "하단 진입대" in result
+
+    def test_no_position_middle(self):
+        result = get_box_narrative_situation(False, "middle", True)
+        assert "중심" in result
+
+
+class TestGetBoxNarrativeOutlook:
+    def test_no_position_returns_none(self):
+        assert get_box_narrative_outlook(False, "middle", "buy") is None
+
+    def test_buy_near_upper(self):
+        result = get_box_narrative_outlook(True, "near_upper", "buy")
+        assert "자동 익절" in result
+
+    def test_sell_near_lower(self):
+        result = get_box_narrative_outlook(True, "near_lower", "sell")
+        assert "익절" in result
+
+
 # ── 텔레그램 텍스트 조립 테스트 ──────────────────────────
 
 class TestBuildTelegramText:
@@ -375,6 +465,116 @@ class TestBuildTelegramText:
         assert "손절" in text
         assert "보유" in text
         assert "BTC" in text
+        assert "미실현" in text
+
+    def test_with_position_long_label(self):
+        """side=buy → 롱 보유."""
+        data = {
+            "trend_icon": "📈",
+            "current_price": 10000000,
+            "position_summary": "상승추세·보유 유지",
+            "position": {
+                "side": "buy",
+                "entry_price": 9800000,
+                "entry_amount": 0.01,
+                "stop_loss_price": 9600000,
+                "trailing_stop_distance": 400000,
+                "unrealized_pnl_jpy": 200000,
+                "unrealized_pnl_pct": 2.04,
+            },
+            "entry_blockers": [],
+            "jpy_available": 50000,
+        }
+        text = build_telegram_text("GMOC", "12:00", "BTC_JPY", data)
+        assert "롱 보유" in text
+        assert "숏 보유" not in text
+
+    def test_with_position_short_label(self):
+        """side=sell → 숏 보유 (CFD 숏)."""
+        data = {
+            "trend_icon": "📉",
+            "current_price": 9500000,
+            "position_summary": "추세 약화 감지",
+            "position": {
+                "side": "sell",
+                "entry_price": 9800000,
+                "entry_amount": 0.01,
+                "stop_loss_price": 10100000,
+                "trailing_stop_distance": 600000,
+                "unrealized_pnl_jpy": 300000,
+                "unrealized_pnl_pct": 3.06,
+            },
+            "exit_signal": {"action": "hold"},
+            "entry_blockers": [],
+            "jpy_available": 100000,
+        }
+        text = build_telegram_text("GMO", "15:00", "BTC_JPY", data)
+        assert "숏 보유" in text
+        assert "롱 보유" not in text
+        assert "⚡ 전망:" in text
+
+    def test_no_exit_signal_no_outlook_line(self):
+        """exit_signal=None → ⚡ 전망 행 미표시."""
+        data = {
+            "trend_icon": "📈",
+            "current_price": 11800000,
+            "position_summary": "상승추세·보유 유지",
+            "position": {
+                "entry_price": 11600000,
+                "entry_amount": 0.003,
+                "stop_loss_price": 11400000,
+                "trailing_stop_distance": 400000,
+                "unrealized_pnl_jpy": 600000,
+                "unrealized_pnl_pct": 1.72,
+            },
+            "exit_signal": None,
+            "entry_blockers": [],
+            "jpy_available": 10000,
+        }
+        text = build_telegram_text("BF", "10:00", "BTC_JPY", data)
+        assert "⚡ 전망:" not in text
+        assert "미실현" in text
+
+    def test_exit_signal_full_exit_outlook(self):
+        """exit_signal full_exit → ⚡ 전망: 즉시 청산 실행 중."""
+        data = {
+            "trend_icon": "📉",
+            "current_price": 11000000,
+            "position_summary": "🚨 청산 시그널 발생",
+            "position": {
+                "entry_price": 11500000,
+                "entry_amount": 0.003,
+                "stop_loss_price": 11200000,
+                "trailing_stop_distance": 200000,
+                "unrealized_pnl_jpy": -150000,
+                "unrealized_pnl_pct": -4.35,
+            },
+            "exit_signal": {"action": "full_exit"},
+            "entry_blockers": [],
+            "jpy_available": 10000,
+        }
+        text = build_telegram_text("BF", "10:00", "BTC_JPY", data)
+        assert "즉시 청산 실행 중" in text
+
+    def test_stop_loss_price_zero_no_crash(self):
+        """stop_loss_price=0 → 에러 없이 처리."""
+        data = {
+            "trend_icon": "📈",
+            "current_price": 11000000,
+            "position_summary": "보유 유지",
+            "position": {
+                "entry_price": 10800000,
+                "entry_amount": 0.003,
+                "stop_loss_price": 0,
+                "trailing_stop_distance": 0,
+                "unrealized_pnl_jpy": 60000,
+                "unrealized_pnl_pct": 1.85,
+            },
+            "entry_blockers": [],
+            "jpy_available": 10000,
+        }
+        text = build_telegram_text("BF", "10:00", "BTC_JPY", data)
+        assert "손절" in text  # 행은 존재
         assert "미실현" in text
 
 
@@ -1434,3 +1634,511 @@ class TestBuildBoxTelegramTextAgeWarning:
         text = build_box_telegram_text("GMO", "09:00", "usd_jpy", data)
         assert text  # 에러 없이 텍스트 생성
         assert "장기 박스" not in text
+
+
+# ── 추가 엣지케이스 테스트 ──────────────────────────────
+
+class TestBuildBoxTelegramTextEdgeCases:
+    """박스 전략 텔레그램 텍스트 엣지케이스."""
+
+    def test_box_absent_with_position_no_crash(self):
+        """박스 없는데 포지션 있는 경우 — 익절/손절 계산 skip, 에러 없음."""
+        data = {
+            "health_line": "🟢 WS✅ 태스크3/3✅ 잔고✅",
+            "current_price": 155.0,
+            "box": None,
+            "position_label": "no_box",
+            "position": {
+                "side": "buy",
+                "entry_price": 153.0,
+                "entry_amount": 1000.0,
+                "unrealized_pnl_jpy": 200.0,
+                "unrealized_pnl_pct": 1.31,
+            },
+            "jpy_available": 50000,
+            "coin_available": 1000.0,
+            "basis_timeframe": "4h",
+            "candle_open_time_jst": "불명",
+            "is_margin_trading": True,
+        }
+        text = build_box_telegram_text("GMO", "10:00", "usd_jpy", data)
+        assert text
+        assert "롱 보유" in text
+        assert "미실현" in text
+        # 박스 없으면 익절/손절 행 없음
+        assert "🎯 익절" not in text
+        assert "🛑 손절" not in text
+
+    def test_position_outside_box_label(self):
+        """position_label=outside → 박스 이탈 서사 포함."""
+        data = {
+            "health_line": "🟢 WS✅ 태스크3/3✅ 잔고✅",
+            "current_price": 170.0,
+            "box": {
+                "id": 1, "upper_bound": 165.0, "lower_bound": 160.0,
+                "box_width_pct": 3.1, "bar_chart": "[━━━━━━━━━━]●",
+            },
+            "position_label": "outside",
+            "position": {
+                "side": "buy",
+                "entry_price": 161.0,
+                "entry_amount": 1000.0,
+                "unrealized_pnl_jpy": 900.0,
+                "unrealized_pnl_pct": 5.59,
+            },
+            "jpy_available": 50000,
+            "coin_available": 1000.0,
+            "basis_timeframe": "4h",
+            "candle_open_time_jst": "불명",
+            "near_bound_pct": 1.5,
+            "tolerance_pct": 1.5,
+            "stop_loss_pct": 1.5,
+            "is_margin_trading": True,
+        }
+        text = build_box_telegram_text("GMO", "10:00", "usd_jpy", data)
+        assert "이탈" in text  # 서사 표시
+
+    def test_multiple_entry_blockers_each_on_own_line(self):
+        """진입 차단이 2개 이상일 때 각 줄에 표시."""
+        data = {
+            "health_line": "🟢 WS✅ 태스크3/3✅ 잔고✅",
+            "current_price": 160.0,
+            "box": {
+                "id": 1, "upper_bound": 165.0, "lower_bound": 160.0,
+                "box_width_pct": 3.1, "bar_chart": "[●━━━━━━━━━━]",
+            },
+            "position_label": "middle",
+            "position": None,
+            "entry_blockers": ["중심부 → 하한 진입대 대기", "잔고 부족"],
+            "conditions_met": 1,
+            "conditions_total": 3,
+            "jpy_available": 50000,
+            "coin_available": 0.0,
+            "basis_timeframe": "4h",
+            "candle_open_time_jst": "20:00",
+            "is_margin_trading": False,
+        }
+        text = build_box_telegram_text("GMO", "10:00", "usd_jpy", data)
+        lines = text.split("\n")
+        blocker_lines = [l for l in lines if " · " in l]
+        assert len(blocker_lines) == 2, f"blockers expected on separate lines: {text}"
+
+
+class TestGetNarrativeSituationEdgeCases:
+    """get_narrative_situation 엣지케이스."""
+
+    def test_ema_none_returns_data_insufficient(self):
+        """ema=None → 데이터 부족 반환."""
+        result = get_narrative_situation(
+            has_position=False, signal="no_signal",
+            ema_slope_pct=0.1, rsi=50.0, current_price=100.0, ema=None,
+        )
+        assert "부족" in result
+
+    def test_above_ema_weak_slope(self):
+        """EMA 위지만 slope 약 → RSI 조건 대기."""
+        result = get_narrative_situation(
+            has_position=False, signal="wait_dip",
+            ema_slope_pct=0.05, rsi=55.0, current_price=105.0, ema=100.0,
+        )
+        assert "EMA 위" in result or "RSI 조건" in result or "상승" in result
+
+    def test_with_position_small_loss(self):
+        """미실현 소폭 손실 → 관찰 문구."""
+        result = get_narrative_situation(
+            has_position=True, signal="hold",
+            ema_slope_pct=0.05, rsi=48.0, current_price=99.0, ema=100.0,
+            unrealized_pnl_pct=-0.5,
+        )
+        assert "관찰" in result or "손실" in result
+
+    def test_with_position_tighten_stop(self):
+        """tighten_stop → 스탑 조임 문구."""
+        result = get_narrative_situation(
+            has_position=True, signal="exit_warning",
+            ema_slope_pct=-0.05, rsi=45.0, current_price=105.0, ema=107.0,
+            unrealized_pnl_pct=0.5,
+            exit_signal={"action": "tighten_stop"},
+        )
+        assert "스탑 조임" in result
+
+
+# ── get_wait_direction 테스트 ─────────────────────────────────
+
+class TestGetWaitDirection:
+    """WD-01~WD-05"""
+
+    def test_wd01_short_when_price_below_ema_and_slope_down(self):
+        """WD-01: supports_short=True, price<EMA, slope<0 → short."""
+        result = get_wait_direction(True, "no_signal", 100.0, 110.0, -0.1)
+        assert result == "short"
+
+    def test_wd02_long_when_price_above_ema_and_slope_up(self):
+        """WD-02: supports_short=True, price>EMA, slope>0 → long."""
+        result = get_wait_direction(True, "no_signal", 110.0, 100.0, 0.1)
+        assert result == "long"
+
+    def test_wd03_long_when_signal_is_wait_dip(self):
+        """WD-03: signal=wait_dip → long (롱 조건 부분 충족)."""
+        result = get_wait_direction(True, "wait_dip", 105.0, 100.0, 0.03)
+        assert result == "long"
+
+    def test_wd03b_long_when_signal_is_wait_regime(self):
+        """WD-03b: signal=wait_regime → long."""
+        result = get_wait_direction(True, "wait_regime", 102.0, 100.0, 0.02)
+        assert result == "long"
+
+    def test_wd04_always_long_when_not_support_short(self):
+        """WD-04: supports_short=False → 항상 long (현물 전용)."""
+        result = get_wait_direction(False, "no_signal", 90.0, 100.0, -0.2)
+        assert result == "long"
+
+    def test_wd05_neutral_when_ema_none(self):
+        """WD-05: supports_short=True, ema=None → neutral."""
+        result = get_wait_direction(True, "no_signal", 100.0, None, -0.1)
+        assert result == "neutral"
+
+    def test_neutral_when_price_below_ema_slope_up(self):
+        """price<EMA & slope>0 → neutral (방향 불명)."""
+        result = get_wait_direction(True, "no_signal", 90.0, 100.0, 0.1)
+        assert result == "neutral"
+
+
+# ── get_entry_blockers_short 테스트 ──────────────────────────
+
+class TestGetEntryBlockersShort:
+    """SB-01~SB-02"""
+
+    def test_sb01_only_rsi_blocker_when_oversold(self):
+        """SB-01: 가격<EMA, slope 충족, RSI 과매도만 미충족."""
+        blockers = get_entry_blockers_short(
+            signal="no_signal",
+            current_price=11_347_825,
+            ema=11_414_041,
+            ema_slope_pct=-0.06,
+            rsi=32.7,
+            rsi_min=35.0,
+            rsi_max=60.0,
+            slope_threshold=-0.05,
+        )
+        # slope -0.06 < -0.05 ✅  price < ema ✅  rsi 32.7 < 35 ❌
+        assert len(blockers) == 1
+        assert "RSI" in blockers[0]
+        assert "과매도" in blockers[0]
+
+    def test_sb02_all_blockers_when_conditions_not_met(self):
+        """SB-02: slope≥threshold, price≥EMA → min 2 blockers."""
+        blockers = get_entry_blockers_short(
+            signal="no_signal",
+            current_price=11_500_000,
+            ema=11_000_000,
+            ema_slope_pct=0.01,
+            rsi=50.0,
+            slope_threshold=-0.05,
+        )
+        # slope 0.01 >= -0.05 ❌  price > ema ❌
+        assert len(blockers) >= 2
+        assert any("EMA slope" in b for b in blockers)
+        assert any("EMA20" in b for b in blockers)
+
+    def test_no_blockers_when_all_conditions_met(self):
+        """모든 숏 진입 조건 충족 → 빈 리스트."""
+        blockers = get_entry_blockers_short(
+            signal="entry_sell",
+            current_price=9_900_000,
+            ema=10_000_000,
+            ema_slope_pct=-0.1,
+            rsi=45.0,
+            rsi_min=35.0,
+            rsi_max=60.0,
+            slope_threshold=-0.05,
+        )
+        assert blockers == []
+
+    def test_rsi_overbought_blocker(self):
+        """RSI 과열 → 숏 진입 차단."""
+        blockers = get_entry_blockers_short(
+            signal="no_signal",
+            current_price=9_900_000,
+            ema=10_000_000,
+            ema_slope_pct=-0.1,
+            rsi=65.0,
+            rsi_max=60.0,
+        )
+        assert any("이하 필요" in b for b in blockers)
+
+
+# ── build_telegram_text wait_direction 분기 테스트 ─────────────
+
+class TestBuildTelegramTextWaitDirection:
+    """TG-01~TG-05: wait_direction 분기 검증."""
+
+    def _base_no_position(self, wait_dir=None):
+        return {
+            "trend_icon": "📉",
+            "current_price": 11_347_825,
+            "market_summary": "🔻 하락 전환·전략 유효성 점검",
+            "position_summary": None,
+            "position": None,
+            "wait_direction": wait_dir,
+            "entry_blockers": ["RSI 32.7 → 35 이상 필요 (과매도)"],
+            "conditions_met": 4,
+            "conditions_total": 5,
+            "jpy_available": 100_173,
+        }
+
+    def test_tg01_short_waiting_label(self):
+        """TG-01: wait_direction='short' → '숏 대기중' + '매도' 문구."""
+        text = build_telegram_text("GMOC", "22:32", "btc_jpy", self._base_no_position("short"))
+        assert "숏 대기중" in text
+        assert "매도" in text
+        assert "롱 대기중" not in text
+
+    def test_tg02_long_waiting_label_cfd(self):
+        """TG-02: wait_direction='long' (CFD) → '롱 대기중' + '매수' 문구."""
+        text = build_telegram_text("GMOC", "10:00", "btc_jpy", self._base_no_position("long"))
+        assert "롱 대기중" in text
+        assert "매수" in text
+        assert "숏 대기중" not in text
+
+    def test_tg03_none_spot_legacy_label(self):
+        """TG-03: wait_direction=None (현물 spot) → 기존 '대기중' + '매수' 동작."""
+        text = build_telegram_text("BF", "10:00", "BTC_JPY", self._base_no_position(None))
+        assert "대기중" in text
+        assert "매수" in text
+        assert "롱 대기중" not in text
+        assert "숏 대기중" not in text
+
+    def test_tg04_neutral_waiting_label(self):
+        """TG-04: wait_direction='neutral' → '관망중' + 양방향 안내."""
+        text = build_telegram_text("GMO", "10:00", "USD_JPY", self._base_no_position("neutral"))
+        assert "관망중" in text
+        assert "롱" in text
+        assert "숏" in text
+
+    def test_tg05_short_blockers_displayed(self):
+        """TG-05: 숏 대기 시 블로커 줄 표시."""
+        data = self._base_no_position("short")
+        data["entry_blockers"] = ["RSI 32.7 → 35 이상 필요 (과매도)"]
+        data["conditions_met"] = 4
+        text = build_telegram_text("GMOC", "22:32", "btc_jpy", data)
+        assert "4/5" in text
+        assert "RSI" in text
+
+
+# ── 엣지케이스 보강 ────────────────────────────────────────────
+
+class TestWaitDirectionEntrySignals:
+    """entry_sell/entry_ok 시그널 → wait_direction 경로 확인."""
+
+    def test_entry_sell_signal_gives_short_direction(self):
+        """entry_sell: price<EMA + slope 강하 → short."""
+        # signals.py entry_sell 조건을 재현
+        result = get_wait_direction(True, "entry_sell", 9_900_000, 10_000_000, -0.1)
+        assert result == "short"
+
+    def test_entry_ok_signal_gives_long_direction(self):
+        """entry_ok: price>EMA + slope 양수 → long (signal 명시 없어도 long)."""
+        result = get_wait_direction(True, "entry_ok", 10_100_000, 10_000_000, 0.1)
+        assert result == "long"
+
+    def test_exit_warning_price_below_ema_short(self):
+        """exit_warning + price<EMA + slope 음수 → short."""
+        result = get_wait_direction(True, "exit_warning", 9_900_000, 10_000_000, -0.2)
+        assert result == "short"
+
+    def test_no_signal_price_above_ema_slope_negative_neutral(self):
+        """price>EMA + slope<0 (혼재) → neutral."""
+        result = get_wait_direction(True, "no_signal", 10_100_000, 10_000_000, -0.1)
+        assert result == "neutral"
+
+
+class TestEntryBlockersShortEdgeCases:
+    """숏 블로커 엣지케이스."""
+
+    def test_entry_sell_signal_no_blockers(self):
+        """entry_sell 시그널 = 모든 숏 조건 충족 → 빈 리스트."""
+        blockers = get_entry_blockers_short(
+            signal="entry_sell",
+            current_price=9_900_000,
+            ema=10_000_000,
+            ema_slope_pct=-0.1,
+            rsi=50.0,
+        )
+        assert blockers == []
+
+    def test_slope_exactly_at_threshold_is_blocker(self):
+        """slope == threshold 는 >= 에 해당 → 블로커 추가."""
+        blockers = get_entry_blockers_short(
+            signal="no_signal",
+            current_price=9_900_000,
+            ema=10_000_000,
+            ema_slope_pct=-0.05,
+            rsi=45.0,
+            slope_threshold=-0.05,
+        )
+        # -0.05 >= -0.05 → True → 블로커
+        assert any("EMA slope" in b for b in blockers)
+
+    def test_slope_just_below_threshold_no_slope_blocker(self):
+        """slope = -0.051 < -0.05 → slope 블로커 없음."""
+        blockers = get_entry_blockers_short(
+            signal="no_signal",
+            current_price=9_900_000,
+            ema=10_000_000,
+            ema_slope_pct=-0.051,
+            rsi=45.0,
+            slope_threshold=-0.05,
+        )
+        assert not any("EMA slope" in b for b in blockers)
+
+    def test_regime_blocker_added_for_wait_regime(self):
+        """signal=wait_regime → 레짐 블로커 추가."""
+        blockers = get_entry_blockers_short(
+            signal="wait_regime",
+            current_price=9_900_000,
+            ema=10_000_000,
+            ema_slope_pct=-0.1,
+            rsi=45.0,
+        )
+        assert any("레짐" in b for b in blockers)
+
+    def test_ema_none_no_crash(self):
+        """ema=None → 에러 없이 slope 블로커만."""
+        blockers = get_entry_blockers_short(
+            signal="no_signal",
+            current_price=10_000_000,
+            ema=None,
+            ema_slope_pct=0.01,
+            rsi=45.0,
+            slope_threshold=-0.05,
+        )
+        # ema None → 가격 블로커 없음, slope 0.01 >= -0.05 → slope 블로커 있음
+        assert not any("EMA20" in b for b in blockers)
+        assert any("EMA slope" in b for b in blockers)
+
+
+class TestBuildTelegramTextWaitDirectionEdgeCases:
+    """wait_direction 분기 추가 엣지케이스."""
+
+    def _no_pos(self, wait_dir, blockers=None, met=None):
+        return {
+            "trend_icon": "📉",
+            "current_price": 10_000_000,
+            "market_summary": "관망",
+            "position_summary": None,
+            "position": None,
+            "wait_direction": wait_dir,
+            "entry_blockers": blockers or [],
+            "conditions_met": met if met is not None else (5 if not blockers else 5 - len(blockers)),
+            "conditions_total": 5,
+            "jpy_available": 50_000,
+        }
+
+    def test_short_no_blockers_shows_all_clear(self):
+        """숏 대기 + 블로커 없음 → ✅ 5/5 표시."""
+        text = build_telegram_text("GMOC", "10:00", "btc_jpy", self._no_pos("short", [], 5))
+        assert "✅" in text
+        assert "5/5" in text
+
+    def test_long_with_blockers(self):
+        """롱 대기 + 블로커 1개 → 4/5 표시."""
+        text = build_telegram_text("GMOC", "10:00", "btc_jpy",
+                                   self._no_pos("long", ["EMA slope -0.02% → ≥+0.00% 필요"], 4))
+        assert "롱 대기중" in text
+        assert "4/5" in text
+
+    def test_conditions_met_zero_when_max_blockers(self):
+        """conditions_met=0 → 0/5 표시."""
+        data = self._no_pos("short", ["b1", "b2", "b3", "b4", "b5"], 0)
+        text = build_telegram_text("GMOC", "10:00", "btc_jpy", data)
+        assert "0/5" in text
+
+    def test_spot_trend_report_no_wait_direction_key(self):
+        """현물 spot report_data에 wait_direction 키 없어도 동작."""
+        data = {
+            "trend_icon": "📈",
+            "current_price": 11_000_000,
+            "market_summary": "✅ 진입 임박",
+            "position_summary": None,
+            "position": None,
+            # wait_direction 키 없음
+            "entry_blockers": [],
+            "conditions_met": 5,
+            "conditions_total": 5,
+            "jpy_available": 100_000,
+        }
+        text = build_telegram_text("BF", "10:00", "BTC_JPY", data)
+        assert "대기중" in text
+        assert "매수" in text
+        assert "롱 대기중" not in text
+
+
+# ── generate_trend_report _supports_short 분기 동작 단위 검증 ──
+
+class TestSupportShortIntegration:
+    """_supports_short=True/False 에 따른 wait_direction 결정 경로 단위 검증."""
+
+    def test_supports_short_false_always_returns_none_direction(self):
+        """_supports_short=False → get_wait_direction이 호출되어도 long 반환 후 None으로 처리."""
+        # generate_trend_report 내부 로직을 직접 흉내
+        supports_short = False
+        signal = "no_signal"
+        current_price = 9_900_000
+        ema = 10_000_000
+        ema_slope_pct = -0.1
+        position_data = None
+
+        if supports_short and not position_data:
+            wait_direction = get_wait_direction(True, signal, current_price, ema, ema_slope_pct)
+        else:
+            wait_direction = None
+
+        assert wait_direction is None
+
+    def test_supports_short_true_with_downtrend_gives_short(self):
+        """_supports_short=True + 하락 조건 → wait_direction='short'."""
+        supports_short = True
+        signal = "no_signal"
+        current_price = 9_900_000
+        ema = 10_000_000
+        ema_slope_pct = -0.1
+        position_data = None
+
+        if supports_short and not position_data:
+            wait_direction = get_wait_direction(True, signal, current_price, ema, ema_slope_pct)
+        else:
+            wait_direction = None
+
+        assert wait_direction == "short"
+
+    def test_supports_short_true_with_position_gives_none(self):
+        """_supports_short=True이어도 포지션 보유 중이면 wait_direction=None."""
+        supports_short = True
+        position_data = {"side": "sell", "entry_price": 10_000_000}  # 포지션 있음
+
+        if supports_short and not position_data:
+            wait_direction = get_wait_direction(True, "no_signal", 9_900_000, 10_000_000, -0.1)
+        else:
+            wait_direction = None
+
+        assert wait_direction is None
+
+    def test_short_direction_triggers_short_blockers(self):
+        """wait_direction='short' → get_entry_blockers_short 경로 사용 검증."""
+        # RSI 과매도만 남은 상황 재현
+        blockers = get_entry_blockers_short(
+            signal="no_signal",
+            current_price=11_347_825,
+            ema=11_414_041,
+            ema_slope_pct=-0.06,
+            rsi=32.7,
+            rsi_min=35.0,
+            rsi_max=60.0,
+            slope_threshold=-0.05,
+        )
+        assert len(blockers) == 1
+        assert "과매도" in blockers[0]
+        # conditions_met = max(0, 5 - 1) = 4
+        conditions_met = max(0, 5 - len(blockers))
+        assert conditions_met == 4

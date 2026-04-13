@@ -139,9 +139,9 @@ class TrendFollowingManager(BaseTrendManager):
     # ──────────────────────────────────────────
 
     async def _open_position(
-        self, pair: str, price: float, atr: Optional[float], params: Dict, *, signal_data: dict | None = None
+        self, pair: str, side: str, price: float, atr: Optional[float], params: Dict, *, signal_data: dict | None = None
     ) -> None:
-        """market_buy 자동 진입 + 인메모리 포지션 기록."""
+        """market_buy 자동 진입 + 인메모리 포지션 기록. side 파라미터는 무시(항상 MARKET_BUY)."""
         try:
             balance = await self._adapter.get_balance()
             jpy_available = balance.get_available("jpy")

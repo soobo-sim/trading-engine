@@ -46,9 +46,14 @@ GMO_MAX_LEVERAGE = float(os.environ.get("GMO_MAX_LEVERAGE", "5.0"))
 
 
 def _validate_gmo_safety(params: dict, state: AppState) -> None:
-    """GMO FX(pair_column=pair)에만 적용되는 안전장치 검증."""
-    if state.pair_column != "pair":
-        return  # BF는 제한 없음
+    """GMO FX(prefix=gmo)에만 적용되는 안전장치 검증.
+
+    GMO Coin(prefix=gmoc)은 암호화폐 레버리지로 FX와 특성이 달라 별도 적용하지 않음.
+    - position_size_pct: BTC 100% 허용 (FX 50% 제한은 USD/JPY 기준)
+    - regime 임계값: BTC 기본값 사용 가능 (FX 필수 아님)
+    """
+    if state.prefix != "gmo":
+        return  # BF(bf), GMO Coin(gmoc)은 이 검증 불필요
 
     pos_pct = params.get("position_size_pct")
     if pos_pct is not None:

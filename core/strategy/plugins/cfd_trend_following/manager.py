@@ -37,6 +37,7 @@ class CfdTrendFollowingManager(BaseTrendManager):
 
     _task_prefix = "cfd"
     _log_prefix = "[CfdMgr]"
+    _supports_short = True  # 양방향 진입 지원
 
     def __init__(
         self,
@@ -207,13 +208,13 @@ class CfdTrendFollowingManager(BaseTrendManager):
         if side == "buy" and realtime_price < ema:
             if signal != "exit_warning":
                 logger.info(
-                    f"[CfdMgr] {pair}: 롱 실시간가 ¥{realtime_price} < EMA ¥{ema:.4f} → exit_warning"
+                    f"[CfdMgr] {pair}: 롱 실시간가 ¥{realtime_price} < EMA ¥{ema:.4f} → 추세 이탈 감지"
                 )
             return "exit_warning"
         elif side == "sell" and realtime_price > ema:
             if signal != "exit_warning":
                 logger.info(
-                    f"[CfdMgr] {pair}: 숏 실시간가 ¥{realtime_price} > EMA ¥{ema:.4f} → exit_warning"
+                    f"[CfdMgr] {pair}: 숏 실시간가 ¥{realtime_price} > EMA ¥{ema:.4f} → 추세 이탈 감지"
                 )
             return "exit_warning"
         return signal
@@ -254,30 +255,24 @@ class CfdTrendFollowingManager(BaseTrendManager):
                     f"[CfdMgr] {pair}: 숏 트레일링 스탑 ¥{current_sl} → ¥{new_sl} (x{mult:.1f})"
                 )
 
-    async def _on_entry_signal(self, pair, signal, current_price, atr, params, signal_data):
-        """entry_ok / entry_sell → 진입. keep_rate 경고 / 주말 시 차단."""
-        if signal not in ("entry_ok", "entry_sell"):
-            return
-
-        # FX: 주말 임박 시 신규 진입 차단
+    async def _pre_entry_checks(self, pair: str, side: str, params: dict) -> bool:
+        """CFD 전용 진입 전 검사: FX 주말/시장 휴장 + keep_rate 증거금 여유."""
+        # FX 주말/시장 휴장 체크
         is_fx = self._adapter.exchange_name == "gmofx"
         if is_fx and (should_close_for_weekend() or not is_fx_market_open()):
             logger.debug(f"[CfdMgr] {pair}: FX 시장 휴장/주말 임박 → 진입 차단")
-            return
+            return False
 
+        # keep_rate 증거금 비율 체크
         keep_rate = self._last_keep_rate.get(pair)
         warn_threshold = float(params.get("keep_rate_warn", 1.5))
         if keep_rate is not None and keep_rate < warn_threshold:
             logger.info(
                 f"[CfdMgr] {pair}: keep_rate={keep_rate:.2f} < warn={warn_threshold} → 차단"
             )
-            return
-        entry_side = "sell" if signal == "entry_sell" else "buy"
-        logger.info(f"[CfdMgr] {pair}: {signal} → {entry_side} 진입 시도")
-        # Paper pair는 실주문 스킵
-        if await self._try_paper_entry(pair, entry_side, current_price, atr, params):
-            return
-        await self._open_position(pair, entry_side, current_price, atr, params)
+            return False
+
+        return True
 
     # ──────────────────────────────────────────
     # 진입
