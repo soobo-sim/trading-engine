@@ -170,19 +170,20 @@ async def test_t05_no_approved_at_skips_reeval():
 
 @pytest.mark.asyncio
 async def test_t06_slippage_exceeded_with_fresh_ticker():
-    """최신 ticker ask가 signal_price+0.5% → 슬리피지 초과(cap 0.3%) → 차단."""
+    """approved_at 없음 + 스프레드 초과(cap 0.3%) → 차단.
+    ask=bid*1.006 → spread≈0.6% > 0.3%."""
     mgr, adapter = _make_manager()
 
-    signal_price = 5_000_000.0
-    # latest ticker ask = signal_price * 1.005 → slippage = 0.5% > 0.3%
+    base = 5_000_000.0
+    # spread = (ask - bid) / bid * 100 = 0.6% > 0.3%
     ticker_mock = MagicMock()
-    ticker_mock.ask = signal_price * 1.005
-    ticker_mock.bid = signal_price * 0.999
+    ticker_mock.ask = base * 1.006
+    ticker_mock.bid = base
     adapter.get_ticker = AsyncMock(return_value=ticker_mock)
 
     params = {**mgr._params["btc_jpy"], "max_slippage_pct": 0.3}
-    # approved_at 없음 → TTL/재평가 스킵, 슬리피지만 체크
-    await mgr._open_position("btc_jpy", "buy", signal_price, None,
+    # approved_at 없음 → 재평가 스킵, 스프레드 체크만
+    await mgr._open_position("btc_jpy", "buy", base, None,
                                params, signal_data=None)
 
     adapter.place_order.assert_not_called()

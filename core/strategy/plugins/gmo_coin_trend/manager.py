@@ -74,8 +74,7 @@ class GmoCoinTrendManager(CfdTrendFollowingManager):
                 except Exception:
                     pass
 
-            # ① 최신 ticker 재취득 — approve 시점 가격으로 슬리피지 재계산
-            signal_price = price  # 원본 시그널 가격 보존 (슬리피지 기준)
+            # ① 최신 ticker 재취득 — 주문 가격 기준 갱신
             try:
                 latest_ticker = await self._adapter.get_ticker(product_code)
                 latest_price = latest_ticker.ask if side == "buy" else latest_ticker.bid
@@ -154,15 +153,23 @@ class GmoCoinTrendManager(CfdTrendFollowingManager):
                 )
                 return
 
-            # 슬리피지 체크 (매수 시만) — 시그널 원가 vs 현재 ask 비교
-            max_slippage_pct = float(params.get("max_slippage_pct", 0.3))
-            if side == "buy" and price > 0:
-                slippage = (price - signal_price) / signal_price * 100
-                if slippage > max_slippage_pct:
-                    logger.warning(
-                        f"[GmocMgr] {product_code}: 슬리피지 초과 {slippage:.3f}%, 스킵"
-                    )
-                    return
+            # 슬리피지 체크: 시그널 재평가(approved_at)를 통과한 경우 스킵
+            # 재평가가 "현재 시장에서 진입 유효"를 이미 검증했으므로 중복 차단 불필요
+            if not approved_at_str:
+                max_slippage_pct = float(params.get("max_slippage_pct", 0.3))
+                if side == "buy" and price > 0:
+                    # 최신 ticker 기준 bid/ask 스프레드 비율
+                    try:
+                        chk_ticker = await self._adapter.get_ticker(product_code)
+                        if chk_ticker.bid and chk_ticker.ask and chk_ticker.bid > 0:
+                            spread_pct = (chk_ticker.ask - chk_ticker.bid) / chk_ticker.bid * 100
+                            if spread_pct > max_slippage_pct:
+                                logger.warning(
+                                    f"[GmocMgr] {product_code}: 스프레드 초과 {spread_pct:.3f}%, 스킵"
+                                )
+                                return
+                    except Exception as e:
+                        logger.warning(f"[GmocMgr] {product_code}: 슬리피지 체크 시세 조회 실패 — {e}")
 
             # GMO Coin 어댑터 주문 시맨틱:
             #   MARKET_BUY: JPY 금액 전달 → 어댑터가 jpy / ticker.ask 로 BTC 변환
