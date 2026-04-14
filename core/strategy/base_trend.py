@@ -44,7 +44,6 @@ from core.strategy.signals import (
     compute_trend_signal,
     detect_bearish_divergences,
 )
-from core.analysis.session_filter import is_allowed_session, is_london_open_blackout
 from core.task.supervisor import TaskSupervisor
 
 logger = logging.getLogger(__name__)
@@ -921,15 +920,6 @@ class BaseTrendManager(ABC):
         is_short_entry = signal == "entry_sell"
 
         if not (is_long_entry or is_short_entry):
-            return
-
-        # ── FX 전용 세션 필터 ────────────────────────────────────
-        is_fx = getattr(self._adapter, "is_margin_trading", False)
-        if is_fx and not is_allowed_session(params):
-            logger.debug(f"{self._log_prefix} {pair}: 세션 필터 — 세션 차단")
-            return
-        if is_fx and is_london_open_blackout(params):
-            logger.debug(f"{self._log_prefix} {pair}: 런던 오픈 블랙아웃 — 진입 대기")
             return
 
         direction = "long" if is_long_entry else "short"

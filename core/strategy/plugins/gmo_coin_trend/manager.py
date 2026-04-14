@@ -1,7 +1,7 @@
 """
 GmoCoinTrendManager — GMO Coin 레버리지 추세추종 매니저.
 
-CdfTrendFollowingManager 상속.
+MarginTrendManager(CdfTrendFollowingManager) 상속.
 GMO Coin 어댑터와 호환되지 않는 2개 메서드만 오버라이드:
 
   - _open_position: MARKET_BUY = JPY 전달 (어댑터 내부 `jpy / ticker.ask` → BTC 변환)
@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from core.exchange.types import OrderType, Position
-from core.strategy.plugins.cfd_trend_following.manager import CfdTrendFollowingManager
+from core.strategy.plugins.cfd_trend_following.manager import MarginTrendManager as CfdTrendFollowingManager
 
 logger = logging.getLogger(__name__)
 

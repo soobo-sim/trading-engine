@@ -20,7 +20,6 @@ from typing import Any, Dict, List, Optional
 from core.strategy.signals import compute_trend_signal
 from core.analysis.box_detector import detect_box, find_cluster_percentile
 from core.strategy.box_signals import classify_price_in_box, check_box_invalidation, linear_slope
-from core.exchange.session import should_close_for_weekend, is_fx_market_open
 
 
 # ──────────────────────────────────────────────────────────────
@@ -502,7 +501,6 @@ def _run_box_backtest(
     near_bound_pct = float(params.get("near_bound_pct", 0.3))
     position_size = float(params.get("position_size_pct", config.position_size_pct))
     exchange_type = params.get("exchange_type", "spot")
-    is_fx = exchange_type == "fx"
     cluster_percentile = float(params.get("box_cluster_percentile", 100.0))
     use_ifdoco = params.get("use_ifdoco", False)
     # IFD-OCO 지정가 체결 → 진입/TP 슬리피지 0. SL·무효화·주말은 시장가이므로 유지.
@@ -587,34 +585,6 @@ def _run_box_backtest(
     for i in range(min_candles, len(candles)):
         current_candle = candles[i]
         current_price = float(current_candle.close)
-
-        # ── D-5: FX 주말 청산 시뮬레이션 ──
-        if is_fx and current_position is not None:
-            candle_time = _candle_time(current_candle)
-            weekend_close_enabled = params.get("weekend_close", True)
-            if weekend_close_enabled and should_close_for_weekend(candle_time):
-                exit_price = _apply_slippage(
-                    current_price, "sell" if current_position.side == "buy" else "buy",
-                    config.slippage_pct,
-                )
-                _close_position(
-                    current_position, exit_price, current_candle,
-                    "weekend_close", config.fee_pct, capital,
-                )
-                capital += current_position.pnl_jpy or 0
-                trades.append(current_position)
-                _update_consec_losses(current_position)
-                current_position = None
-                active_box = None
-                prev_box_state = None
-                last_invalidation_idx = i
-                continue
-
-        # ── D-5: FX 주말 진입 차단 ──
-        if is_fx:
-            candle_time = _candle_time(current_candle)
-            if should_close_for_weekend(candle_time) or not is_fx_market_open(candle_time):
-                continue
 
         # ── D-3: 4H 종가 박스 무효화 체크 (포지션 유무 무관) ──
         if active_box is not None:
@@ -930,12 +900,3 @@ def _linear_slope(xs: List[int], ys: List[float]) -> float:
     """하위 호환 래퍼. 신규 코드는 box_signals.linear_slope 사용."""
     return linear_slope(xs, ys)
 
-
-def _is_weekend_close_time(dt: datetime) -> bool:
-    """하위 호환 래퍼. 신규 코드는 session.should_close_for_weekend 사용."""
-    return should_close_for_weekend(dt)
-
-
-def _is_market_closed(dt: datetime) -> bool:
-    """하위 호환 래퍼. 신규 코드는 session.is_fx_market_open 사용."""
-    return not is_fx_market_open(dt)

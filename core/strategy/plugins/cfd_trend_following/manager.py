@@ -1,18 +1,22 @@
 """
-CfdTrendFollowingManager — BitFlyer CFD (FX_BTC_JPY) 전용 추세추종 매니저.
+MarginTrendManager — 증거금(margin) 기반 양방향 추세추종 기반 매니저.
 
-BaseTrendManager를 상속하여 CFD 고유 로직만 구현한다.
+BaseTrendManager를 상속하여 증거금 고유 로직만 구현한다.
 
-CFD 고유 로직:
+고유 로직:
     - 롱/숏 양방향 진입
-    - 증거금(getcollateral) 기반 주문 + 레버리지 제한
+    - 증거금(get_collateral) 기반 주문 + 레버리지 제한
     - keep_rate 모니터링 → 자동 청산
-    - 포지션 보유 시간 제한 → 스왑 비용 관리
-    - getpositions으로 실 포지션 정합성 검사
+    - 포지션 보유 시간 제한
+    - get_positions으로 실 포지션 정합성 검사
     - 양방향 스탑로스/트레일링
 
 모든 리스크 수치는 strategy.parameters에서 읽는다 (하드코딩 금지).
+
+이 클래스는 GmoCoinTrendManager의 기반 클래스로 사용된다.
 """
+# 후방 호환 alias — 기존 import(CfdTrendFollowingManager)가 동작하도록 유지
+# from core.strategy.plugins.cfd_trend_following.manager import CfdTrendFollowingManager
 from __future__ import annotations
 
 import asyncio
@@ -25,18 +29,17 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from core.exchange.base import ExchangeAdapter
 from core.exchange.types import OrderType, Position
-from core.exchange.session import is_fx_market_open, should_close_for_weekend, minutes_until_market_close
 from core.strategy.base_trend import BaseTrendManager
 from core.task.supervisor import TaskSupervisor
 
 logger = logging.getLogger(__name__)
 
 
-class CfdTrendFollowingManager(BaseTrendManager):
-    """BitFlyer CFD (FX_BTC_JPY) 추세추종 매니저. 양방향."""
+class MarginTrendManager(BaseTrendManager):
+    """증거금 기반 추세추종 기반 매니저. 양방향."""
 
-    _task_prefix = "cfd"
-    _log_prefix = "[CfdMgr]"
+    _task_prefix = "margin"
+    _log_prefix = "[MarginMgr]"
     _supports_short = True  # 양방향 진입 지원
 
     def __init__(
@@ -66,7 +69,7 @@ class CfdTrendFollowingManager(BaseTrendManager):
     # ──────────────────────────────────────────
 
     async def _detect_existing_position(self, product_code: str) -> Optional[Position]:
-        """getpositions으로 기존 FX 포지션 감지."""
+        """get_positions으로 기존 포지션 감지."""
         try:
             if not hasattr(self._adapter, "get_positions"):
                 return None
@@ -79,7 +82,7 @@ class CfdTrendFollowingManager(BaseTrendManager):
             first = fx_positions[0]
             avg_price = sum(p.price * p.size for p in fx_positions) / total_size
             logger.info(
-                f"[CfdMgr] {product_code}: 기존 FX 포지션 감지 "
+                f"[MarginMgr] {product_code}: 기존 포지션 감지 "
                 f"(side={first.side}, size={total_size:.6f} BTC, avg_price=¥{avg_price:.0f})"
             )
             return Position(
@@ -88,7 +91,7 @@ class CfdTrendFollowingManager(BaseTrendManager):
                 extra={"side": first.side.lower()},
             )
         except Exception as e:
-            logger.warning(f"[CfdMgr] {product_code}: 포지션 복원 실패 — {e}")
+            logger.warning(f"[MarginMgr] {product_code}: 포지션 복원 실패 — {e}")
         return None
 
     async def _sync_position_state(self, product_code: str) -> None:
@@ -107,7 +110,7 @@ class CfdTrendFollowingManager(BaseTrendManager):
             drift_pct = abs(real_size - mem_size) / mem_size * 100
             if drift_pct > 1.0:
                 logger.warning(
-                    f"[CfdMgr] {product_code}: 포지션 괴리 감지 "
+                    f"[MarginMgr] {product_code}: 포지션 괴리 감지 "
                     f"(인메모리 {mem_size:.8f} vs 실포지션 {real_size:.8f}, "
                     f"차이 {drift_pct:.1f}%) → 인메모리 갱신"
                 )
@@ -121,14 +124,14 @@ class CfdTrendFollowingManager(BaseTrendManager):
                         extra=pos.extra,
                     )
         except Exception as e:
-            logger.debug(f"[CfdMgr] {product_code}: 포지션 동기화 실패 — {e}")
+            logger.debug(f"[MarginMgr] {product_code}: 포지션 동기화 실패 — {e}")
 
     # ──────────────────────────────────────────
     # keep_rate 체크
     # ──────────────────────────────────────────
 
     async def _check_keep_rate(self, product_code: str) -> Optional[float]:
-        """getcollateral로 keep_rate 확인. 위험 시 자동 청산."""
+        """get_collateral로 keep_rate 확인. 위험 시 자동 청산."""
         try:
             if not hasattr(self._adapter, "get_collateral"):
                 return None
@@ -139,14 +142,14 @@ class CfdTrendFollowingManager(BaseTrendManager):
 
             if keep_rate < critical and self._position.get(product_code) is not None:
                 logger.warning(
-                    f"[CfdMgr] {product_code}: keep_rate={keep_rate:.2f} < "
+                    f"[MarginMgr] {product_code}: keep_rate={keep_rate:.2f} < "
                     f"critical={critical} → 긴급 전량 청산"
                 )
                 await self._close_position(product_code, "risk_cut")
 
             return keep_rate
         except Exception as e:
-            logger.warning(f"[CfdMgr] {product_code}: keep_rate 조회 실패 — {e}")
+            logger.warning(f"[MarginMgr] {product_code}: keep_rate 조회 실패 — {e}")
             return None
 
     # ──────────────────────────────────────────
@@ -154,36 +157,11 @@ class CfdTrendFollowingManager(BaseTrendManager):
     # ──────────────────────────────────────────
 
     async def _on_candle_extra_checks(self, pair: str, params: Dict) -> bool:
-        """keep_rate + 보유 시간 + 주말 청산 + 스왑 추적 체크."""
+        """keep_rate + 보유 시간 제한 체크."""
         keep_rate = await self._check_keep_rate(pair)
         self._last_keep_rate[pair] = keep_rate
 
         pos = self._position.get(pair)
-
-        # ── 주말 자동 청산 (FX 전용) ───────────────────────
-        is_fx = self._adapter.exchange_name == "gmofx"
-        if is_fx and pos is not None and should_close_for_weekend():
-            mins = minutes_until_market_close()
-            logger.warning(
-                f"[CfdMgr] {pair}: 주말 마감 임박 (잔여 {mins}분) → 자동 청산"
-            )
-            await self._close_position(pair, "weekend_close")
-            return False
-
-        # ── FX 시장 휴장 시 진입 차단 ─────────────────────
-        if is_fx and not is_fx_market_open():
-            logger.debug(f"[CfdMgr] {pair}: FX 시장 휴장 — 사이클 스킵")
-            return False
-
-        # ── 스왑 포인트 로깅 (FX 전용) ────────────────────
-        if is_fx and pos is not None and hasattr(self._adapter, "get_positions"):
-            try:
-                fx_positions = await self._adapter.get_positions(pair)
-                total_swap = sum(p.swap_point_accumulate for p in fx_positions) if fx_positions else 0.0
-                if total_swap != 0:
-                    logger.info(f"[CfdMgr] {pair}: 누적 스왑: ¥{total_swap:.1f}")
-            except Exception:
-                pass  # 스왑 로깅 실패는 무시
 
         # ── 보유 시간 제한 ────────────────────────────────
         if pos is not None:
@@ -193,11 +171,11 @@ class CfdTrendFollowingManager(BaseTrendManager):
                 elapsed_hours = (datetime.now(timezone.utc) - opened_at).total_seconds() / 3600
                 if elapsed_hours >= max_hours:
                     logger.info(
-                        f"[CfdMgr] {pair}: 보유 시간 초과 "
+                        f"[MarginMgr] {pair}: 보유 시간 초과 "
                         f"{elapsed_hours:.1f}h ≥ {max_hours}h → 자동 청산"
                     )
                     await self._close_position(pair, "time_limit")
-                    return False  # 이번 사이클 스킵 (continue)
+                    return False
         return True
 
     def _check_exit_warning(self, pair, signal, realtime_price, ema, pos):
@@ -208,13 +186,13 @@ class CfdTrendFollowingManager(BaseTrendManager):
         if side == "buy" and realtime_price < ema:
             if signal != "exit_warning":
                 logger.info(
-                    f"[CfdMgr] {pair}: 롱 실시간가 ¥{realtime_price} < EMA ¥{ema:.4f} → 추세 이탈 감지"
+                    f"[MarginMgr] {pair}: 롱 실시간가 ¥{realtime_price} < EMA ¥{ema:.4f} → 추세 이탈 감지"
                 )
             return "exit_warning"
         elif side == "sell" and realtime_price > ema:
             if signal != "exit_warning":
                 logger.info(
-                    f"[CfdMgr] {pair}: 숏 실시간가 ¥{realtime_price} > EMA ¥{ema:.4f} → 추세 이탈 감지"
+                    f"[MarginMgr] {pair}: 숏 실시간가 ¥{realtime_price} > EMA ¥{ema:.4f} → 추세 이탈 감지"
                 )
             return "exit_warning"
         return signal
@@ -256,22 +234,14 @@ class CfdTrendFollowingManager(BaseTrendManager):
                 )
 
     async def _pre_entry_checks(self, pair: str, side: str, params: dict) -> bool:
-        """CFD 전용 진입 전 검사: FX 주말/시장 휴장 + keep_rate 증거금 여유."""
-        # FX 주말/시장 휴장 체크
-        is_fx = self._adapter.exchange_name == "gmofx"
-        if is_fx and (should_close_for_weekend() or not is_fx_market_open()):
-            logger.debug(f"[CfdMgr] {pair}: FX 시장 휴장/주말 임박 → 진입 차단")
-            return False
-
-        # keep_rate 증거금 비율 체크
+        """진입 전 검사: keep_rate 증거금 비율 체크."""
         keep_rate = self._last_keep_rate.get(pair)
         warn_threshold = float(params.get("keep_rate_warn", 1.5))
         if keep_rate is not None and keep_rate < warn_threshold:
             logger.info(
-                f"[CfdMgr] {pair}: keep_rate={keep_rate:.2f} < warn={warn_threshold} → 차단"
+                f"[MarginMgr] {pair}: keep_rate={keep_rate:.2f} < warn={warn_threshold} → 차단"
             )
             return False
-
         return True
 
     # ──────────────────────────────────────────
@@ -281,15 +251,15 @@ class CfdTrendFollowingManager(BaseTrendManager):
     async def _open_position(
         self, product_code: str, side: str, price: float, atr, params: Dict, *, signal_data: dict | None = None
     ) -> None:
-        """증거금 기반 CFD 포지션 진입."""
+        """증거금 기반 포지션 진입."""
         try:
             if not hasattr(self._adapter, "get_collateral"):
-                logger.error(f"[CfdMgr] {product_code}: 어댑터에 get_collateral 없음")
+                logger.error(f"[MarginMgr] {product_code}: 어댑터에 get_collateral 없음")
                 return
             collateral = await self._adapter.get_collateral()
             available_collateral = collateral.collateral - collateral.require_collateral
             if available_collateral <= 0:
-                logger.debug(f"[CfdMgr] {product_code}: 여유 증거금 없음, 진입 스킵")
+                logger.debug(f"[MarginMgr] {product_code}: 여유 증거금 없음, 진입 스킵")
                 return
 
             position_size_pct = float(params.get("position_size_pct", 10.0))
@@ -298,7 +268,7 @@ class CfdTrendFollowingManager(BaseTrendManager):
 
             if invest_jpy < min_jpy:
                 logger.info(
-                    f"[CfdMgr] {product_code}: 투입 JPY({invest_jpy:.0f}) < {min_jpy:.0f}, 스킵"
+                    f"[MarginMgr] {product_code}: 투입 JPY({invest_jpy:.0f}) < {min_jpy:.0f}, 스킵"
                 )
                 return
 
@@ -308,11 +278,11 @@ class CfdTrendFollowingManager(BaseTrendManager):
             effective_leverage = (coin_size * price) / collateral.collateral if collateral.collateral > 0 else 0
             if effective_leverage > max_leverage:
                 coin_size = round(collateral.collateral * max_leverage / price, 8)
-                logger.info(f"[CfdMgr] {product_code}: 레버리지 제한 → size={coin_size:.8f}")
+                logger.info(f"[MarginMgr] {product_code}: 레버리지 제한 → size={coin_size:.8f}")
 
             min_coin = float(params.get("min_coin_size", 0.001))
             if coin_size < min_coin:
-                logger.debug(f"[CfdMgr] {product_code}: 수량 부족 ({coin_size} < {min_coin})")
+                logger.debug(f"[MarginMgr] {product_code}: 수량 부족 ({coin_size} < {min_coin})")
                 return
 
             # 슬리피지 체크
@@ -323,11 +293,11 @@ class CfdTrendFollowingManager(BaseTrendManager):
                     slippage = (ticker.ask - price) / price * 100
                     if slippage > max_slippage_pct:
                         logger.warning(
-                            f"[CfdMgr] {product_code}: 슬리피지 초과 {slippage:.3f}%, 스킵"
+                            f"[MarginMgr] {product_code}: 슬리피지 초과 {slippage:.3f}%, 스킵"
                         )
                         return
             except Exception as e:
-                logger.warning(f"[CfdMgr] {product_code}: 시세 조회 실패 — {e}")
+                logger.warning(f"[MarginMgr] {product_code}: 시세 조회 실패 — {e}")
 
             order_type = OrderType.MARKET_BUY if side == "buy" else OrderType.MARKET_SELL
             order = await self._adapter.place_order(
@@ -358,12 +328,12 @@ class CfdTrendFollowingManager(BaseTrendManager):
             )
 
             logger.info(
-                f"[CfdMgr] {product_code}: {side} 진입 완료 "
+                f"[MarginMgr] {product_code}: {side} 진입 완료 "
                 f"order_id={order.order_id} price=¥{exec_price} size={exec_amount} "
                 f"stop_loss=¥{initial_sl}"
             )
         except Exception as e:
-            logger.error(f"[CfdMgr] {product_code}: 진입 오류 — {e}", exc_info=True)
+            logger.error(f"[MarginMgr] {product_code}: 진입 오류 — {e}", exc_info=True)
 
     # ──────────────────────────────────────────
     # 청산
@@ -382,7 +352,7 @@ class CfdTrendFollowingManager(BaseTrendManager):
 
             if close_size < min_size:
                 logger.warning(
-                    f"[CfdMgr] {product_code}: 포지션 수량 부족 ({close_size} < {min_size})"
+                    f"[MarginMgr] {product_code}: 포지션 수량 부족 ({close_size} < {min_size})"
                 )
                 prev_db_id = pos.db_record_id
                 self._position[product_code] = None
@@ -419,11 +389,11 @@ class CfdTrendFollowingManager(BaseTrendManager):
             )
 
             logger.info(
-                f"[CfdMgr] {product_code}: {side} 청산 완료 reason={reason} "
+                f"[MarginMgr] {product_code}: {side} 청산 완료 reason={reason} "
                 f"order_id={order.order_id} size={close_size}"
             )
         except Exception as e:
-            logger.error(f"[CfdMgr] {product_code}: 청산 오류 — {e}", exc_info=True)
+            logger.error(f"[MarginMgr] {product_code}: 청산 오류 — {e}", exc_info=True)
 
     async def _apply_stop_tightening(
         self, product_code: str, current_price: float, atr: float, params: dict
@@ -450,7 +420,7 @@ class CfdTrendFollowingManager(BaseTrendManager):
 
         pos.stop_tightened = True
         logger.info(
-            f"[CfdMgr] {product_code}: 스탑 타이트닝 ¥{current_sl} → ¥{new_sl} (x{tighten_mult})"
+            f"[MarginMgr] {product_code}: 스탑 타이트닝 ¥{current_sl} → ¥{new_sl} (x{tighten_mult})"
         )
 
     # ──────────────────────────────────────────
@@ -477,10 +447,10 @@ class CfdTrendFollowingManager(BaseTrendManager):
                 db.add(rec)
                 await db.commit()
                 await db.refresh(rec)
-                logger.debug(f"[CfdMgr] {product_code}: DB CFD 포지션 기록 id={rec.id}")
+                logger.debug(f"[MarginMgr] {product_code}: DB 포지션 기록 id={rec.id}")
                 return rec.id
         except Exception as e:
-            logger.error(f"[CfdMgr] {product_code}: DB 진입 기록 실패 — {e}", exc_info=True)
+            logger.error(f"[MarginMgr] {product_code}: DB 진입 기록 실패 — {e}", exc_info=True)
             return None
 
     async def _record_close(self, **kwargs) -> None:
@@ -522,112 +492,137 @@ class CfdTrendFollowingManager(BaseTrendManager):
                 rec.closed_at = datetime.now(timezone.utc)
                 await db.commit()
                 logger.debug(
-                    f"[CfdMgr] {product_code}: DB 청산 기록 id={db_record_id} "
+                    f"[MarginMgr] {product_code}: DB 청산 기록 id={db_record_id} "
                     f"pnl=¥{pnl_jpy} ({pnl_pct}%)"
                 )
         except Exception as e:
-            logger.error(f"[CfdMgr] {product_code}: DB 청산 기록 실패 — {e}", exc_info=True)
+            logger.error(f"[MarginMgr] {product_code}: DB 청산 기록 실패 — {e}", exc_info=True)
 
     # ──────────────────────────────────────────
-    # adjust_risk hook (IFD-OCO 주문 변경)
+    # adjust_risk hook (서브클래스 오버라이드 가능)
     # ──────────────────────────────────────────
 
     async def _on_adjust_risk_hook(
         self, pair: str, adjustments: dict, params: dict
     ) -> None:
-        """adjust_risk 실행 후 GMO FX IFD-OCO 주문 가격 변경.
+        """adjust_risk 실행 후 훅. 서브클래스에서 오버라이드 가능."""
+        # 기본 구현: no-op (서브클래스에서 IFD-OCO 변경 등 구현 가능)
+        pass
 
-        포지션의 extra["ifd_root_order_id"]가 있으면 changeOrder API로
-        SL/TP 주문 가격을 갱신한다.
+    # ──────────────────────────────────────────
+    # Limit Order 진입 (적극적 진입 최적화)
+    # ──────────────────────────────────────────
 
-        변경 순서:
-          1. SL(STOP) 주문 → 리스크 방어 우선
-          2. 1초 대기 (GMO FX POST 1회/초 제한)
-          3. TP(LIMIT) 주문
-
-        실패 시 WARNING 로그만 (이미 인메모리 파라미터는 갱신됨).
-        """
-        if not hasattr(self._adapter, "change_order"):
-            return
-        if not hasattr(self._adapter, "get_orders_by_root"):
-            return
-
-        pos = self._position.get(pair)
-        if pos is None:
-            return
-
-        root_order_id = pos.extra.get("ifd_root_order_id")
-        if not root_order_id:
-            logger.debug(f"[CfdMgr] {pair}: ifd_root_order_id 없음 — IFD-OCO 변경 스킵")
-            return
-
-        new_sl = adjustments.get("stop_loss_price")
-        new_tp = adjustments.get("take_profit_price")
-        if new_sl is None and new_tp is None:
-            return
-
+    async def _open_position_limit(
+        self,
+        pair: str,
+        price: float,
+        atr: Optional[float],
+        params: Dict,
+        *,
+        signal_data: dict | None = None,
+        is_preview: bool = False,
+    ) -> Optional[Any]:
+        """지정가(limit) 진입 주문 발주. 성공 시 PendingLimitOrder 반환, 실패 시 None."""
+        import time as _time
+        from core.exchange.types import PendingLimitOrder
         try:
-            # 현재 서브 주문 목록 조회
-            sub_orders = await self._adapter.get_orders_by_root(str(root_order_id))
+            collateral = await self._adapter.get_collateral()
+            jpy_available = collateral.collateral
+            position_size_pct = float(params.get("position_size_pct", 10.0))
+            invest_jpy = jpy_available * position_size_pct / 100
+            min_jpy = float(params.get("min_order_jpy", 500))
+
+            if invest_jpy < min_jpy:
+                logger.info(
+                    f"{self._log_prefix} {pair}: 투입 JPY({invest_jpy:.0f}) < {min_jpy:.0f}, limit 진입 스킵"
+                )
+                return None
+
+            offset_ratio = float(params.get("limit_offset_atr_ratio", 0.15))
+            if atr:
+                limit_price = round(price - atr * offset_ratio, 0)
+            else:
+                limit_price = round(price * 0.999, 0)
+
+            if limit_price <= 0:
+                logger.warning(f"{self._log_prefix} {pair}: limit_price={limit_price} 유효하지 않음")
+                return None
+
+            coin_amount = round(invest_jpy / limit_price, 8)
+
+            order = await self._adapter.place_order(
+                order_type=OrderType.BUY,
+                pair=pair,
+                amount=coin_amount,
+                price=limit_price,
+            )
+
+            logger.info(
+                f"{self._log_prefix} {pair}: limit order 발주 "
+                f"order_id={order.order_id} price=¥{limit_price:.0f} amount={coin_amount}"
+            )
+
+            return PendingLimitOrder(
+                order_id=order.order_id,
+                pair=pair,
+                limit_price=limit_price,
+                amount=coin_amount,
+                invest_jpy=invest_jpy,
+                placed_at=_time.time(),
+                signal_at_placement="entry_preview" if is_preview else "entry_ok",
+                params=dict(params),
+                atr=atr,
+                signal_data=signal_data or {},
+                is_preview=is_preview,
+            )
         except Exception as e:
-            logger.warning(f"[CfdMgr] {pair}: IFD-OCO 서브 주문 조회 실패 — {e}")
-            return
+            logger.error(f"{self._log_prefix} {pair}: limit 진입 주문 오류 — {e}", exc_info=True)
+            return None
 
-        # OPEN(1차 진입) 주문이 이미 체결됐는지 확인
-        # 1차 체결 후에도 CLOSE 주문(SL/TP)은 WAITING 상태로 존재
-        close_orders = [
-            o for o in sub_orders
-            if o.get("settleType") == "CLOSE"
-            and o.get("status") in ("WAITING", "ORDERED")
-        ]
-        if not close_orders:
-            logger.debug(f"[CfdMgr] {pair}: 활성 CLOSE 주문 없음 — IFD-OCO 변경 스킵")
-            return
+    async def _finalize_limit_entry(self, pair: str, order: Any, pending: Any) -> None:
+        """Limit order 체결 후 포지션 등록."""
+        from core.exchange.types import Position
+        try:
+            exec_price = order.price or pending.limit_price
+            exec_amount = order.amount
+            if exec_amount == 0 and exec_price > 0:
+                exec_amount = round(pending.invest_jpy / exec_price, 8)
 
-        # SL(STOP) 주문 먼저 변경
-        sl_order = next(
-            (o for o in close_orders if o.get("executionType") == "STOP"), None
-        )
-        if sl_order and new_sl is not None:
-            sl_root_id = sl_order.get("rootOrderId")
-            if sl_root_id:
-                new_sl_rounded = self._adapter._round_price(pair, float(new_sl))
-                try:
-                    ok = await self._adapter.change_order(int(sl_root_id), new_sl_rounded)
-                    if ok:
-                        logger.info(
-                            f"[CfdMgr] {pair}: IFD-OCO SL 변경 완료 "
-                            f"root={sl_root_id} → ¥{new_sl_rounded}"
-                        )
-                    else:
-                        logger.warning(
-                            f"[CfdMgr] {pair}: IFD-OCO SL 변경 실패 root={sl_root_id}"
-                        )
-                except Exception as e:
-                    logger.warning(f"[CfdMgr] {pair}: IFD-OCO SL 변경 오류 — {e}")
+            atr = pending.atr
+            params = pending.params
+            atr_mult = float(params.get("atr_multiplier_stop", 2.0))
+            initial_sl = round(exec_price - atr * atr_mult, 6) if atr else None
 
-        # 1초 대기 (GMO FX POST 1회/초 제한)
-        if sl_order and new_sl is not None and new_tp is not None:
-            await asyncio.sleep(1.0)
+            pos = Position(
+                pair=pair,
+                entry_price=exec_price,
+                entry_amount=exec_amount,
+                stop_loss_price=initial_sl,
+            )
+            if pending.is_preview:
+                pos.extra["preview_entry"] = True
+            self._position[pair] = pos
 
-        # TP(LIMIT) 주문 변경
-        tp_order = next(
-            (o for o in close_orders if o.get("executionType") == "LIMIT"), None
-        )
-        if tp_order and new_tp is not None:
-            tp_root_id = tp_order.get("rootOrderId")
-            if tp_root_id:
-                new_tp_rounded = self._adapter._round_price(pair, float(new_tp))
-                try:
-                    ok = await self._adapter.change_order(int(tp_root_id), new_tp_rounded)
-                    if ok:
-                        logger.info(
-                            f"[CfdMgr] {pair}: IFD-OCO TP 변경 완료 "
-                            f"root={tp_root_id} → ¥{new_tp_rounded}"
-                        )
-                    else:
-                        logger.warning(
-                            f"[CfdMgr] {pair}: IFD-OCO TP 변경 실패 root={tp_root_id}"
-                        )
-                except Exception as e:
-                    logger.warning(f"[CfdMgr] {pair}: IFD-OCO TP 변경 오류 — {e}")
+            pos.db_record_id = await self._record_open(
+                pair=pair,
+                order_id=order.order_id,
+                price=exec_price,
+                amount=exec_amount,
+                invest_jpy=pending.invest_jpy,
+                stop_loss_price=initial_sl,
+                strategy_id=params.get("strategy_id"),
+                signal_data=pending.signal_data,
+            )
+
+            logger.info(
+                f"{self._log_prefix} {pair}: limit 진입 확정 "
+                f"order_id={order.order_id} price=¥{exec_price} amount={exec_amount} "
+                f"stop_loss=¥{initial_sl} preview={pending.is_preview}"
+            )
+        except Exception as e:
+            logger.error(f"{self._log_prefix} {pair}: limit 진입 확정 오류 — {e}", exc_info=True)
+
+
+# 후방 호환 alias — 기존 import(CfdTrendFollowingManager)가 동작하도록 유지
+CfdTrendFollowingManager = MarginTrendManager

@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.dependencies import AppState, get_db, get_state
-from api.services.monitoring import generate_box_report, generate_trend_report, generate_cfd_report
+from api.services.monitoring import generate_trend_report, generate_cfd_report
 from api.services.monitoring_status import generate_trend_status
 from core.monitoring.health import _last_report_time
 
@@ -163,19 +163,10 @@ async def _dispatch_report(
             candle_model=state.models.candle, db=db,
             test_alert_level=test_alert_level, reset_cooldown=reset_cooldown,
         ),
-        "box_mean_reversion": lambda: generate_box_report(
-            pair=pair, prefix=state.prefix, pair_column=state.pair_column,
-            strategy=strategy, adapter=state.adapter,
-            health_checker=state.health_checker,
-            box_model=state.models.box,
-            box_position_model=state.models.box_position,
-            candle_model=state.models.candle, db=db,
-            test_alert_level=test_alert_level, reset_cooldown=reset_cooldown,
-        ),
         "cfd_trend_following": lambda: generate_cfd_report(
             pair=pair, prefix=state.prefix, pair_column=state.pair_column,
             strategy=strategy, adapter=state.adapter,
-            cfd_manager=state.cfd_manager,
+            cfd_manager=state.trend_manager,
             candle_model=state.models.candle, db=db,
             test_alert_level=test_alert_level, reset_cooldown=reset_cooldown,
         ),

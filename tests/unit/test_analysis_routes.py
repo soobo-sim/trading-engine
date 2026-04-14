@@ -29,8 +29,7 @@ from adapters.database.session import Base
 from api.dependencies import AppState, ModelRegistry
 from api.routes import analysis, system
 from core.monitoring.health import HealthChecker
-from core.strategy.box_mean_reversion import BoxMeanReversionManager
-from core.strategy.trend_following import TrendFollowingManager
+from core.strategy.gmo_coin_trend import GmoCoinTrendManager
 from core.task.supervisor import TaskSupervisor
 from tests.fake_exchange import FakeExchangeAdapter
 
@@ -85,13 +84,9 @@ async def setup():
     supervisor = TaskSupervisor()
     models = _create_models()
 
-    trend_mgr = TrendFollowingManager(
+    trend_mgr = GmoCoinTrendManager(
         adapter=adapter, supervisor=supervisor, session_factory=factory,
-        candle_model=AnlCandle, trend_position_model=AnlTrendPosition, pair_column="pair",
-    )
-    box_mgr = BoxMeanReversionManager(
-        adapter=adapter, supervisor=supervisor, session_factory=factory,
-        candle_model=AnlCandle, box_model=AnlBox, box_position_model=AnlBoxPosition, pair_column="pair",
+        candle_model=AnlCandle, cfd_position_model=AnlTrendPosition, pair_column="pair",
     )
     health = HealthChecker(
         adapter=adapter, supervisor=supervisor, session_factory=factory,
@@ -100,7 +95,7 @@ async def setup():
     )
     state = AppState(
         adapter=adapter, supervisor=supervisor, session_factory=factory,
-        trend_manager=trend_mgr, box_manager=box_mgr, health_checker=health,
+        trend_manager=trend_mgr, health_checker=health,
         models=models, prefix="anl", pair_column="pair",
     )
 

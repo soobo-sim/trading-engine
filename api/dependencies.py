@@ -14,10 +14,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from core.exchange.base import ExchangeAdapter
 from core.monitoring.health import HealthChecker
-from core.strategy.box_mean_reversion import BoxMeanReversionManager
-from core.strategy.cfd_trend_following import CfdTrendFollowingManager
+from core.strategy.cfd_trend_following import MarginTrendManager
+from core.strategy.gmo_coin_trend import GmoCoinTrendManager
 from core.strategy.registry import StrategyRegistry
-from core.strategy.trend_following import TrendFollowingManager
 from core.task.supervisor import TaskSupervisor
 
 
@@ -45,24 +44,16 @@ class AppState:
     adapter: ExchangeAdapter
     supervisor: TaskSupervisor
     session_factory: async_sessionmaker[AsyncSession]
-    trend_manager: TrendFollowingManager
-    box_manager: BoxMeanReversionManager
+    trend_manager: GmoCoinTrendManager
     health_checker: HealthChecker
     models: ModelRegistry
-    prefix: str           # "ck" or "bf"
-    pair_column: str       # "pair" or "product_code"
-    cfd_manager: CfdTrendFollowingManager | None = None  # BF CFD 전용
+    prefix: str = "gmoc"
+    pair_column: str = "pair"
     strategy_registry: StrategyRegistry | None = None
 
     def normalize_pair(self, pair: str) -> str:
-        """
-        거래소별 pair 대소문자 정규화.
-        GMO FX: DB가 소문자로 저장 → lower() 반환
-        BF: 대문자 유지 (product_code는 대문자)
-        """
-        if self.pair_column == "pair":   # GMO FX
-            return pair.lower()
-        return pair.upper()              # BF
+        """GMO Coin: 소문자 pair 반환."""
+        return pair.lower()
 
 
 def get_state(request: Request) -> AppState:

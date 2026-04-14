@@ -19,9 +19,9 @@ async def get_cfd_status(
     state: AppState = Depends(get_state),
 ):
     """인메모리 포지션 + BitFlyer 증거금/keep_rate 반환."""
-    cfd = state.cfd_manager
+    cfd = state.trend_manager
     if cfd is None:
-        raise HTTPException(400, detail={"error": "CFD 매니저 미등록 (BF 전용)"})
+        raise HTTPException(400, detail={"error": "trend_manager 미등록"})
 
     position_obj = cfd.get_position(product_code)
     running = cfd.is_running(product_code)

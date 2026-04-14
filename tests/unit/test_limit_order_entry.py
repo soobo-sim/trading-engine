@@ -21,7 +21,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from adapters.database.models import create_candle_model, create_strategy_model, create_trend_position_model
+from adapters.database.models import create_candle_model, create_cfd_position_model, create_strategy_model
 from adapters.database.session import Base
 from core.exchange.types import (
     Order,
@@ -31,7 +31,7 @@ from core.exchange.types import (
     PendingLimitOrder,
     Position,
 )
-from core.strategy.trend_following import TrendFollowingManager
+from core.strategy.gmo_coin_trend import GmoCoinTrendManager
 from core.task.supervisor import TaskSupervisor
 from tests.fake_exchange import FakeExchangeAdapter
 
@@ -39,7 +39,7 @@ from tests.fake_exchange import FakeExchangeAdapter
 
 TstStrategy = create_strategy_model("tlmt")
 TstCandle = create_candle_model("tlmt", pair_column="pair")
-TstTrendPosition = create_trend_position_model("tlmt", order_id_length=40)
+TstTrendPosition = create_cfd_position_model("tlmt", pair_column="pair", order_id_length=40)
 
 
 # ── Fixtures ──────────────────────────────────────────────────
@@ -80,12 +80,12 @@ async def fake_adapter():
 
 @pytest_asyncio.fixture
 async def manager(fake_adapter, supervisor, db_session_factory):
-    mgr = TrendFollowingManager(
+    mgr = GmoCoinTrendManager(
         adapter=fake_adapter,
         supervisor=supervisor,
         session_factory=db_session_factory,
         candle_model=TstCandle,
-        trend_position_model=TstTrendPosition,
+        cfd_position_model=TstTrendPosition,
         pair_column="pair",
     )
     yield mgr

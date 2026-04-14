@@ -26,27 +26,6 @@ from core.data.dto import Decision, ExecutionResult, SignalSnapshot
 # 헬퍼
 # ──────────────────────────────────────────────────────────────
 
-def _make_trend_manager():
-    """TrendFollowingManager 최소 인스턴스."""
-    from core.strategy.plugins.trend_following.manager import TrendFollowingManager
-
-    adapter = MagicMock()
-    adapter.exchange_name = "gmo_coin"
-    adapter.is_margin_trading = True
-
-    supervisor = MagicMock()
-    supervisor.stop = AsyncMock()
-    supervisor.is_running = MagicMock(return_value=False)
-
-    return TrendFollowingManager(
-        adapter=adapter,
-        supervisor=supervisor,
-        session_factory=MagicMock(),
-        candle_model=MagicMock(),
-        trend_position_model=MagicMock(),
-    )
-
-
 def _make_cfd_manager():
     """CfdTrendFollowingManager 최소 인스턴스."""
     from core.strategy.plugins.cfd_trend_following.manager import CfdTrendFollowingManager
@@ -131,57 +110,12 @@ def test_cfd_manager_supports_short_true():
 # ──────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_trend_manager_blocks_entry_short(caplog):
-    """SG-03: TrendFollowingManager._handle_execution_result(entry_short)
-    → WARNING 로그 + _on_entry_signal 미호출 + False 반환."""
-    mgr = _make_trend_manager()
-    result = _make_execution_result("entry_short")
-    snapshot = _make_snapshot("entry_sell")
-    signal_data: dict = {}
-    params: dict = {}
-
-    with patch.object(mgr, "_on_entry_signal", new_callable=AsyncMock) as mock_entry:
-        with caplog.at_level(logging.WARNING, logger="core.strategy.base_trend"):
-            ret = await mgr._handle_execution_result(
-                "BTC_JPY", result, snapshot, signal_data, params
-            )
-
-    # 차단: False 반환, _on_entry_signal 미호출
-    assert ret is False
-    mock_entry.assert_not_called()
-
-    # WARNING 로그 확인
-    warn_msgs = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert any("entry_short 차단" in r.message for r in warn_msgs), (
-        f"WARNING 로그 없음. 기록된 records: {[r.message for r in caplog.records]}"
-    )
-
 
 # ──────────────────────────────────────────────────────────────
 # SG-04: 롱전용 매니저 entry_long → 정상 호출
 # ──────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_trend_manager_allows_entry_long():
-    """SG-04: TrendFollowingManager._handle_execution_result(entry_long)
-    → _on_entry_signal("entry_ok") 정상 호출."""
-    mgr = _make_trend_manager()
-    result = _make_execution_result("entry_long")
-    snapshot = _make_snapshot("entry_ok")
-    signal_data: dict = {}
-    params: dict = {}
-
-    with patch.object(mgr, "_on_entry_signal", new_callable=AsyncMock) as mock_entry:
-        ret = await mgr._handle_execution_result(
-            "BTC_JPY", result, snapshot, signal_data, params
-        )
-
-    # 차단 없음: _on_entry_signal 호출됨
-    mock_entry.assert_called_once()
-    call_args = mock_entry.call_args
-    # 두 번째 인자 = signal
-    assert call_args.args[1] == "entry_ok"
-
 
 # ──────────────────────────────────────────────────────────────
 # SG-05: CFD 매니저 entry_short → 정상 호출
@@ -213,58 +147,17 @@ async def test_cfd_manager_allows_entry_short():
 # SG-06: 롱전용 인스턴스도 _supports_short = False
 # ──────────────────────────────────────────────────────────────
 
-def test_trend_manager_instance_supports_short_false():
-    """SG-06: TrendFollowingManager 인스턴스도 _supports_short == False."""
-    mgr = _make_trend_manager()
-    assert mgr._supports_short is False
-
-
 # ──────────────────────────────────────────────────────────────
 # SG-07: WARNING 메시지에 가이던스 포함
 # ──────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_trend_manager_block_warning_contains_guidance(caplog):
-    """SG-07: entry_short 차단 WARNING에 'cfd_trend_following' 가이던스 포함."""
-    mgr = _make_trend_manager()
-    result = _make_execution_result("entry_short")
-    snapshot = _make_snapshot("entry_sell")
-
-    with patch.object(mgr, "_on_entry_signal", new_callable=AsyncMock):
-        with caplog.at_level(logging.WARNING, logger="core.strategy.base_trend"):
-            await mgr._handle_execution_result("BTC_JPY", result, snapshot, {}, {})
-
-    warn_msgs = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert any("cfd_trend_following" in r.message for r in warn_msgs)
-
 
 # ──────────────────────────────────────────────────────────────
 # SG-08: 롱전용 매니저 entry_short + is_preview=True → 차단
 # ──────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_trend_manager_blocks_entry_short_preview(caplog):
-    """SG-08: is_preview=True여도 롱전용 매니저는 entry_short 차단."""
-    mgr = _make_trend_manager()
-    result = _make_execution_result("entry_short")
-    # is_preview=True 스냅샷
-    snapshot = SignalSnapshot(
-        pair="BTC_JPY",
-        exchange="gmo_coin",
-        timestamp=datetime(2026, 4, 13, 0, 20, 0, tzinfo=timezone.utc),
-        signal="entry_sell",
-        current_price=11_399_360.0,
-        exit_signal={"action": "hold"},
-        is_preview=True,
-    )
-
-    with patch.object(mgr, "_on_entry_signal", new_callable=AsyncMock) as mock_entry:
-        with caplog.at_level(logging.WARNING, logger="core.strategy.base_trend"):
-            ret = await mgr._handle_execution_result("BTC_JPY", result, snapshot, {}, {})
-
-    assert ret is False
-    mock_entry.assert_not_called()
-
 
 # ──────────────────────────────────────────────────────────────
 # SG-09: CFD 매니저 entry_short + is_preview=True → "entry_preview" 전달
@@ -308,95 +201,13 @@ def test_gmo_coin_trend_manager_supports_short_true():
 # D35-01~05
 # ══════════════════════════════════════════════════════════════
 
-def test_d35_01_gmofx_creates_cfd_manager(monkeypatch):
-    """D35-01: EXCHANGE=gmofx → trend_manager가 CfdTrendFollowingManager 인스턴스."""
-    import os
-    from unittest.mock import MagicMock, AsyncMock
-
-    # main.py의 매니저 생성 로직만 재현
-    monkeypatch.setenv("EXCHANGE", "gmofx")
-    exchange = os.environ.get("EXCHANGE", "bitflyer").lower()
-
-    from core.strategy.plugins.cfd_trend_following.manager import CfdTrendFollowingManager
-    from core.strategy.plugins.gmo_coin_trend.manager import GmoCoinTrendManager
-    from core.strategy.plugins.trend_following.manager import TrendFollowingManager
-
-    adapter = MagicMock()
-    supervisor = MagicMock()
-    supervisor.stop = AsyncMock()
-    supervisor.is_running = MagicMock(return_value=False)
-    session_factory = MagicMock()
-    candle_model = MagicMock()
-    cfd_position_model = MagicMock()
-    trend_position_model = MagicMock()
-    snapshot_collector = None
-
-    if exchange == "gmo_coin":
-        trend_manager = GmoCoinTrendManager(
-            adapter=adapter, supervisor=supervisor, session_factory=session_factory,
-            candle_model=candle_model, cfd_position_model=cfd_position_model,
-            snapshot_collector=snapshot_collector,
-        )
-    elif exchange == "gmofx":
-        trend_manager = CfdTrendFollowingManager(
-            adapter=adapter, supervisor=supervisor, session_factory=session_factory,
-            candle_model=candle_model, cfd_position_model=cfd_position_model,
-            snapshot_collector=snapshot_collector,
-        )
-    else:
-        trend_manager = TrendFollowingManager(
-            adapter=adapter, supervisor=supervisor, session_factory=session_factory,
-            candle_model=candle_model, trend_position_model=trend_position_model,
-            snapshot_collector=snapshot_collector,
-        )
-
-    assert isinstance(trend_manager, CfdTrendFollowingManager)
-    assert not isinstance(trend_manager, GmoCoinTrendManager)
-
-
 def test_d35_02_gmofx_manager_supports_short():
     """D35-02: GMO FX용 CfdTrendFollowingManager._supports_short == True."""
     from core.strategy.plugins.cfd_trend_following.manager import CfdTrendFollowingManager
     assert CfdTrendFollowingManager._supports_short is True
 
-
-def test_d35_03_bitflyer_still_uses_trend_following():
-    """D35-03: EXCHANGE=bitflyer → TrendFollowingManager (회귀 없음)."""
-    from core.strategy.plugins.trend_following.manager import TrendFollowingManager
-    from core.strategy.plugins.cfd_trend_following.manager import CfdTrendFollowingManager
-    from core.strategy.plugins.gmo_coin_trend.manager import GmoCoinTrendManager
-    from unittest.mock import MagicMock, AsyncMock
-
-    adapter = MagicMock()
-    supervisor = MagicMock()
-    supervisor.stop = AsyncMock()
-    supervisor.is_running = MagicMock(return_value=False)
-    session_factory = MagicMock()
-    candle_model = MagicMock()
-    trend_position_model = MagicMock()
-
-    exchange = "bitflyer"
-    if exchange == "gmo_coin":
-        trend_manager = GmoCoinTrendManager(adapter=adapter, supervisor=supervisor,
-            session_factory=session_factory, candle_model=candle_model,
-            cfd_position_model=MagicMock())
-    elif exchange == "gmofx":
-        trend_manager = CfdTrendFollowingManager(adapter=adapter, supervisor=supervisor,
-            session_factory=session_factory, candle_model=candle_model,
-            cfd_position_model=MagicMock())
-    else:
-        trend_manager = TrendFollowingManager(adapter=adapter, supervisor=supervisor,
-            session_factory=session_factory, candle_model=candle_model,
-            trend_position_model=trend_position_model)
-
-    assert isinstance(trend_manager, TrendFollowingManager)
-    assert not isinstance(trend_manager, CfdTrendFollowingManager)
-
-
 def test_d35_04_gmo_coin_still_uses_gmo_coin_manager():
     """D35-04: EXCHANGE=gmo_coin → GmoCoinTrendManager (회귀 없음)."""
-    from core.strategy.plugins.trend_following.manager import TrendFollowingManager
-    from core.strategy.plugins.cfd_trend_following.manager import CfdTrendFollowingManager
     from core.strategy.plugins.gmo_coin_trend.manager import GmoCoinTrendManager
     from unittest.mock import MagicMock, AsyncMock
 
@@ -405,19 +216,11 @@ def test_d35_04_gmo_coin_still_uses_gmo_coin_manager():
     supervisor.stop = AsyncMock()
     supervisor.is_running = MagicMock(return_value=False)
 
-    exchange = "gmo_coin"
-    if exchange == "gmo_coin":
-        trend_manager = GmoCoinTrendManager(adapter=adapter, supervisor=supervisor,
-            session_factory=MagicMock(), candle_model=MagicMock(),
-            cfd_position_model=MagicMock())
-    elif exchange == "gmofx":
-        trend_manager = CfdTrendFollowingManager(adapter=adapter, supervisor=supervisor,
-            session_factory=MagicMock(), candle_model=MagicMock(),
-            cfd_position_model=MagicMock())
-    else:
-        trend_manager = TrendFollowingManager(adapter=adapter, supervisor=supervisor,
-            session_factory=MagicMock(), candle_model=MagicMock(),
-            trend_position_model=MagicMock())
+    trend_manager = GmoCoinTrendManager(
+        adapter=adapter, supervisor=supervisor,
+        session_factory=MagicMock(), candle_model=MagicMock(),
+        cfd_position_model=MagicMock(),
+    )
 
     assert isinstance(trend_manager, GmoCoinTrendManager)
 
@@ -437,7 +240,7 @@ def test_d35_05_gmofx_log_prefix():
         session_factory=MagicMock(), candle_model=MagicMock(),
         cfd_position_model=MagicMock(),
     )
-    assert mgr._log_prefix == "[CfdMgr]"
+    assert mgr._log_prefix == "[MarginMgr]"
     assert mgr._log_prefix != "[TrendMgr]"
 
 
@@ -447,40 +250,6 @@ def test_d35_05_gmofx_log_prefix():
 # ══════════════════════════════════════════════════════════════
 
 @pytest.mark.asyncio
-async def test_d34_01_trend_manager_open_position_side_buy():
-    """D34-01: TrendFollowingManager._open_position에 side='buy' 전달 → MARKET_BUY."""
-    from core.strategy.plugins.trend_following.manager import TrendFollowingManager
-    from core.exchange.types import OrderType
-    from unittest.mock import MagicMock, AsyncMock, patch
-    from core.exchange.types import Order, OrderStatus, OrderSide
-
-    adapter = MagicMock()
-    adapter.exchange_name = "bitflyer"
-    adapter.is_margin_trading = False
-    fake_order = Order(order_id="test-001", order_type=OrderType.MARKET_BUY,
-                       pair="xrp_jpy", amount=100.0, price=100.0,
-                       side=OrderSide.BUY, status=OrderStatus.COMPLETED)
-    adapter.place_order = AsyncMock(return_value=fake_order)
-    adapter.get_balance = AsyncMock(return_value=MagicMock(get_available=MagicMock(return_value=10000.0)))
-    adapter.get_ticker = AsyncMock(return_value=MagicMock(ask=100.0, last=100.0))
-
-    supervisor = MagicMock()
-    supervisor.stop = AsyncMock()
-    supervisor.is_running = MagicMock(return_value=False)
-
-    mgr = TrendFollowingManager(
-        adapter=adapter, supervisor=supervisor,
-        session_factory=MagicMock(), candle_model=MagicMock(),
-        trend_position_model=MagicMock(),
-    )
-    mgr._record_open = AsyncMock(return_value=1)
-
-    await mgr._open_position("xrp_jpy", "buy", 100.0, 2.0, {"position_size_pct": 10.0, "min_order_jpy": 500, "atr_multiplier_stop": 2.0, "max_slippage_pct": 1.0})
-
-    adapter.place_order.assert_called_once()
-    call_kwargs = adapter.place_order.call_args
-    assert call_kwargs.kwargs.get("order_type") == OrderType.MARKET_BUY or call_kwargs.args[0] == OrderType.MARKET_BUY
-
 
 @pytest.mark.asyncio
 async def test_d34_02_cfd_pre_entry_checks_ok_calls_open_position():
@@ -547,37 +316,6 @@ async def test_d34_03_cfd_pre_entry_checks_ok_calls_open_position_short():
 
 
 @pytest.mark.asyncio
-async def test_d34_04_cfd_pre_entry_checks_blocks_on_weekend():
-    """D34-04: CdfTF + should_close_for_weekend()=True → _open_position 미호출."""
-    from core.strategy.plugins.cfd_trend_following.manager import CfdTrendFollowingManager
-    from unittest.mock import MagicMock, AsyncMock, patch
-
-    adapter = MagicMock()
-    adapter.exchange_name = "gmofx"
-    adapter.is_margin_trading = True
-
-    supervisor = MagicMock()
-    supervisor.stop = AsyncMock()
-    supervisor.is_running = MagicMock(return_value=False)
-
-    mgr = CfdTrendFollowingManager(
-        adapter=adapter, supervisor=supervisor,
-        session_factory=MagicMock(), candle_model=MagicMock(),
-        cfd_position_model=MagicMock(),
-    )
-
-    open_calls = []
-    async def fake_open(pair, side, price, atr, params, *, signal_data=None):
-        open_calls.append(side)
-
-    with patch.object(mgr, "_open_position", side_effect=fake_open):
-        with patch.object(mgr, "_try_paper_entry", new_callable=AsyncMock, return_value=False):
-            with patch("core.strategy.plugins.cfd_trend_following.manager.should_close_for_weekend", return_value=True):
-                with patch("core.strategy.plugins.cfd_trend_following.manager.is_fx_market_open", return_value=True):
-                    await mgr._on_entry_signal("usd_jpy", "entry_ok", 150.0, 0.5, {}, {})
-
-    assert len(open_calls) == 0
-
 
 @pytest.mark.asyncio
 async def test_d34_05_cfd_pre_entry_checks_blocks_on_low_keep_rate():
@@ -614,22 +352,20 @@ async def test_d34_05_cfd_pre_entry_checks_blocks_on_low_keep_rate():
 @pytest.mark.asyncio
 async def test_d34_06_pre_entry_checks_default_returns_true():
     """D34-06: BaseTrendManager._pre_entry_checks 기본 구현 → True 반환."""
-    from core.strategy.base_trend import BaseTrendManager
+    from core.strategy.plugins.cfd_trend_following.manager import MarginTrendManager
     from unittest.mock import MagicMock, AsyncMock
 
-    # Abstract이므로 TrendFollowingManager로 테스트
-    from core.strategy.plugins.trend_following.manager import TrendFollowingManager
     adapter = MagicMock()
     supervisor = MagicMock()
     supervisor.stop = AsyncMock()
     supervisor.is_running = MagicMock(return_value=False)
 
-    mgr = TrendFollowingManager(
+    mgr = MarginTrendManager(
         adapter=adapter, supervisor=supervisor,
         session_factory=MagicMock(), candle_model=MagicMock(),
-        trend_position_model=MagicMock(),
+        cfd_position_model=MagicMock(),
     )
-    result = await mgr._pre_entry_checks("xrp_jpy", "buy", {})
+    result = await mgr._pre_entry_checks("usd_jpy", "buy", {})
     assert result is True
 
 
@@ -762,31 +498,3 @@ async def test_e2_gmo_coin_pre_entry_no_fx_weekend_check():
     # keep_rate 없음 (None) → 차단 안 됨
     result = await mgr._pre_entry_checks("btc_jpy", "buy", {})
     assert result is True
-
-
-@pytest.mark.asyncio
-async def test_e3_cfd_pre_entry_checks_fx_market_closed():
-    """E3: CdfTF + exchange_name='gmofx' + is_fx_market_open()=False
-    → 진입 차단."""
-    from core.strategy.plugins.cfd_trend_following.manager import CfdTrendFollowingManager
-    from unittest.mock import MagicMock, AsyncMock, patch
-
-    adapter = MagicMock()
-    adapter.exchange_name = "gmofx"
-    adapter.is_margin_trading = True
-
-    supervisor = MagicMock()
-    supervisor.stop = AsyncMock()
-    supervisor.is_running = MagicMock(return_value=False)
-
-    mgr = CfdTrendFollowingManager(
-        adapter=adapter, supervisor=supervisor,
-        session_factory=MagicMock(), candle_model=MagicMock(),
-        cfd_position_model=MagicMock(),
-    )
-
-    with patch("core.strategy.plugins.cfd_trend_following.manager.should_close_for_weekend", return_value=False):
-        with patch("core.strategy.plugins.cfd_trend_following.manager.is_fx_market_open", return_value=False):
-            result = await mgr._pre_entry_checks("usd_jpy", "buy", {})
-
-    assert result is False

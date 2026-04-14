@@ -31,8 +31,7 @@ from adapters.database.session import Base
 from api.dependencies import AppState, ModelRegistry
 from api.routes import system, trading, account, strategies, boxes, candles, techniques
 from core.monitoring.health import HealthChecker, HealthReport
-from core.strategy.box_mean_reversion import BoxMeanReversionManager
-from core.strategy.trend_following import TrendFollowingManager
+from core.strategy.gmo_coin_trend import GmoCoinTrendManager
 from core.task.supervisor import TaskSupervisor
 from tests.fake_exchange import FakeExchangeAdapter
 
@@ -102,21 +101,12 @@ async def app_state(db_session, adapter):
     supervisor = TaskSupervisor()
     models = _create_model_registry()
 
-    trend_manager = TrendFollowingManager(
+    trend_manager = GmoCoinTrendManager(
         adapter=adapter,
         supervisor=supervisor,
         session_factory=factory,
         candle_model=HlthCandle,
-        trend_position_model=HlthTrendPosition,
-        pair_column="pair",
-    )
-    box_manager = BoxMeanReversionManager(
-        adapter=adapter,
-        supervisor=supervisor,
-        session_factory=factory,
-        candle_model=HlthCandle,
-        box_model=HlthBox,
-        box_position_model=HlthBoxPosition,
+        cfd_position_model=HlthTrendPosition,
         pair_column="pair",
     )
     health_checker = HealthChecker(
@@ -133,7 +123,6 @@ async def app_state(db_session, adapter):
         supervisor=supervisor,
         session_factory=factory,
         trend_manager=trend_manager,
-        box_manager=box_manager,
         health_checker=health_checker,
         models=models,
         prefix="hlth",
@@ -617,24 +606,23 @@ class TestTechniquesRoute:
 
 class TestMainConfig:
 
-    def test_exchange_config_bitflyer(self):
+    def test_exchange_config_gmo_coin(self):
         from main import _EXCHANGE_CONFIG
-        cfg = _EXCHANGE_CONFIG["bitflyer"]
-        assert cfg["prefix"] == "bf"
-        assert cfg["pair_column"] == "product_code"
-        assert cfg["order_id_length"] == 40
+        cfg = _EXCHANGE_CONFIG["gmo_coin"]
+        assert cfg["prefix"] == "gmoc"
+        assert cfg["pair_column"] == "pair"
 
-    def test_create_models_bitflyer(self):
-        """ck/bf prefix는 test_models.py와 충돌하므로 tmc/tmb 사용."""
+    def test_create_models_gmc(self):
+        """prefix=tmc で _create_models 呼び出しテスト."""
         from main import _create_models
-        models = _create_models("tmb", "product_code", 40)
-        assert models.strategy.__tablename__ == "tmb_strategies"
-        assert models.candle.__tablename__ == "tmb_candles"
-        assert models.box.__tablename__ == "tmb_boxes"
+        models = _create_models("tmc", "pair", None)
+        assert models.strategy.__tablename__ == "tmc_strategies"
+        assert models.candle.__tablename__ == "tmc_candles"
 
-    def test_create_adapter_bitflyer(self, monkeypatch):
-        monkeypatch.setenv("BITFLYER_API_KEY", "test_key")
-        monkeypatch.setenv("BITFLYER_API_SECRET", "test_secret")
+    def test_create_adapter_gmo_coin(self, monkeypatch):
+        monkeypatch.setenv("GMO_COIN_API_KEY", "test_key")
+        monkeypatch.setenv("GMO_COIN_API_SECRET", "test_secret")
+        monkeypatch.setenv("EXCHANGE", "gmo_coin")
         from main import _create_adapter
-        adapter = _create_adapter("bitflyer")
-        assert adapter.exchange_name == "bitflyer"
+        adapter = _create_adapter("gmo_coin")
+        assert adapter.exchange_name == "gmo_coin"

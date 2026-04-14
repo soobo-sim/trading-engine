@@ -115,10 +115,8 @@ from core.notifications.switch_telegram import send_switch_recommendation_telegr
 from core.monitoring.health import HealthChecker
 from core.analysis.event_filter import create_event_filter
 from core.analysis.intermarket import create_intermarket_client
-from core.strategy.box_mean_reversion import BoxMeanReversionManager
-from core.strategy.cfd_trend_following import CfdTrendFollowingManager
+from core.strategy.cfd_trend_following import MarginTrendManager
 from core.strategy.gmo_coin_trend import GmoCoinTrendManager
-from core.strategy.trend_following import TrendFollowingManager
 from core.strategy.registry import StrategyRegistry
 from core.strategy.snapshot_collector import SnapshotCollector
 from core.strategy.switch_recommender import SwitchRecommender
@@ -130,24 +128,6 @@ logger = logging.getLogger(__name__)
 # ── 거래소별 설정 ────────────────────────────────────────────
 
 _EXCHANGE_CONFIG = {
-    "bitflyer": {
-        "prefix": "bf",
-        "pair_column": "product_code",
-        "order_id_length": 40,
-        "env_api_key": "BITFLYER_API_KEY",
-        "env_api_secret": "BITFLYER_API_SECRET",
-        "env_base_url": "BITFLYER_BASE_URL",
-        "default_base_url": "https://api.bitflyer.com",
-    },
-    "gmofx": {
-        "prefix": "gmo",
-        "pair_column": "pair",
-        "order_id_length": 40,
-        "env_api_key": "GMOFX_API_KEY",
-        "env_api_secret": "GMOFX_API_SECRET",
-        "env_base_url": "GMOFX_BASE_URL",
-        "default_base_url": "https://forex-api.coin.z.com",
-    },
     "gmo_coin": {
         "prefix": "gmoc",
         "pair_column": "pair",
@@ -161,21 +141,13 @@ _EXCHANGE_CONFIG = {
 
 
 def _create_adapter(exchange: str):
-    """EXCHANGE에 따라 올바른 어댑터 인스턴스 생성."""
+    """GmoCoinAdapter 생성."""
     cfg = _EXCHANGE_CONFIG[exchange]
     api_key = os.environ.get(cfg["env_api_key"], "")
     api_secret = os.environ.get(cfg["env_api_secret"], "")
     base_url = os.environ.get(cfg["env_base_url"], cfg["default_base_url"])
-
-    if exchange == "gmofx":
-        from adapters.gmo_fx.client import GmoFxAdapter
-        return GmoFxAdapter(api_key=api_key, api_secret=api_secret, base_url=base_url)
-    elif exchange == "gmo_coin":
-        from adapters.gmo_coin.client import GmoCoinAdapter
-        return GmoCoinAdapter(api_key=api_key, api_secret=api_secret, base_url=base_url)
-    else:
-        from adapters.bitflyer.client import BitFlyerAdapter
-        return BitFlyerAdapter(api_key=api_key, api_secret=api_secret, base_url=base_url)
+    from adapters.gmo_coin.client import GmoCoinAdapter
+    return GmoCoinAdapter(api_key=api_key, api_secret=api_secret, base_url=base_url)
 
 
 def _create_models(prefix: str, pair_column: str, order_id_length: int) -> ModelRegistry:
@@ -253,49 +225,7 @@ async def lifespan(app: FastAPI):
         pair_column=pair_column,
         switch_recommender=switch_recommender,
     )
-    if exchange == "gmo_coin":
-        trend_manager = GmoCoinTrendManager(
-            adapter=adapter,
-            supervisor=supervisor,
-            session_factory=session_factory,
-            candle_model=models.candle,
-            cfd_position_model=models.cfd_position,
-            pair_column=pair_column,
-            snapshot_collector=snapshot_collector,
-        )
-    elif exchange == "gmofx":
-        trend_manager = CfdTrendFollowingManager(
-            adapter=adapter,
-            supervisor=supervisor,
-            session_factory=session_factory,
-            candle_model=models.candle,
-            cfd_position_model=models.cfd_position,
-            pair_column=pair_column,
-            snapshot_collector=snapshot_collector,
-        )
-    else:
-        trend_manager = TrendFollowingManager(
-            adapter=adapter,
-            supervisor=supervisor,
-            session_factory=session_factory,
-            candle_model=models.candle,
-            trend_position_model=models.trend_position,
-            pair_column=pair_column,
-            snapshot_collector=snapshot_collector,
-        )
-    box_manager = BoxMeanReversionManager(
-        adapter=adapter,
-        supervisor=supervisor,
-        session_factory=session_factory,
-        candle_model=models.candle,
-        box_model=models.box,
-        box_position_model=models.box_position,
-        pair_column=pair_column,
-        event_filter=create_event_filter(),
-        intermarket_client=create_intermarket_client(),
-        snapshot_collector=snapshot_collector,
-    )
-    cfd_manager = CfdTrendFollowingManager(
+    trend_manager = GmoCoinTrendManager(
         adapter=adapter,
         supervisor=supervisor,
         session_factory=session_factory,
@@ -304,11 +234,8 @@ async def lifespan(app: FastAPI):
         pair_column=pair_column,
         snapshot_collector=snapshot_collector,
     )
-
     strategy_registry = StrategyRegistry()
-    strategy_registry.register("trend_following", trend_manager)
-    strategy_registry.register("box_mean_reversion", box_manager)
-    strategy_registry.register("cfd_trend_following", cfd_manager)
+    strategy_registry.register("cfd_trend_following", trend_manager)
 
     # 5.5. Execution Layer 조립 (TRADING_MODE 환경변수)
     trading_mode = os.environ.get("TRADING_MODE", "v1").lower()
@@ -368,7 +295,6 @@ async def lifespan(app: FastAPI):
             approval_gate=_approval_gate,
         )
         trend_manager.set_orchestrator(_orchestrator)
-        cfd_manager.set_orchestrator(_orchestrator)
         logger.debug(f"Execution Layer 초기화: TRADING_MODE={trading_mode}")
     elif trading_mode in ("v2", "ai"):
         from core.decision.ai_decision import AiDecision
@@ -403,7 +329,6 @@ async def lifespan(app: FastAPI):
             approval_gate=_approval_gate,
         )
         trend_manager.set_orchestrator(_orchestrator)
-        cfd_manager.set_orchestrator(_orchestrator)
         logger.debug(f"Execution Layer 초기화: TRADING_MODE={trading_mode} [DEPRECATED: v2/ai는 rachel 모드로 전환 권장]")
     elif trading_mode == "rachel":
         from core.decision.rachel_advisory import RachelAdvisoryDecision
@@ -430,7 +355,6 @@ async def lifespan(app: FastAPI):
             approval_gate=_approval_gate,
         )
         trend_manager.set_orchestrator(_orchestrator)
-        cfd_manager.set_orchestrator(_orchestrator)
         logger.debug(f"Execution Layer 초기화: TRADING_MODE={trading_mode} (OpenClaw 레이첼 advisory 연동)")
     else:
         logger.warning(
@@ -453,7 +377,6 @@ async def lifespan(app: FastAPI):
             approval_gate=_approval_gate,
         )
         trend_manager.set_orchestrator(_orchestrator)
-        cfd_manager.set_orchestrator(_orchestrator)
 
     # 5.6. Data Layer (DataHub v1.5)
     from core.data.hub import DataHub
@@ -470,7 +393,6 @@ async def lifespan(app: FastAPI):
         lesson_model=WakeUpReview,
     )
     trend_manager.set_data_hub(_data_hub)
-    cfd_manager.set_data_hub(_data_hub)
     logger.debug(f"DataHub v1.5 초기화: trading_data_url={_trading_data_url}")
 
     health_checker = HealthChecker(
@@ -491,8 +413,6 @@ async def lifespan(app: FastAPI):
         supervisor=supervisor,
         session_factory=session_factory,
         trend_manager=trend_manager,
-        box_manager=box_manager,
-        cfd_manager=cfd_manager,
         health_checker=health_checker,
         models=models,
         prefix=prefix,
@@ -534,12 +454,8 @@ async def lifespan(app: FastAPI):
                     )
                     continue
                 # 전략 스타일별 매니저에 PaperExecutor 바인딩 (pair 레벨 분리)
-                if style == "box_mean_reversion":
-                    box_manager.register_paper_pair(pair, strategy.id)
-                elif style == "trend_following":
+                if style == "cfd_trend_following":
                     trend_manager.register_paper_pair(pair, strategy.id)
-                elif style == "cfd_trend_following":
-                    cfd_manager.register_paper_pair(pair, strategy.id)
                 proposed_count += 1
                 logger.debug(
                     f"Paper trading 시작: strategy_id={strategy.id} pair={pair} style={style} "
@@ -573,7 +489,6 @@ async def lifespan(app: FastAPI):
                 judgment_model=AiJudgment,
             )
             trend_manager.set_post_analyzer(_post_analyzer)
-            cfd_manager.set_post_analyzer(_post_analyzer)
             logger.debug("PostAnalyzer 초기화 완료 (ENABLE_POST_ANALYSIS=true)")
         else:
             logger.warning("ENABLE_POST_ANALYSIS=true이나 OPENAI_API_KEY 미설정 — PostAnalyzer 비활성화")

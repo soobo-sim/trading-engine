@@ -472,12 +472,8 @@ async def _unregister_recommended_paper(
             return
 
         pair = state.normalize_pair(pair)
-        if style == "box_mean_reversion":
-            state.box_manager.unregister_paper_pair(pair)
-        elif style == "trend_following":
+        if style == "cfd_trend_following":
             state.trend_manager.unregister_paper_pair(pair)
-        elif style == "cfd_trend_following" and state.cfd_manager:
-            state.cfd_manager.unregister_paper_pair(pair)
 
         logger.info(
             f"[StrategyScores] PaperExecutor 해제: strategy_id={strategy_id} pair={pair} style={style}"

@@ -1,17 +1,21 @@
 """
-BitFlyerSigner — BitFlyer REST API HMAC-SHA256 서명.
+GmoSigner — GMO API HMAC-SHA256 서명.
 
-서명 대상: timestamp + METHOD + path + body
-timestamp: Unix timestamp 초 (str)
-헤더: ACCESS-KEY, ACCESS-TIMESTAMP, ACCESS-SIGN  (≠ ACCESS-SIGNATURE)
+서명 대상: timestamp(ms) + METHOD + path + body
+timestamp: Unix timestamp 밀리초 (str)
+헤더: API-KEY, API-TIMESTAMP, API-SIGN
+
+⚠️ 서명 경로 주의:
+  실제 요청: POST https://api.coin.z.com/private/v1/order
+  서명 대상 path: /v1/order  (private/ 제외)
 """
 import hashlib
 import hmac
 import time
 
 
-class BitFlyerSigner:
-    """BitFlyer API 요청 서명."""
+class GmoSigner:
+    """GMO API 요청 서명."""
 
     def __init__(self, api_key: str, api_secret: str) -> None:
         self._api_key = api_key
@@ -23,13 +27,13 @@ class BitFlyerSigner:
 
         Args:
             method: HTTP 메서드 대문자 (예: "GET", "POST")
-            path:   경로 + 쿼리스트링 (host 제외, 예: /v1/me/getbalance)
+            path:   서명 경로 (예: /v1/account/assets). private/ 제외.
             body:   JSON 바디 문자열 (GET 요청은 빈 문자열)
 
         Returns:
-            {"ACCESS-KEY": ..., "ACCESS-TIMESTAMP": ..., "ACCESS-SIGN": ...}
+            {"API-KEY": ..., "API-TIMESTAMP": ..., "API-SIGN": ...}
         """
-        timestamp = str(int(time.time()))
+        timestamp = str(int(time.time() * 1000))
         message = timestamp + method.upper() + path + body
         signature = hmac.new(
             self._api_secret.encode("utf-8"),
@@ -37,7 +41,7 @@ class BitFlyerSigner:
             hashlib.sha256,
         ).hexdigest()
         return {
-            "ACCESS-KEY": self._api_key,
-            "ACCESS-TIMESTAMP": timestamp,
-            "ACCESS-SIGN": signature,
+            "API-KEY": self._api_key,
+            "API-TIMESTAMP": timestamp,
+            "API-SIGN": signature,
         }
