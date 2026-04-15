@@ -215,12 +215,11 @@ class AutoReporter:
                     if style != regime_gate.active_strategy:
                         registry = getattr(state, "strategy_registry", None)
                         mgr = registry.get(style) if registry is not None else None
-                        has_position = (
-                            mgr is not None
-                            and hasattr(mgr, "get_position")
-                            and mgr.get_position(pair) is not None
-                        )
-                        if not has_position:
+                        # 포지션 확인 불가(registry 없음·매니저 미등록·get_position 없음)이면
+                        # 안전 폴백으로 보고 전송 (누락보다 중복이 낫다).
+                        if mgr is None or not hasattr(mgr, "get_position"):
+                            pass  # 확인 불가 → 보고 전송
+                        elif mgr.get_position(pair) is None:
                             logger.debug(
                                 f"[AutoReporter] {pair} {style} 보고 스킵 "
                                 f"(체제 불일치: active={regime_gate.active_strategy})"

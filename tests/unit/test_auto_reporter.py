@@ -472,6 +472,88 @@ class TestAutoReporterRegimeFilter:
             f"regime_gate 없으면 필터 미적용, 실제: {generated_styles}"
         )
 
+    @pytest.mark.asyncio
+    async def test_ar_e1_no_trend_manager_reports_both(self):
+        """AR-E1: state에 trend_manager 없으면 필터 미적용 (안전 폴백)."""
+        state = self._make_state(regime_active_strategy="trend_following")
+        del state.trend_manager  # trend_manager 제거
+
+        reporter = self._make_reporter(state)
+        reporter._session_factory = self._make_db_with_strategies(
+            ["trend_following", "box_mean_reversion"]
+        )
+
+        generated_styles = []
+        fake_report = {"success": True, "report": {"telegram_text": "보고"}}
+
+        async def mock_generate(style, pair, strategy, state, db):
+            generated_styles.append(style)
+            return fake_report
+
+        with patch.object(reporter, "_generate_report", side_effect=mock_generate):
+            with patch("core.task.auto_reporter.send_telegram_message", new_callable=AsyncMock, return_value=True):
+                with patch("core.task.auto_reporter.is_maintenance_window", return_value=False):
+                    await reporter._run_once()
+
+        assert set(generated_styles) == {"trend_following", "box_mean_reversion"}, (
+            f"trend_manager 없으면 양쪽 다 보고, 실제: {generated_styles}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_ar_e2_no_strategy_registry_reports_both(self):
+        """AR-E2: strategy_registry=None이면 포지션 확인 불가 → 안전 폴백으로 양쪽 다 보고."""
+        state = self._make_state(regime_active_strategy="trend_following")
+        state.strategy_registry = None  # registry 제거
+
+        reporter = self._make_reporter(state)
+        reporter._session_factory = self._make_db_with_strategies(
+            ["trend_following", "box_mean_reversion"]
+        )
+
+        generated_styles = []
+        fake_report = {"success": True, "report": {"telegram_text": "보고"}}
+
+        async def mock_generate(style, pair, strategy, state, db):
+            generated_styles.append(style)
+            return fake_report
+
+        with patch.object(reporter, "_generate_report", side_effect=mock_generate):
+            with patch("core.task.auto_reporter.send_telegram_message", new_callable=AsyncMock, return_value=True):
+                with patch("core.task.auto_reporter.is_maintenance_window", return_value=False):
+                    await reporter._run_once()
+
+        assert set(generated_styles) == {"trend_following", "box_mean_reversion"}, (
+            f"registry 없으면 포지션 확인 불가 → 안전 폴백 보고, 실제: {generated_styles}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_ar_e3_unregistered_style_reports(self):
+        """AR-E3: registry에 미등록 전략(mgr=None)이면 포지션 확인 불가 → 안전 폴백으로 보고."""
+        state = self._make_state(regime_active_strategy="trend_following")
+        # registry.get이 항상 None을 반환하도록 (미등록 전략)
+        state.strategy_registry.get = MagicMock(return_value=None)
+
+        reporter = self._make_reporter(state)
+        reporter._session_factory = self._make_db_with_strategies(
+            ["trend_following", "box_mean_reversion"]
+        )
+
+        generated_styles = []
+        fake_report = {"success": True, "report": {"telegram_text": "보고"}}
+
+        async def mock_generate(style, pair, strategy, state, db):
+            generated_styles.append(style)
+            return fake_report
+
+        with patch.object(reporter, "_generate_report", side_effect=mock_generate):
+            with patch("core.task.auto_reporter.send_telegram_message", new_callable=AsyncMock, return_value=True):
+                with patch("core.task.auto_reporter.is_maintenance_window", return_value=False):
+                    await reporter._run_once()
+
+        assert set(generated_styles) == {"trend_following", "box_mean_reversion"}, (
+            f"미등록 전략은 포지션 확인 불가 → 안전 폴백 보고, 실제: {generated_styles}"
+        )
+
 
 class TestFormatSafetySummary:
     """format_safety_summary n/a 제외 테스트."""
