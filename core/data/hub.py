@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 logger = logging.getLogger(__name__)
 
 _MACRO_CACHE_TTL = 3600   # 1시간 — FRED 일배치 데이터
-_EVENTS_CACHE_TTL = 300   # 5분 — 경제 캘린더
+_EVENTS_CACHE_TTL = 1800  # 30분 — 경제 캘린더
 _SENTIMENT_CACHE_TTL = 3600  # 1시간 — Fear & Greed Index 갱신 주기
 
 from core.data.dto import (
@@ -242,7 +242,7 @@ class DataHub:
           USD_JPY, GBP_JPY, EUR_JPY 등 → "forex"
           기타 → category 필터 없이 전체
 
-        캐시 TTL 5분 (이벤트 캐시와 동일). API 실패 시 빈 tuple.
+        캐시 TTL 30분 (이벤트 캐시와 동일). API 실패 시 빈 tuple.
         trading_data_url 미설정 시 빈 tuple.
         """
         if self._trading_data_url is None:
@@ -335,6 +335,10 @@ class DataHub:
                     ),
                 )
                 self._sentiment_cache = (dto, now)
+                logger.info(
+                    f"[DataHub] 센티먼트 갱신 (FNG): score={dto.score} "
+                    f"({dto.classification}) — 다음 갱신 ~1시간 후"
+                )
                 return dto
         except Exception as e:
             logger.warning(f"[DataHub] Fear & Greed 조회 실패 (뉴스로 폴백): {e}")
@@ -371,17 +375,23 @@ class DataHub:
         else:
             classification = "extreme_greed"
 
-        return SentimentDTO(
+        dto = SentimentDTO(
             source="marketaux_news_avg",
             score=score_100,
             classification=classification,
             timestamp=datetime.now(timezone.utc),
         )
+        self._sentiment_cache = (dto, now)
+        logger.info(
+            f"[DataHub] 센티먼트 갱신 (뉴스 폴백): score={score_100} "
+            f"({classification}) — 다음 갱신 ~1시간 후"
+        )
+        return dto
 
     async def get_upcoming_events(self) -> tuple[EconomicEventDTO, ...]:
         """trading-data /api/economic-calendar/upcoming에서 이벤트 조회.
 
-        캐시 TTL 5분. API 실패 시 stale 캐시 반환, 캐시 없으면 빈 tuple.
+        캐시 TTL 30분. API 실패 시 stale 캐시 반환, 캐시 없으면 빈 tuple.
         trading_data_url 미설정 시 빈 tuple 반환.
         """
         if self._trading_data_url is None:
@@ -422,6 +432,13 @@ class DataHub:
 
         result: tuple[EconomicEventDTO, ...] = tuple(dtos)
         self._events_cache = (result, now)
+        high_events = [d for d in dtos if d.importance == "High"]
+        logger.info(
+            f"[DataHub] 경제 이벤트 갱신: 전체 {len(result)}건 "
+            f"(S/A급 {len(high_events)}건: "
+            + (', '.join(e.name for e in high_events) if high_events else '없음')
+            + ") — 다음 갱신 ~30분 후"
+        )
         return result
 
     async def get_lessons(self, pair: str, signal: str) -> tuple[LessonDTO, ...]:

@@ -625,3 +625,61 @@ class TestGuardrailsLogging:
         info = [r for r in caplog.records if r.levelname in {"INFO", "WARNING"}]
         assert len(info) == 0
 
+
+# ──────────────────────────────────────────────────────────────
+# GR-06: 피라미딩 총 사이즈 한도 검사
+# ──────────────────────────────────────────────────────────────
+
+def _make_pyramid_snapshot(
+    position_size_pct: float = 20.0,
+    existing_total_size_pct: float = 0.20,
+) -> SignalSnapshot:
+    """GR-06 테스트용 — params 및 position 포함 SignalSnapshot."""
+    from core.data.dto import PositionDTO
+
+    ts = datetime(2026, 4, 1, 12, 0, 0, tzinfo=timezone.utc)
+    pos = PositionDTO(
+        pair="BTC_JPY",
+        entry_price=9_800_000.0,
+        entry_amount=0.3,
+        stop_loss_price=9_500_000.0,
+        stop_tightened=False,
+        extra={
+            "pyramid_count": 1,
+            "total_size_pct": existing_total_size_pct,
+        },
+    )
+    return SignalSnapshot(
+        pair="BTC_JPY",
+        exchange="gmo_coin",
+        timestamp=ts,
+        signal="entry_ok",
+        current_price=10_000_000.0,
+        exit_signal={"action": "hold"},
+        position=pos,
+        params={"position_size_pct": position_size_pct},
+    )
+
+
+@pytest.mark.asyncio
+async def test_gr06_blocks_when_total_size_would_exceed_limit(guardrail):
+    """
+    G-01: add_position + existing=0.20 + new=0.20 → total=0.40 > max(0.20) → 거부
+    """
+    snap = _make_pyramid_snapshot(position_size_pct=20.0, existing_total_size_pct=0.20)
+    d = _make_decision("add_position", size_pct=0.20)
+    result = await guardrail.check(d, snap)
+    assert result.approved is False
+    assert "GR-06" in (result.rejection_reason or "") or "총 사이즈" in (result.rejection_reason or "")
+
+
+@pytest.mark.asyncio
+async def test_gr06_allows_when_total_size_within_limit(guardrail):
+    """
+    G-02: add_position + existing=0.10 + new=0.10 → total=0.20 == max(0.20) → 승인 (경계값)
+    """
+    snap = _make_pyramid_snapshot(position_size_pct=20.0, existing_total_size_pct=0.10)
+    d = _make_decision("add_position", size_pct=0.10)
+    result = await guardrail.check(d, snap)
+    assert result.approved is True
+

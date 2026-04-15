@@ -386,3 +386,94 @@ async def test_e05_stop_pair_all_managers_empty_registry():
     registry = StrategyRegistry()
     # 예외 없이 완료되어야 함
     await registry.stop_pair_all_managers("btc_jpy")
+
+
+# ── DA-01: 듀얼 활성 — 다른 스타일은 archive 안 됨 ───────────
+
+@pytest.mark.asyncio
+async def test_da01_dual_active_different_style_coexists(db_factory):
+    """trend_following active 상태에서 box_mean_reversion proposed 활성화.
+    → trend_following DB 레코드는 archive되지 않아야 한다 (스타일 다름)."""
+    trend_id = await _insert_strategy(
+        db_factory, status="active", pair="btc_jpy",
+        style="trend_following", name="trend-active"
+    )
+    box_id = await _insert_strategy(
+        db_factory, status="proposed", pair="btc_jpy",
+        style="box_mean_reversion", name="box-proposed"
+    )
+
+    registry, trend, box = _make_registry(trend_running=True, box_running=False)
+    client, _ = _build_client(db_factory, registry=registry)
+    resp = client.put(f"/api/strategies/{box_id}/activate")
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "active"
+
+    # trend_following은 archive되지 않아야 함 — 스타일이 다르므로
+    async with db_factory() as db:
+        trend_row = await db.get(HotStrategy, trend_id)
+        assert trend_row.status == "active", "trend_following이 잘못 archive됨"
+        box_row = await db.get(HotStrategy, box_id)
+        assert box_row.status == "active"
+
+    # trend 매니저는 stop되지 않아야 함
+    trend.stop.assert_not_awaited()
+    # box 매니저는 start됨 (실행 중 아니었으므로 stop 없이 start)
+    box.start.assert_awaited_once()
+
+
+# ── DA-02: 듀얼 활성 — 같은 스타일은 여전히 archive됨 ────────
+
+@pytest.mark.asyncio
+async def test_da02_same_style_still_archives_old(db_factory):
+    """trend_following v1 active + trend_following v2 proposed 활성화.
+    → v1은 archive (같은 스타일 충돌). v2는 start됨."""
+    old_id = await _insert_strategy(
+        db_factory, status="active", pair="btc_jpy",
+        style="trend_following", name="trend-v1"
+    )
+    new_id = await _insert_strategy(
+        db_factory, status="proposed", pair="btc_jpy",
+        style="trend_following", name="trend-v2"
+    )
+
+    registry, trend, _ = _make_registry(trend_running=True)
+    client, _ = _build_client(db_factory, registry=registry)
+    resp = client.put(f"/api/strategies/{new_id}/activate")
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "active"
+
+    # 같은 스타일 기존 전략은 archive
+    async with db_factory() as db:
+        old_row = await db.get(HotStrategy, old_id)
+        assert old_row.status == "archived"
+
+    # 동일 스타일 매니저는 stop → start
+    trend.stop.assert_awaited_once_with("btc_jpy")
+    trend.start.assert_awaited_once()
+
+
+# ── DA-03: 듀얼 활성 Hot — box 활성화 시 trend 매니저 유지 ────
+
+@pytest.mark.asyncio
+async def test_da03_hot_activation_box_does_not_stop_trend(db_factory):
+    """box_mean_reversion 활성화 시 trend_following 매니저는 중단되지 않아야 함."""
+    box_id = await _insert_strategy(
+        db_factory, status="proposed", pair="btc_jpy",
+        style="box_mean_reversion", name="box"
+    )
+
+    # 양쪽 매니저 모두 실행 중
+    registry, trend, box = _make_registry(trend_running=True, box_running=True)
+    client, _ = _build_client(db_factory, registry=registry)
+    resp = client.put(f"/api/strategies/{box_id}/activate")
+
+    assert resp.status_code == 200
+    # trend 매니저는 건드리지 않음
+    trend.stop.assert_not_awaited()
+    trend.start.assert_not_awaited()
+    # box 매니저는 기존 것 stop 후 재기동
+    box.stop.assert_awaited_once_with("btc_jpy")
+    box.start.assert_awaited_once()

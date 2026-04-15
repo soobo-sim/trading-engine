@@ -1163,6 +1163,9 @@ class RachelAdvisory(Base):
     alice_summary = Column(Text, nullable=True)            # 앨리스 제안 1줄
     samantha_summary = Column(Text, nullable=True)         # 사만다 감사 1줄
 
+    # 전략 타입 분리 (듀얼 매니저 — RegimeGate)
+    trading_style = Column(String(50), nullable=False, server_default="trend_following")
+
     # adjust_risk 전용 (action=adjust_risk 시에만 사용)
     adjustments = Column(JSON, nullable=True)              # {stop_loss_pct, take_profit_ratio, trailing_atr_multiplier, force_exit}
 

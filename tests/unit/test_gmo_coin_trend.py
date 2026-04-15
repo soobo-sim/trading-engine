@@ -326,3 +326,209 @@ async def test_open_position_sell_stop_loss_above_entry():
     assert pos is not None
     assert pos.stop_loss_price == expected_sl
     assert pos.stop_loss_price > exec_price  # SL은 진입가 위
+
+
+# ──────────────────────────────────────────────────────────────
+# 피라미딩 (_add_to_position) 테스트
+# ──────────────────────────────────────────────────────────────
+
+def _inject_long_position(mgr, entry_price: float = 10_000_000.0, amount: float = 0.3,
+                           stop_loss: float = 9_600_000.0, pyramid_count: int = 0,
+                           total_size_pct: float = 0.20) -> None:
+    """매니저에 롱 포지션을 인메모리 주입하는 헬퍼."""
+    pos = Position(
+        pair="btc_jpy",
+        entry_price=entry_price,
+        entry_amount=amount,
+        stop_loss_price=stop_loss,
+        extra={
+            "side": "buy",
+            "pyramid_count": pyramid_count,
+            "pyramid_entries": [],
+            "total_size_pct": total_size_pct,
+        },
+    )
+    pos.db_record_id = 42
+    mgr._position["btc_jpy"] = pos
+
+
+def _inject_short_position(mgr, entry_price: float = 10_500_000.0, amount: float = 0.3,
+                            stop_loss: float = 10_900_000.0, pyramid_count: int = 0) -> None:
+    """매니저에 숏 포지션을 인메모리 주입하는 헬퍼."""
+    pos = Position(
+        pair="btc_jpy",
+        entry_price=entry_price,
+        entry_amount=amount,
+        stop_loss_price=stop_loss,
+        extra={
+            "side": "sell",
+            "pyramid_count": pyramid_count,
+            "pyramid_entries": [],
+            "total_size_pct": 0.20,
+        },
+    )
+    pos.db_record_id = 43
+    mgr._position["btc_jpy"] = pos
+
+
+@pytest.mark.asyncio
+async def test_add_to_position_buy_weighted_avg():
+    """
+    GT-11: 롱 포지션 피라미딩 — 가중평균가 계산 검증.
+
+    Given: 기존 entry=10,000,000 amount=0.3, 추가 exec_price=11,000,000 amount=0.3
+    expected avg = (10M*0.3 + 11M*0.3)/(0.3+0.3) = 10,500,000
+    """
+    exec_price = 11_000_000.0
+    add_amount = 0.3
+    mgr = _make_gmoc_manager(
+        collateral=300_000.0,
+        place_order_return=_make_order(OrderType.MARKET_BUY, amount=add_amount, price=exec_price),
+    )
+    mgr._update_position_in_db = AsyncMock()
+    _inject_long_position(mgr, entry_price=10_000_000.0, amount=0.3)
+
+    params = {**_BASE_PARAMS, "position_size_pct": 20.0, "atr_multiplier_stop": 2.0}
+    await mgr._add_to_position("btc_jpy", "buy", exec_price, 100_000.0, params)
+
+    pos = mgr._position.get("btc_jpy")
+    assert pos is not None
+    assert pos.entry_price == pytest.approx(10_500_000.0, abs=1.0)
+    assert pos.entry_amount == pytest.approx(0.6, abs=0.001)
+    assert pos.extra["pyramid_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_add_to_position_short_sl_not_worsen():
+    """
+    GT-12: 숏 포지션 피라미딩 — SL not-worsen (숏은 SL이 낮을수록 유리).
+
+    Given: 기존 SL=10,900,000 (숏 SL은 위), 새 계산 SL > 기존 → not-worsen으로 유지 (min)
+    """
+    entry_price = 10_500_000.0
+    add_exec_price = 10_200_000.0
+    atr = 200_000.0
+    atr_mult = 2.0
+    new_avg = (10_500_000.0 * 0.3 + 10_200_000.0 * 0.3) / 0.6  # 10,350,000
+    new_sl_candidate = round(new_avg + atr * atr_mult, 6)  # 10,350,000 + 400,000 = 10,750,000
+
+    mgr = _make_gmoc_manager(
+        collateral=300_000.0,
+        place_order_return=_make_order(OrderType.MARKET_SELL, amount=0.3, price=add_exec_price),
+    )
+    mgr._update_position_in_db = AsyncMock()
+    _inject_short_position(mgr, entry_price=entry_price, amount=0.3, stop_loss=10_900_000.0)
+
+    params = {**_BASE_PARAMS, "position_size_pct": 20.0, "atr_multiplier_stop": atr_mult}
+    await mgr._add_to_position("btc_jpy", "sell", add_exec_price, atr, params)
+
+    pos = mgr._position.get("btc_jpy")
+    assert pos is not None
+    # SL not-worsen: min(기존10,900,000, 새후보10,750,000) = 10,750,000 (낮을수록 유리)
+    assert pos.stop_loss_price == pytest.approx(new_sl_candidate, abs=1.0)
+    assert pos.stop_loss_price <= 10_900_000.0
+
+
+@pytest.mark.asyncio
+async def test_add_to_position_skips_when_no_position():
+    """
+    GT-13: 포지션 없을 때 add_to_position 호출 → place_order 미호출, WARNING.
+    """
+    mgr = _make_gmoc_manager()
+    # 포지션 주입 안 함
+
+    params = {**_BASE_PARAMS, "position_size_pct": 20.0}
+    await mgr._add_to_position("btc_jpy", "buy", 10_000_000.0, None, params)
+
+    mgr._adapter.place_order.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_add_to_position_uses_decision_size_pct():
+    """
+    GT-14: result.decision.size_pct가 있으면 params.position_size_pct 대신 사용.
+
+    decision.size_pct=0.15 (15%) → 기본 position_size_pct(20%)가 아닌 15% 계산.
+    """
+    exec_price = 11_000_000.0
+    add_amount = 0.2
+    mgr = _make_gmoc_manager(
+        collateral=300_000.0,
+        place_order_return=_make_order(OrderType.MARKET_BUY, amount=add_amount, price=exec_price),
+    )
+    mgr._update_position_in_db = AsyncMock()
+    _inject_long_position(mgr, entry_price=10_000_000.0, amount=0.3)
+
+    # Decision with size_pct=0.15
+    from types import SimpleNamespace
+    decision = SimpleNamespace(size_pct=0.15)
+    result = SimpleNamespace(decision=decision, judgment_id=None)
+
+    params = {**_BASE_PARAMS, "position_size_pct": 20.0}  # 기본 20%
+    await mgr._add_to_position("btc_jpy", "buy", exec_price, 100_000.0, params, result=result)
+
+    # place_order가 호출되었는지만 확인(실제 invest_jpy는 available*15%)
+    mgr._adapter.place_order.assert_called_once()
+    call_kwargs = mgr._adapter.place_order.call_args.kwargs
+    # MARKET_BUY: amount = JPY 금액 (300,000 * 0.15 = 45,000)
+    assert call_kwargs.get("order_type") == OrderType.MARKET_BUY
+    invest_jpy = call_kwargs.get("amount")
+    assert invest_jpy == pytest.approx(45_000.0, abs=100.0)
+
+
+@pytest.mark.asyncio
+async def test_add_to_position_skips_when_no_collateral():
+    """
+    GT-15: 여유 증거금 없음 (available=0) → 피라미딩 스킵.
+    """
+    mgr = _make_gmoc_manager(collateral=100_000.0, require_collateral=100_000.0)
+    mgr._update_position_in_db = AsyncMock()
+    _inject_long_position(mgr)
+
+    params = {**_BASE_PARAMS, "position_size_pct": 20.0}
+    await mgr._add_to_position("btc_jpy", "buy", 10_000_000.0, None, params)
+
+    mgr._adapter.place_order.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_update_position_in_db_skips_when_no_record_id():
+    """
+    GT-16: db_record_id=None → DB 업데이트 스킵, 크래시 없음.
+    """
+    mgr = _make_gmoc_manager()
+    mgr._position_model = MagicMock()
+    mgr._session_factory = MagicMock()
+
+    # db_record_id=None → WARNING 로그만, 예외 없음
+    await mgr._update_position_in_db(
+        product_code="btc_jpy",
+        db_record_id=None,
+        entry_price=10_000_000.0,
+        size=0.6,
+        stop_loss_price=9_500_000.0,
+        pyramid_count=1,
+    )
+    # session_factory가 호출되지 않아야 함 (early return)
+    mgr._session_factory.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_open_position_initializes_pyramid_state():
+    """
+    GT-17: _open_position 완료 후 Position.extra에 pyramid 초기화값 존재.
+    """
+    exec_price = 11_000_000.0
+    mgr = _make_gmoc_manager(
+        collateral=100_000.0,
+        ticker_last=exec_price,
+        place_order_return=_make_order(OrderType.MARKET_BUY, amount=0.005, price=exec_price),
+    )
+    params = {**_BASE_PARAMS, "position_size_pct": 50.0}
+    await mgr._open_position("btc_jpy", "buy", exec_price, 100_000.0, params)
+
+    pos = mgr._position.get("btc_jpy")
+    assert pos is not None
+    assert pos.extra.get("pyramid_count") == 0
+    assert pos.extra.get("pyramid_entries") == []
+    assert "total_size_pct" in pos.extra

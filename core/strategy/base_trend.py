@@ -110,6 +110,8 @@ class BaseTrendManager(ABC):
         self._data_hub: Optional[IDataHub] = None
         # 사후 분석 (ENABLE_POST_ANALYSIS=true 시 주입)
         self._post_analyzer: Optional[Any] = None
+        # Regime Gate (듀얼 매니저 체제 전환)
+        self._regime_gate: Optional[Any] = None  # RegimeGate | None
 
     # ──────────────────────────────────────────
     # Public API
@@ -249,6 +251,10 @@ class BaseTrendManager(ABC):
     def set_post_analyzer(self, analyzer: Any) -> None:
         """PostAnalyzer를 주입한다. ENABLE_POST_ANALYSIS=true 시 main.py에서 호출."""
         self._post_analyzer = analyzer
+
+    def set_regime_gate(self, gate: Any) -> None:
+        """RegimeGate를 주입한다. main.py lifespan에서 양쪽 매니저에 동일 인스턴스 주입."""
+        self._regime_gate = gate
 
     def get_position(self, pair: str) -> Optional[Position]:
         return self._position.get(pair)
@@ -397,7 +403,11 @@ class BaseTrendManager(ABC):
         async def _on_trade(price: float, amount: float) -> None:
             await price_queue.put(price)
 
-        await self._adapter.subscribe_trades(pair, _on_trade)
+        # subscribe_trades는 내부 while-True 루프를 가진 블로킹 코루틴이므로
+        # 백그라운드 태스크로 실행해야 큐 소비 루프가 즉시 시작된다.
+        ws_task = asyncio.create_task(
+            self._adapter.subscribe_trades(pair, _on_trade)
+        )
 
         try:
             while True:
@@ -441,6 +451,7 @@ class BaseTrendManager(ABC):
                             f"{self._log_prefix} {pair}: 청산 {fail_count}회 실패 — 60초 쿨다운"
                         )
         except asyncio.CancelledError:
+            ws_task.cancel()
             raise
 
     # ──────────────────────────────────────────
@@ -551,6 +562,15 @@ class BaseTrendManager(ABC):
                 if len(slope_history) > 3:
                     slope_history.pop(0)
                 self._ema_slope_last_key[pair] = latest_candle_key
+
+                # ── RegimeGate 갱신 (4H 캔들 경계) ──────────────
+                if self._regime_gate is not None:
+                    self._regime_gate.update_regime(
+                        regime=signal_data.get("regime", "unclear"),
+                        bb_width_pct=signal_data.get("bb_width_pct", 0.0),
+                        range_pct=signal_data.get("range_pct", 0.0),
+                        candle_key=latest_candle_key,
+                    )
 
                 if (
                     len(slope_history) == 3
@@ -752,6 +772,7 @@ class BaseTrendManager(ABC):
             news=news,
             sentiment=sentiment,
             is_preview=is_preview,
+            strategy_type=self._get_strategy_type(),
         )
 
     async def _handle_execution_result(
@@ -787,6 +808,16 @@ class BaseTrendManager(ABC):
             if pos is not None and not pos.stop_tightened and atr:
                 await self._apply_stop_tightening(pair, current_price, atr, params)
             return False
+
+        # ── RegimeGate 진입 차단 체크 (entry_long / entry_short) ──
+        if action in ("entry_long", "entry_short") and self._regime_gate is not None:
+            manager_type = self._get_strategy_type()
+            if not self._regime_gate.should_allow_entry(manager_type):
+                logger.debug(
+                    f"{self._log_prefix} {pair}: RegimeGate 진입 차단 "
+                    f"(active={self._regime_gate.active_strategy}, this={manager_type})"
+                )
+                return False
 
         if action == "entry_long":
             is_preview = getattr(snapshot, "is_preview", False)
@@ -852,6 +883,56 @@ class BaseTrendManager(ABC):
             logger.info(
                 f"{self._log_prefix} {pair}: 진입 차단 — {result.reason}"
             )
+            return False
+
+        if action == "add_position":
+            # 피라미딩 추가 매수 — 포지션 보유 중 추가 진입
+            pos = self._position.get(pair)
+            if pos is None:
+                logger.warning(
+                    f"{self._log_prefix} {pair}: add_position이나 포지션 없음 — 스킵"
+                )
+                return False
+
+            pyramid_count = pos.extra.get("pyramid_count", 0)
+            _MAX_PYRAMID = 3
+            if pyramid_count >= _MAX_PYRAMID:
+                logger.info(
+                    f"{self._log_prefix} {pair}: 피라미딩 상한 {_MAX_PYRAMID} 도달 — "
+                    f"add_position 스킵 (이중 안전)"
+                )
+                return False
+
+            side = pos.extra.get("side", "buy")
+            logger.info(
+                f"{self._log_prefix} {pair}: add_position 실행 시작 — "
+                f"피라미딩 #{pyramid_count+1}/{_MAX_PYRAMID} "
+                f"side={side} 현재가=¥{current_price:,.0f} "
+                f"기존 진입가=¥{pos.entry_price:,.0f} "
+                f"기존 수량={pos.entry_amount}"
+            )
+            await self._add_to_position(pair, side, current_price, atr, params, result=result)
+
+            # 실행 후 결과 로그
+            updated_pos = self._position.get(pair)
+            if updated_pos is not None and updated_pos.extra.get("pyramid_count", 0) > pyramid_count:
+                logger.info(
+                    f"{self._log_prefix} {pair}: add_position 완료 — "
+                    f"피라미딩 #{updated_pos.extra['pyramid_count']}/{_MAX_PYRAMID} "
+                    f"평균단가=¥{updated_pos.entry_price:,.0f} "
+                    f"합산수량={updated_pos.entry_amount} "
+                    f"SL=¥{updated_pos.stop_loss_price}"
+                )
+            else:
+                logger.info(
+                    f"{self._log_prefix} {pair}: add_position 미완료 — "
+                    f"Position 미변경 (증거금 부족 또는 주문 실패)"
+                )
+
+            # 학습 루프 연결
+            if updated_pos is not None and result.judgment_id is not None:
+                updated_pos.extra.setdefault("pyramid_judgment_ids", []).append(result.judgment_id)
+
             return False
 
         if action == "adjust_risk":
@@ -966,6 +1047,15 @@ class BaseTrendManager(ABC):
     def _is_stop_triggered(self, pos: Position, price: float, stop_loss_price: float) -> bool:
         """스탑로스 발동 여부. 기본: 롱(price <= stop)."""
         return price <= stop_loss_price
+
+    def _get_strategy_type(self) -> str:
+        """이 매니저의 전략 타입 반환. RegimeGate.should_allow_entry() 인자로 사용.
+
+        서브클래스가 override해야 한다.
+        기본값 "trend_following" — override 없는 서브클래스는 RegimeGate 없이 동작하는
+        기존 추세추종 매니저와 동일하게 취급된다.
+        """
+        return "trend_following"
 
     async def _try_preview_entry(self, pair: str, basis_tf: str, params: dict) -> None:
         """미완성 캔들 포함 프리뷰 시그널 계산 → entry_preview 시 오케스트레이터 위임.
@@ -1144,6 +1234,18 @@ class BaseTrendManager(ABC):
             signal_data: 시그널 스냅샷
         """
         ...
+
+    async def _add_to_position(
+        self, pair: str, side: str, price: float,
+        atr: Optional[float], params: Dict, *, result: Any = None
+    ) -> None:
+        """피라미딩 추가 매수. 서브클래스에서 구현.
+
+        기본: WARNING 로그만 출력 (GmoCoinTrendManager에서 override).
+        """
+        logger.warning(
+            f"{self._log_prefix} {pair}: _add_to_position 미구현 — 서브클래스 override 필요"
+        )
 
     async def _close_position(self, pair: str, reason: str) -> None:
         """청산 wrapper. paper pair면 paper exit 처리 후 return. 그 외 _close_position_impl 위임."""

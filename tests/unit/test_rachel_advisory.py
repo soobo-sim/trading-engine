@@ -582,16 +582,17 @@ async def test_adjust_risk_empty_adjustments_still_returns_adjust_risk():
 
 
 @pytest.mark.asyncio
-async def test_fetch_advisory_normalizes_pair_to_uppercase():
+async def test_fetch_advisory_matches_lowercase_pair():
     """
     Given: snapshot.pair='btc_jpy' (소문자 — GMO Coin 스타일)
-           DB에 저장된 advisory pair='BTC_JPY' (대문자 — 레이첼 저장 형식)
+           DB에 저장된 advisory pair='btc_jpy' (소문자 — POST /api/advisories 그대로 저장)
     When:  _fetch_advisory('btc_jpy', 'gmo_coin')
-    Then:  pair.upper()='BTC_JPY'로 변환하여 DB 조회 → 레코드 반환
+    Then:  pair 그대로 WHERE 조회 → 레코드 반환
 
-    재현: GMO Coin candle_monitor는 pair='btc_jpy' 소문자로 SignalSnapshot을
-    생성하지만 레이첼은 POST /api/advisories 에 pair='BTC_JPY' 대문자로 저장.
-    쿼리 WHERE pair='btc_jpy'가 'BTC_JPY'와 불일치 → "advisory 없음" 오경고.
+    배경: POST /api/advisories는 body.pair 값을 그대로 저장하며, 레이첼은 'btc_jpy'
+    소문자로 POST한다. _fetch_advisory도 pair를 그대로 조회해야 일치한다.
+    과거: pair.upper()로 'BTC_JPY' 변환 조회 → DB에 'btc_jpy'로 저장된 레코드와
+    불일치하여 항상 "advisory 없음" WARNING이 발생하던 버그 (2026-04-15 수정).
     """
     from sqlalchemy import select as sa_select
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -604,14 +605,14 @@ async def test_fetch_advisory_normalizes_pair_to_uppercase():
         await conn.run_sync(lambda sc: Base.metadata.create_all(sc, tables=target))
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
-    # 대문자 BTC_JPY로 저장
+    # 소문자 btc_jpy로 저장 (실제 레이첼 POST 형식)
     async with factory() as session:
         row = RachelAdvisory(
-            pair="BTC_JPY",
+            pair="btc_jpy",
             exchange="gmo_coin",
             action="hold",
             confidence=0.3,
-            reasoning="대소문자 정규화 테스트용 advisory (20자 이상)",
+            reasoning="대소문자 정합성 테스트용 advisory (20자 이상)",
             expires_at=datetime(2099, 1, 1, tzinfo=timezone.utc),
         )
         session.add(row)
@@ -623,10 +624,568 @@ async def test_fetch_advisory_normalizes_pair_to_uppercase():
         fallback=AsyncMock(),
     )
 
-    # 소문자 btc_jpy로 조회 → 대문자 변환 후 매칭되어야 함
+    # 소문자 btc_jpy로 조회 → 그대로 매칭
     result = await dec._fetch_advisory("btc_jpy", "gmo_coin")
-    assert result is not None, "pair 소문자 입력 시에도 advisory를 찾아야 함"
-    assert result.pair == "BTC_JPY"
+    assert result is not None, "pair 소문자 입력 시 advisory를 찾아야 함"
+    assert result.pair == "btc_jpy"
     assert result.action == "hold"
 
     await engine.dispose()
+
+
+# ──────────────────────────────────────────────────────────────
+# 피라미딩 (add_position) 테스트 — P-01 ~ P-08
+# ──────────────────────────────────────────────────────────────
+
+def _pos_with_pyramid(
+    entry_price: float = 9_800_000.0,
+    pyramid_count: int = 0,
+    unrealized_pnl: float = 200_000.0,
+) -> PositionDTO:
+    """피라미딩 테스트용 PositionDTO."""
+    return PositionDTO(
+        pair="BTC_JPY",
+        entry_price=entry_price,
+        entry_amount=0.3,
+        stop_loss_price=9_500_000.0,
+        stop_tightened=False,
+        extra={"pyramid_count": pyramid_count, "unrealized_pnl": unrealized_pnl},
+    )
+
+
+@pytest.mark.asyncio
+async def test_p01_add_position_profitable_under_limit():
+    """
+    P-01: add_position advisory + 포지션 있음 + P&L>0 + pyramid_count=0 → action=add_position
+    """
+    adv = _advisory(action="add_position", confidence=0.80, size_pct=0.2)
+    dec, _ = _make_decision(advisory=adv)
+
+    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+        mock_dt.now.return_value = _NOW
+        pos = _pos_with_pyramid(pyramid_count=0, unrealized_pnl=200_000.0)
+        result = await dec.decide(_snapshot(signal="entry_ok", position=pos))
+
+    assert result.action == "add_position"
+    assert result.source == "rachel_advisory"
+    assert result.confidence == pytest.approx(0.80)
+
+
+@pytest.mark.asyncio
+async def test_p02_add_position_blocks_when_pyramid_limit_reached():
+    """
+    P-02: pyramid_count=3 (상한 도달) → hold
+    """
+    adv = _advisory(action="add_position", confidence=0.80)
+    dec, _ = _make_decision(advisory=adv)
+
+    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+        mock_dt.now.return_value = _NOW
+        pos = _pos_with_pyramid(pyramid_count=3, unrealized_pnl=300_000.0)
+        result = await dec.decide(_snapshot(signal="entry_ok", position=pos))
+
+    assert result.action == "hold"
+    assert "상한 도달" in result.reasoning
+
+
+@pytest.mark.asyncio
+async def test_p03_add_position_blocks_when_loss_position():
+    """
+    P-03: P&L ≤ 0 (물타기 방지) → hold
+    """
+    adv = _advisory(action="add_position", confidence=0.80)
+    dec, _ = _make_decision(advisory=adv)
+
+    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+        mock_dt.now.return_value = _NOW
+        pos = _pos_with_pyramid(
+            entry_price=10_500_000.0,  # 진입가 > 현재가(10M) → 손실
+            pyramid_count=0,
+            unrealized_pnl=-50_000.0,
+        )
+        snap = _snapshot(signal="entry_ok", position=pos)
+        # current_price < entry_price → is_profitable=False
+        result = await dec.decide(snap)
+
+    assert result.action == "hold"
+    assert "물타기 방지" in result.reasoning
+
+
+@pytest.mark.asyncio
+async def test_p04_add_position_blocks_when_exit_signal_active():
+    """
+    P-04: tighten_stop exit_signal → tighten_stop (긴급 시그널이 add_position 어드바이저리보다 우선)
+
+    Note: tighten_stop/exit_warning은 글로벌 긴급 시그널 처리기가 먼저 처리한다.
+    여기서 add_position advisory가 있더라도 긴급 시그널이 이를 오버라이드한다.
+    """
+    adv = _advisory(action="add_position", confidence=0.80)
+    dec, _ = _make_decision(advisory=adv)
+
+    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+        mock_dt.now.return_value = _NOW
+        pos = _pos_with_pyramid(pyramid_count=0, unrealized_pnl=200_000.0)
+        result = await dec.decide(
+            _snapshot(signal="entry_ok", exit_action="tighten_stop", position=pos)
+        )
+
+    # 긴급 시그널(tighten_stop)이 add_position advisory보다 우선 처리됨
+    assert result.action == "tighten_stop"
+
+
+@pytest.mark.asyncio
+async def test_p05_add_position_blocks_near_expiry():
+    """
+    P-05: advisory 만료 30분 전 (< 1H guard) → hold (만료 임박 억제)
+    """
+    adv = _advisory(action="add_position", confidence=0.80, expires_offset_hours=0.5)
+    dec, _ = _make_decision(advisory=adv)
+
+    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+        mock_dt.now.return_value = _NOW
+        pos = _pos_with_pyramid(pyramid_count=0, unrealized_pnl=200_000.0)
+        result = await dec.decide(_snapshot(signal="entry_ok", position=pos))
+
+    assert result.action == "hold"
+    assert "만료 임박" in result.reasoning
+
+
+@pytest.mark.asyncio
+async def test_p06_add_position_without_open_position_returns_hold():
+    """
+    P-06: add_position advisory + 포지션 없음 → hold (진입할 포지션 없음)
+    """
+    adv = _advisory(action="add_position", confidence=0.80)
+    dec, _ = _make_decision(advisory=adv)
+
+    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+        mock_dt.now.return_value = _NOW
+        result = await dec.decide(_snapshot(signal="entry_ok", position=None))
+
+    assert result.action == "hold"
+    assert result.source == "rachel_advisory"
+
+
+@pytest.mark.asyncio
+async def test_p07_add_position_second_pyramid_allowed():
+    """
+    P-07: pyramid_count=1 (2번째 추가), 수익 중 → action=add_position
+    """
+    adv = _advisory(action="add_position", confidence=0.75)
+    dec, _ = _make_decision(advisory=adv)
+
+    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+        mock_dt.now.return_value = _NOW
+        pos = _pos_with_pyramid(pyramid_count=1, unrealized_pnl=500_000.0)
+        result = await dec.decide(_snapshot(signal="entry_ok", position=pos))
+
+    assert result.action == "add_position"
+    assert result.source == "rachel_advisory"
+
+
+@pytest.mark.asyncio
+async def test_p08_add_position_full_exit_signal_blocks():
+    """
+    P-08: exit_signal=full_exit → exit (긴급 시그널이 add_position 어드바이저리 오버라이드)
+
+    Note: full_exit은 글로벌 긴급 시그널 처리기가 먼저 처리한다.
+    add_position advisory가 있더라도 full_exit이 이를 오버라이드한다.
+    """
+    adv = _advisory(action="add_position", confidence=0.80)
+    dec, _ = _make_decision(advisory=adv)
+
+    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+        mock_dt.now.return_value = _NOW
+        pos = _pos_with_pyramid(pyramid_count=0, unrealized_pnl=300_000.0)
+        result = await dec.decide(
+            _snapshot(signal="entry_ok", exit_action="full_exit", position=pos)
+        )
+
+    # 긴급 시그널(full_exit)이 add_position advisory보다 우선 처리됨
+    assert result.action == "exit"
+    assert "긴급 시그널" in result.reasoning
+
+
+# ──────────────────────────────────────────────────────────────
+# 큐니 보강 — 피라미딩 엣지 케이스
+# ──────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_p_short_profitable_allows_add_position():
+    """
+    P-EC1: 숏 포지션 수익 중 (current < entry) → add_position 허용.
+
+    숏 P&L = (entry - current) * amount > 0 이면 수익.
+    current_price=9,500,000 < entry=10,000,000 이므로 숏 수익.
+    """
+    adv = _advisory(action="add_position", confidence=0.75)
+    dec, _ = _make_decision(advisory=adv)
+
+    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+        mock_dt.now.return_value = _NOW
+
+        # 숏 포지션: entry=10M, current=9.5M → 숏 수익
+        short_pos = PositionDTO(
+            pair="BTC_JPY",
+            entry_price=10_000_000.0,
+            entry_amount=0.3,
+            stop_loss_price=10_500_000.0,
+            stop_tightened=False,
+            extra={"side": "sell", "pyramid_count": 0, "total_size_pct": 0.20},
+        )
+        snap = SignalSnapshot(
+            pair="BTC_JPY",
+            exchange="gmo_coin",
+            timestamp=_NOW,
+            signal="entry_ok",
+            current_price=9_500_000.0,   # entry(10M) > current(9.5M) → 숏 수익
+            exit_signal={"action": "hold"},
+            position=short_pos,
+            params={"position_size_pct": 20.0},
+        )
+        result = await dec.decide(snap)
+
+    assert result.action == "add_position"
+    assert result.source == "rachel_advisory"
+
+
+@pytest.mark.asyncio
+async def test_p_short_losing_blocks_add_position():
+    """
+    P-EC2: 숏 포지션 손실 중 (current > entry) → add_position 차단.
+
+    숏 P&L = (entry - current) * amount < 0이면 손실.
+    current_price=10,500,000 > entry=10,000,000 이므로 숏 손실.
+    """
+    adv = _advisory(action="add_position", confidence=0.80)
+    dec, _ = _make_decision(advisory=adv)
+
+    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+        mock_dt.now.return_value = _NOW
+
+        short_pos = PositionDTO(
+            pair="BTC_JPY",
+            entry_price=10_000_000.0,
+            entry_amount=0.3,
+            stop_loss_price=10_600_000.0,
+            stop_tightened=False,
+            extra={"side": "sell", "pyramid_count": 0, "total_size_pct": 0.20},
+        )
+        snap = SignalSnapshot(
+            pair="BTC_JPY",
+            exchange="gmo_coin",
+            timestamp=_NOW,
+            signal="entry_ok",
+            current_price=10_500_000.0,  # entry(10M) < current(10.5M) → 숏 손실
+            exit_signal={"action": "hold"},
+            position=short_pos,
+            params={"position_size_pct": 20.0},
+        )
+        result = await dec.decide(snap)
+
+    assert result.action == "hold"
+    assert "물타기 방지" in result.reasoning
+
+
+@pytest.mark.asyncio
+async def test_p_pyramid_count_missing_from_extra_defaults_to_zero():
+    """
+    P-EC3: pyramid_count 키가 extra에 없는 경우 — 기본값 0으로 처리.
+
+    Position.extra에 pyramid_count가 없어도 크래시 없이 add_position 허용.
+    """
+    adv = _advisory(action="add_position", confidence=0.70)
+    dec, _ = _make_decision(advisory=adv)
+
+    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+        mock_dt.now.return_value = _NOW
+
+        # extra에 pyramid_count 키 없음
+        pos_no_pyramid_key = PositionDTO(
+            pair="BTC_JPY",
+            entry_price=9_800_000.0,
+            entry_amount=0.3,
+            stop_loss_price=9_500_000.0,
+            stop_tightened=False,
+            extra={"side": "buy"},  # pyramid_count 키 없음
+        )
+        snap = SignalSnapshot(
+            pair="BTC_JPY",
+            exchange="gmo_coin",
+            timestamp=_NOW,
+            signal="entry_ok",
+            current_price=10_000_000.0,  # 수익 중
+            exit_signal={"action": "hold"},
+            position=pos_no_pyramid_key,
+            params={"position_size_pct": 20.0},
+        )
+        result = await dec.decide(snap)
+
+    # pyramid_count=0으로 기본값 처리 → add_position 허용
+    assert result.action == "add_position"
+
+
+# ──────────────────────────────────────────────────────────────
+# TS: trading_style 분리 테스트
+# ──────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_ts01_fetch_advisory_called_with_pair_and_exchange():
+    """TS-01: decide()이 _fetch_advisory를 pair/exchange만으로 호출한다.
+
+    변경 (2026-04-15): trading_style 필터 제거. Rachel은 체제 이미 고려한
+    시장 판단 1건을 생성. 전략 선택은 RegimeGate가 담당.
+    """
+    adv = _advisory(action="entry_long")
+    dec, _ = _make_decision(advisory=adv)
+
+    snap = SignalSnapshot(
+        pair="BTC_JPY",
+        exchange="gmo_coin",
+        timestamp=_NOW,
+        signal="entry_ok",
+        current_price=10_000_000.0,
+        exit_signal={"action": "hold"},
+        params={},
+        strategy_type="box_mean_reversion",
+    )
+    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+        mock_dt.now.return_value = _NOW
+        await dec.decide(snap)
+
+    dec._fetch_advisory.assert_awaited_once_with("BTC_JPY", "gmo_coin")
+
+
+@pytest.mark.asyncio
+async def test_ts02_strategy_type_default_is_trend_following():
+    """TS-02: SignalSnapshot.strategy_type 기본값은 "trend_following"."""
+    snap = SignalSnapshot(
+        pair="BTC_JPY",
+        exchange="gmo_coin",
+        timestamp=_NOW,
+        signal="entry_ok",
+        current_price=10_000_000.0,
+        exit_signal={"action": "hold"},
+        params={},
+    )
+    assert snap.strategy_type == "trend_following"
+
+
+@pytest.mark.asyncio
+async def test_ts03_different_strategy_type_goes_to_fallback():
+    """TS-03: advisory 없는 경우 (trading_style 불일치 시뮬레이션) → v1 폴백.
+
+    session이 None을 반환 → advisory 없음 → fallback.decide() 호출 확인.
+    """
+    fallback = AsyncMock()
+    fallback.decide.return_value = Decision(
+        action="hold",
+        pair="BTC_JPY",
+        exchange="gmo_coin",
+        confidence=0.3,
+        size_pct=None,
+        stop_loss=None,
+        take_profit=None,
+        reasoning="v1 폴백",
+        risk_factors=(),
+        source="rule_based_v1",
+        trigger="regular_4h",
+        raw_signal="no_signal",
+        timestamp=_NOW,
+    )
+
+    mock_session = AsyncMock()
+    mock_result = MagicMock()
+    mock_result.scalars.return_value.first.return_value = None
+    mock_session.execute.return_value = mock_result
+    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session.__aexit__ = AsyncMock(return_value=False)
+
+    dec = RachelAdvisoryDecision(
+        session_factory=MagicMock(return_value=mock_session),
+        advisory_model=MagicMock(),
+        fallback=fallback,
+    )
+    snap = SignalSnapshot(
+        pair="BTC_JPY",
+        exchange="gmo_coin",
+        timestamp=_NOW,
+        signal="entry_ok",
+        current_price=10_000_000.0,
+        exit_signal={"action": "hold"},
+        params={},
+        strategy_type="box_mean_reversion",
+    )
+    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+        mock_dt.now.return_value = _NOW
+        result = await dec.decide(snap)
+
+    assert result.source == "rachel_fallback_v1"
+    fallback.decide.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_ts04_fetch_advisory_uses_pair_exchange_only():
+    """TS-04: strategy_type 무관하게 _fetch_advisory(pair, exchange)만 호출."""
+    adv = _advisory(action="hold")
+    dec, _ = _make_decision(advisory=adv)
+
+    snap = _snapshot(signal="entry_ok")  # strategy_type 기본값 "trend_following"
+    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+        mock_dt.now.return_value = _NOW
+        await dec.decide(snap)
+
+    dec._fetch_advisory.assert_awaited_once_with("BTC_JPY", "bitflyer")
+
+
+# ──────────────────────────────────────────────────────────────
+# EC: 공유 advisory 엔지케이스 (trading_style 필터 제거 후 검증)
+# 성곩: 박스매니저도 추세매니저도 동일한 advisory를 받는다
+# ──────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_ec01_box_manager_snapshot_queries_same_advisory():
+    """
+    EC-01: strategy_type='box_mean_reversion' 스냅샷도 (pair, exchange)만으로
+           _fetch_advisory 호출 — trading_style 필터 없음.
+
+    배경: 롤백 전엔는 box_mean_reversion 스냅샷이 _fetch_advisory(…,
+    'box_mean_reversion')를 호출 → advisory 없음 → WARNING WARNING 반복.
+    롤백 후엔는 strategy_type 무관하게 (pair, exchange)만 호출.
+    """
+    adv = _advisory(action="hold")
+    dec, _ = _make_decision(advisory=adv)
+
+    box_snap = SignalSnapshot(
+        pair="BTC_JPY",
+        exchange="gmo_coin",
+        timestamp=_NOW,
+        signal="entry_ok",
+        current_price=10_000_000.0,
+        exit_signal={"action": "hold"},
+        params={},
+        strategy_type="box_mean_reversion",
+    )
+    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+        mock_dt.now.return_value = _NOW
+        result = await dec.decide(box_snap)
+
+    # trading_style 인자 없이 (pair, exchange)만으로 호출
+    dec._fetch_advisory.assert_awaited_once_with("BTC_JPY", "gmo_coin")
+    # advisory action=hold → entry 없음
+    assert result.action == "hold"
+    assert result.source == "rachel_advisory"
+
+
+@pytest.mark.asyncio
+async def test_ec02_different_strategy_types_get_same_advisory():
+    """
+    EC-02: trend_following 스냅샷과 box_mean_reversion 스냅샷이
+           동일한 advisory를 받아야 한다.
+
+    이 테스트는 두 카리의 decide()가 동일한 advisory를 변환하는지를 확인.
+    RegimeGate가 어느 카리의 진입을 허용할지 담당 — advisory는 전략 무관하게 1건.
+    """
+    adv = _advisory(action="entry_long", confidence=0.75)
+    # trend 매니저
+    dec_trend, _ = _make_decision(advisory=adv)
+    # box 매니저
+    dec_box, _ = _make_decision(advisory=adv)
+
+    trend_snap = SignalSnapshot(
+        pair="BTC_JPY", exchange="gmo_coin",
+        timestamp=_NOW, signal="entry_ok", current_price=10_000_000.0,
+        exit_signal={"action": "hold"}, params={},
+        strategy_type="trend_following",
+    )
+    box_snap = SignalSnapshot(
+        pair="BTC_JPY", exchange="gmo_coin",
+        timestamp=_NOW, signal="entry_ok", current_price=10_000_000.0,
+        exit_signal={"action": "hold"}, params={},
+        strategy_type="box_mean_reversion",
+    )
+    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+        mock_dt.now.return_value = _NOW
+        result_trend = await dec_trend.decide(trend_snap)
+        result_box = await dec_box.decide(box_snap)
+
+    # 둘 다 동일한 advisory로 entry_long
+    assert result_trend.action == "entry_long"
+    assert result_box.action == "entry_long"
+    assert result_trend.confidence == pytest.approx(0.75)
+    assert result_box.confidence == pytest.approx(0.75)
+    # 호출 시그니쳐는 strategy_type 없이 (pair, exchange)만
+    dec_trend._fetch_advisory.assert_awaited_once_with("BTC_JPY", "gmo_coin")
+    dec_box._fetch_advisory.assert_awaited_once_with("BTC_JPY", "gmo_coin")
+
+
+# ──────────────────────────────────────────────────────────────
+# RL: 로그 prefix 매니저 구분 테스트 — RL-01 ~ RL-02
+# ──────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_rl01_log_prefix_includes_trading_style(caplog):
+    """
+    RL-01: snapshot.params에 trading_style='trend_following'이 있으면
+           'advisory 읽음' 로그 prefix가 [RachelAdvisory:trend_following]이어야 한다.
+
+    배경: trend + box 매니저 2개가 동일 advisory를 읽을 때 어느 매니저 호출인지
+    구분하기 위해 trading_style을 로그 prefix에 포함한다 (2026-04-15).
+    """
+    import logging
+
+    adv = _advisory(action="hold")
+    dec, _ = _make_decision(advisory=adv)
+
+    snap = SignalSnapshot(
+        pair="btc_jpy",
+        exchange="gmo_coin",
+        timestamp=_NOW,
+        signal="wait_dip",
+        current_price=10_000_000.0,
+        exit_signal={"action": "hold", "reason": ""},
+        params={"position_size_pct": 0.5, "trading_style": "trend_following"},
+    )
+    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+        mock_dt.now.return_value = _NOW
+        with caplog.at_level(logging.INFO, logger="core.decision.rachel_advisory"):
+            await dec.decide(snap)
+
+    assert any(
+        "[RachelAdvisory:trend_following]" in r.message and "advisory 읽음" in r.message
+        for r in caplog.records
+    ), "로그에 [RachelAdvisory:trend_following] prefix가 포함되어야 함"
+
+
+@pytest.mark.asyncio
+async def test_rl02_log_prefix_fallback_when_no_trading_style(caplog):
+    """
+    RL-02: snapshot.params에 trading_style이 없으면 prefix가 [RachelAdvisory:?]로
+           표시된다 (폴백 동작).
+    """
+    import logging
+
+    adv = _advisory(action="hold")
+    dec, _ = _make_decision(advisory=adv)
+
+    snap = SignalSnapshot(
+        pair="btc_jpy",
+        exchange="gmo_coin",
+        timestamp=_NOW,
+        signal="wait_dip",
+        current_price=10_000_000.0,
+        exit_signal={"action": "hold", "reason": ""},
+        params={},  # trading_style 없음
+    )
+    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+        mock_dt.now.return_value = _NOW
+        with caplog.at_level(logging.INFO, logger="core.decision.rachel_advisory"):
+            await dec.decide(snap)
+
+    assert any(
+        "[RachelAdvisory:?]" in r.message and "advisory 읽음" in r.message
+        for r in caplog.records
+    ), "로그에 [RachelAdvisory:?] 폴백 prefix가 포함되어야 함"

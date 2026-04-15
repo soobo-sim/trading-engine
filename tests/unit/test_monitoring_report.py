@@ -403,20 +403,60 @@ class TestGetBoxNarrativeOutlook:
 # ── 텔레그램 텍스트 조립 테스트 ──────────────────────────
 
 class TestBuildTelegramText:
-    def test_no_position_with_blockers(self):
-        data = {
+    def _make_no_pos(self, **kwargs):
+        """공통 포지션 없는 data dict (누락 키 방지용)."""
+        base = {
             "trend_icon": "📉",
             "current_price": 232.49,
             "market_summary": "🔻 하락 전환",
             "ema_state": "EMA 아래 -0.14%",
             "rsi_state": "RSI 과매도(31.5)",
             "volatility_state": "변동성 높음",
+            "ema_slope_pct": None,
+            "rsi": None,
             "position": None,
-            "entry_blockers": ["EMA slope -0.14% → ≥+0.00% 필요"],
-            "conditions_met": 4,
+            "entry_blockers": [],
+            "conditions_met": 5,
             "conditions_total": 5,
             "jpy_available": 19468,
+            "collateral": None,
         }
+        base.update(kwargs)
+        return base
+
+    def _make_with_pos(self, **kwargs):
+        """공통 포지션 있는 data dict."""
+        base = {
+            "trend_icon": "📈",
+            "current_price": 11800000,
+            "position_summary": "상승추세·보유 유지",
+            "ema_state": "EMA 위 +1.5%",
+            "rsi_state": "RSI 중립(55.3)",
+            "volatility_state": "변동성 보통",
+            "ema_slope_pct": None,
+            "rsi": None,
+            "position": {
+                "side": "buy",
+                "entry_price": 11631190,
+                "entry_amount": 0.003,
+                "stop_loss_price": 11463739,
+                "trailing_stop_distance": 336261,
+                "unrealized_pnl_jpy": 506,
+                "unrealized_pnl_pct": 0.87,
+                "price_diff": 168810,
+            },
+            "entry_blockers": [],
+            "jpy_available": 10000,
+            "collateral": None,
+        }
+        base.update(kwargs)
+        return base
+
+    def test_no_position_with_blockers(self):
+        data = self._make_no_pos(
+            entry_blockers=["EMA slope -0.14% → ≥+0.00% 필요"],
+            conditions_met=4,
+        )
         text = build_telegram_text("CK", "21:01", "xrp_jpy", data)
         assert "[CK] 21:01" in text
         assert "📉추세추종" in text
@@ -425,41 +465,16 @@ class TestBuildTelegramText:
         assert "대기중" in text
 
     def test_no_position_entry_ready(self):
-        data = {
-            "trend_icon": "📈",
-            "current_price": 250.0,
-            "market_summary": "✅ 진입 임박",
-            "ema_state": "EMA 위 +0.15%",
-            "rsi_state": "RSI 중립(50.0)",
-            "volatility_state": "변동성 보통",
-            "position": None,
-            "entry_blockers": [],
-            "conditions_met": 5,
-            "conditions_total": 5,
-            "jpy_available": 50000,
-        }
+        data = self._make_no_pos(
+            trend_icon="📈",
+            current_price=250.0,
+            market_summary="✅ 진입 임박",
+        )
         text = build_telegram_text("CK", "15:00", "xrp_jpy", data)
         assert "✅ 5/5 진입 조건 충족" in text
 
     def test_with_position(self):
-        data = {
-            "trend_icon": "📈",
-            "current_price": 11800000,
-            "position_summary": "상승추세·보유 유지",
-            "ema_state": "EMA 위 +1.5%",
-            "rsi_state": "RSI 중립(55.3)",
-            "volatility_state": "변동성 보통",
-            "position": {
-                "entry_price": 11631190,
-                "entry_amount": 0.003,
-                "stop_loss_price": 11463739,
-                "trailing_stop_distance": 336261,
-                "unrealized_pnl_jpy": 506,
-                "unrealized_pnl_pct": 0.87,
-            },
-            "entry_blockers": [],
-            "jpy_available": 10000,
-        }
+        data = self._make_with_pos()
         text = build_telegram_text("BF", "21:01", "BTC_JPY", data)
         assert "[BF] 21:01" in text
         assert "손절" in text
@@ -469,11 +484,9 @@ class TestBuildTelegramText:
 
     def test_with_position_long_label(self):
         """side=buy → 롱 보유."""
-        data = {
-            "trend_icon": "📈",
-            "current_price": 10000000,
-            "position_summary": "상승추세·보유 유지",
-            "position": {
+        data = self._make_with_pos(
+            current_price=10000000,
+            position={
                 "side": "buy",
                 "entry_price": 9800000,
                 "entry_amount": 0.01,
@@ -481,21 +494,20 @@ class TestBuildTelegramText:
                 "trailing_stop_distance": 400000,
                 "unrealized_pnl_jpy": 200000,
                 "unrealized_pnl_pct": 2.04,
+                "price_diff": 200000,
             },
-            "entry_blockers": [],
-            "jpy_available": 50000,
-        }
+        )
         text = build_telegram_text("GMOC", "12:00", "BTC_JPY", data)
         assert "롱 보유" in text
         assert "숏 보유" not in text
 
     def test_with_position_short_label(self):
-        """side=sell → 숏 보유 (CFD 숏)."""
-        data = {
-            "trend_icon": "📉",
-            "current_price": 9500000,
-            "position_summary": "추세 약화 감지",
-            "position": {
+        """side=sell → 숏 보유 (레버리지 숏)."""
+        data = self._make_with_pos(
+            trend_icon="📉",
+            current_price=9500000,
+            position_summary="추세 약화 감지",
+            position={
                 "side": "sell",
                 "entry_price": 9800000,
                 "entry_amount": 0.01,
@@ -503,79 +515,268 @@ class TestBuildTelegramText:
                 "trailing_stop_distance": 600000,
                 "unrealized_pnl_jpy": 300000,
                 "unrealized_pnl_pct": 3.06,
+                "price_diff": -300000,
             },
-            "exit_signal": {"action": "hold"},
-            "entry_blockers": [],
-            "jpy_available": 100000,
-        }
-        text = build_telegram_text("GMO", "15:00", "BTC_JPY", data)
+            exit_signal={"action": "hold"},
+            jpy_available=100000,
+        )
+        text = build_telegram_text("GMOC", "15:00", "BTC_JPY", data)
         assert "숏 보유" in text
         assert "롱 보유" not in text
         assert "⚡ 전망:" in text
 
     def test_no_exit_signal_no_outlook_line(self):
         """exit_signal=None → ⚡ 전망 행 미표시."""
-        data = {
-            "trend_icon": "📈",
-            "current_price": 11800000,
-            "position_summary": "상승추세·보유 유지",
-            "position": {
+        data = self._make_with_pos(
+            position={
+                "side": "buy",
                 "entry_price": 11600000,
                 "entry_amount": 0.003,
                 "stop_loss_price": 11400000,
                 "trailing_stop_distance": 400000,
                 "unrealized_pnl_jpy": 600000,
                 "unrealized_pnl_pct": 1.72,
+                "price_diff": 200000,
             },
-            "exit_signal": None,
-            "entry_blockers": [],
-            "jpy_available": 10000,
-        }
+            exit_signal=None,
+        )
         text = build_telegram_text("BF", "10:00", "BTC_JPY", data)
         assert "⚡ 전망:" not in text
         assert "미실현" in text
 
     def test_exit_signal_full_exit_outlook(self):
         """exit_signal full_exit → ⚡ 전망: 즉시 청산 실행 중."""
-        data = {
-            "trend_icon": "📉",
-            "current_price": 11000000,
-            "position_summary": "🚨 청산 시그널 발생",
-            "position": {
+        data = self._make_with_pos(
+            trend_icon="📉",
+            current_price=11000000,
+            position_summary="🚨 청산 시그널 발생",
+            position={
+                "side": "buy",
                 "entry_price": 11500000,
                 "entry_amount": 0.003,
                 "stop_loss_price": 11200000,
                 "trailing_stop_distance": 200000,
                 "unrealized_pnl_jpy": -150000,
                 "unrealized_pnl_pct": -4.35,
+                "price_diff": -500000,
             },
-            "exit_signal": {"action": "full_exit"},
-            "entry_blockers": [],
-            "jpy_available": 10000,
-        }
+            exit_signal={"action": "full_exit"},
+        )
         text = build_telegram_text("BF", "10:00", "BTC_JPY", data)
         assert "즉시 청산 실행 중" in text
 
     def test_stop_loss_price_zero_no_crash(self):
         """stop_loss_price=0 → 에러 없이 처리."""
-        data = {
-            "trend_icon": "📈",
-            "current_price": 11000000,
-            "position_summary": "보유 유지",
-            "position": {
+        data = self._make_with_pos(
+            position={
+                "side": "buy",
                 "entry_price": 10800000,
                 "entry_amount": 0.003,
                 "stop_loss_price": 0,
                 "trailing_stop_distance": 0,
                 "unrealized_pnl_jpy": 60000,
                 "unrealized_pnl_pct": 1.85,
+                "price_diff": 200000,
             },
-            "entry_blockers": [],
-            "jpy_available": 10000,
-        }
+        )
         text = build_telegram_text("BF", "10:00", "BTC_JPY", data)
         assert "손절" in text  # 행은 존재
         assert "미실현" in text
+
+    # ── 신규: 진입가 대비 차이 표시 ──────────────────────────────
+
+    def test_price_diff_positive_shown(self):
+        """D2-01: 롱 이익 — 진입가 대비 +XX 표시."""
+        data = self._make_with_pos(
+            current_price=12000000,
+            position={
+                "side": "buy",
+                "entry_price": 11800000,
+                "entry_amount": 0.004,
+                "stop_loss_price": 11600000,
+                "trailing_stop_distance": 400000,
+                "unrealized_pnl_jpy": 800,
+                "unrealized_pnl_pct": 1.69,
+                "price_diff": 200000,
+            },
+        )
+        text = build_telegram_text("GMOC", "22:06", "btc_jpy", data)
+        assert "진입가 대비 +¥200,000" in text
+
+    def test_price_diff_negative_shown(self):
+        """D2-02: 롱 손실 — 진입가 대비 -XX 표시."""
+        data = self._make_with_pos(
+            current_price=11827679,
+            position={
+                "side": "buy",
+                "entry_price": 11919627,
+                "entry_amount": 0.004,
+                "stop_loss_price": 11735812,
+                "trailing_stop_distance": 91867,
+                "unrealized_pnl_jpy": -368,
+                "unrealized_pnl_pct": -0.77,
+                "price_diff": -91948,
+            },
+        )
+        text = build_telegram_text("GMOC", "22:06", "btc_jpy", data)
+        assert "진입가 대비 -¥91,948" in text
+        assert "-¥368" in text
+
+    def test_pnl_sign_before_yen(self):
+        """D2-Sig: P&L 부호가 ¥ 앞에 위치. '¥-' 형식 사용 안 함."""
+        data = self._make_with_pos(
+            position={
+                "side": "buy",
+                "entry_price": 11919627,
+                "entry_amount": 0.004,
+                "stop_loss_price": 11735812,
+                "trailing_stop_distance": 91868,
+                "unrealized_pnl_jpy": -368,
+                "unrealized_pnl_pct": -0.77,
+                "price_diff": -91948,
+            },
+        )
+        text = build_telegram_text("GMOC", "22:06", "btc_jpy", data)
+        assert "-¥368" in text
+        assert "¥-368" not in text  # 기존 포맷 사용 안 함
+
+    def test_situation_with_ema_rsi_basis(self):
+        """D2-03: ema_slope_pct + rsi 있으면 📊 근거 괄호 표시."""
+        data = self._make_with_pos(
+            ema_slope_pct=0.12,
+            rsi=52.0,
+        )
+        text = build_telegram_text("GMOC", "22:06", "btc_jpy", data)
+        assert "EMA↑+0.12%" in text
+        assert "RSI 52" in text
+
+    def test_situation_without_basis_no_parenthesis(self):
+        """D2-04: ema_slope_pct=None → 괄호 없이 situation만 표시."""
+        data = self._make_with_pos(ema_slope_pct=None, rsi=None)
+        text = build_telegram_text("GMOC", "22:06", "btc_jpy", data)
+        assert "(EMA" not in text
+
+    def test_no_position_basis_shown(self):
+        """D2-03b: 대기중에도 EMA slope + RSI 근거 표시."""
+        data = self._make_no_pos(
+            ema_slope_pct=-0.14,
+            rsi=31.5,
+            market_summary="🔻 하락 전환",
+        )
+        text = build_telegram_text("GMOC", "22:06", "btc_jpy", data)
+        assert "EMA↓-0.14%" in text
+        assert "RSI 32" in text  # 31.5 → .0f 반올림
+
+    def test_collateral_line_shown_when_leveraged(self):
+        """D2-05: collateral 있으면 💼 증거금 라인."""
+        data = self._make_with_pos(
+            collateral={
+                "collateral": 200000,
+                "open_position_pnl": -368,
+                "require_collateral": 100000,
+                "keep_rate": 200.0,
+            },
+        )
+        text = build_telegram_text("GMOC", "22:06", "btc_jpy", data)
+        assert "💼 증거금" in text
+        assert "¥200,000" in text
+        assert "필요 ¥100,000" in text
+        assert "여력 ¥100,000" in text
+        # 기존 💰 잔고 라인 미표시
+        assert "💰 ¥" not in text
+
+    def test_collateral_none_fallback_to_jpy(self):
+        """D2-06: collateral=None → 기존 💰 ¥ 라인 표시."""
+        data = self._make_with_pos(collateral=None, jpy_available=100173)
+        text = build_telegram_text("GMOC", "22:06", "btc_jpy", data)
+        assert "💰 ¥100,173" in text
+        assert "💼" not in text
+
+    def test_collateral_available_zero_floor(self):
+        """D2-09: require >= collateral → 여력 ¥0 (음수 방지)."""
+        data = self._make_no_pos(
+            collateral={
+                "collateral": 50000,
+                "open_position_pnl": 0,
+                "require_collateral": 60000,
+                "keep_rate": 83.0,
+            },
+        )
+        text = build_telegram_text("GMOC", "22:06", "btc_jpy", data)
+        assert "여력 ¥0" in text
+
+    def test_price_diff_zero(self):
+        """D2-10: price_diff=0 → +¥0 표시."""
+        data = self._make_with_pos(
+            current_price=10000000,
+            position={
+                "side": "buy",
+                "entry_price": 10000000,
+                "entry_amount": 0.01,
+                "stop_loss_price": 9800000,
+                "trailing_stop_distance": 200000,
+                "unrealized_pnl_jpy": 0,
+                "unrealized_pnl_pct": 0.0,
+                "price_diff": 0,
+            },
+        )
+        text = build_telegram_text("GMOC", "22:06", "btc_jpy", data)
+        assert "진입가 대비 +¥0" in text
+
+    def test_ema_slope_zero_shows_flat_arrow(self):
+        """E1: ema_slope_pct=0.0 → → 화살표 (↓ 아님)."""
+        data = self._make_no_pos(ema_slope_pct=0.0, rsi=50.0)
+        text = build_telegram_text("GMOC", "22:06", "btc_jpy", data)
+        assert "EMA→+0.00%" in text
+        assert "EMA↓" not in text
+        assert "EMA↑" not in text
+
+    def test_price_diff_missing_key_defaults_to_zero(self):
+        """E2: price_diff 키 없는 구버전 position_data → +¥0 (에러 없음)."""
+        data = self._make_with_pos(
+            current_price=10000000,
+            position={
+                "side": "buy",
+                "entry_price": 9800000,
+                "entry_amount": 0.01,
+                "stop_loss_price": 9600000,
+                "trailing_stop_distance": 400000,
+                "unrealized_pnl_jpy": 200000,
+                "unrealized_pnl_pct": 2.04,
+                # price_diff 키 없음 — 구버전 호환
+            },
+        )
+        text = build_telegram_text("GMOC", "22:06", "btc_jpy", data)
+        assert "진입가 대비 +¥0" in text
+        assert "미실현" in text
+
+    def test_short_pnl_sign_positive_when_price_fell(self):
+        """E3: 숏 포지션에서 가격 하락 → 이익(+) 표시."""
+        data = self._make_with_pos(
+            trend_icon="📉",
+            current_price=9500000,
+            position_summary="추세 유지",
+            position={
+                "side": "sell",
+                "entry_price": 9800000,
+                "entry_amount": 0.01,
+                "stop_loss_price": 10100000,
+                "trailing_stop_distance": 600000,
+                "unrealized_pnl_jpy": 30000,   # 숏 이익
+                "unrealized_pnl_pct": 3.06,
+                "price_diff": -300000,
+            },
+        )
+        text = build_telegram_text("GMOC", "22:06", "btc_jpy", data)
+        assert "숏 보유" in text
+        assert "+¥30,000" in text   # 이익 → + 부호
+        assert "-¥30,000" not in text
+
+    def test_both_ema_slope_none_rsi_present_no_basis(self):
+        """E4: ema_slope_pct만 None → 괄호 없음 (rsi만으로는 표시 안 함)."""
+        data = self._make_no_pos(ema_slope_pct=None, rsi=55.0)
+        text = build_telegram_text("GMOC", "22:06", "btc_jpy", data)
+        assert "(EMA" not in text
 
 
 # ── 메모리 블록 조립 테스트 ──────────────────────────────
@@ -2142,3 +2343,74 @@ class TestSupportShortIntegration:
         # conditions_met = max(0, 5 - 1) = 4
         conditions_met = max(0, 5 - len(blockers))
         assert conditions_met == 4
+
+
+# ──────────────────────────────────────────────────────────────
+# RG-M: build_telegram_text 체제 라인 (⚙️) 표시 테스트
+# ──────────────────────────────────────────────────────────────
+
+
+class TestBuildTelegramTextRegimeLine:
+    """RG-M01~RG-M04: ⚙️ 체제: 라인 표시/미표시 검증."""
+
+    def _base(self, regime=None, active_strategy=None, has_position=False):
+        d = {
+            "trend_icon": "📈",
+            "current_price": 11_800_000,
+            "ema_slope_pct": 0.1,
+            "rsi": 52.0,
+            "regime": regime,
+            "active_strategy": active_strategy,
+            "jpy_available": 50_000,
+            "collateral": None,
+        }
+        if has_position:
+            d.update({
+                "position": {
+                    "side": "buy",
+                    "entry_price": 11_600_000,
+                    "entry_amount": 0.003,
+                    "stop_loss_price": 11_400_000,
+                    "trailing_stop_distance": 400_000,
+                    "unrealized_pnl_jpy": 600,
+                    "unrealized_pnl_pct": 1.03,
+                    "price_diff": 200_000,
+                },
+                "position_summary": "상승추세·보유 유지",
+                "exit_signal": None,
+            })
+        else:
+            d.update({
+                "position": None,
+                "position_summary": None,
+                "wait_direction": "long",
+                "market_summary": "확신 상승추세",
+                "entry_blockers": [],
+                "conditions_met": 5,
+                "conditions_total": 5,
+            })
+        return d
+
+    def test_rgm01_trending_trend_following_shown_with_position(self):
+        """RG-M01: regime=trending + active_strategy=trend_following → ⚙️ 체제 라인 포함 (포지션 있음)."""
+        data = self._base(regime="trending", active_strategy="trend_following", has_position=True)
+        text = build_telegram_text("GMOC", "16:00", "btc_jpy", data)
+        assert "⚙️ 체제: 추세장 | 활성전략: 추세추종" in text
+
+    def test_rgm02_ranging_box_shown_no_position(self):
+        """RG-M02: regime=ranging + active_strategy=box_mean_reversion → ⚙️ 적절한 라벨 (포지션 없음)."""
+        data = self._base(regime="ranging", active_strategy="box_mean_reversion", has_position=False)
+        text = build_telegram_text("GMOC", "16:00", "btc_jpy", data)
+        assert "⚙️ 체제: 횡보장 | 활성전략: 박스역추세" in text
+
+    def test_rgm03_no_regime_no_active_strategy_no_line(self):
+        """RG-M03: regime=None, active_strategy=None → ⚙️ 라인 미표시."""
+        data = self._base(regime=None, active_strategy=None, has_position=False)
+        text = build_telegram_text("GMOC", "16:00", "btc_jpy", data)
+        assert "⚙️ 체제:" not in text
+
+    def test_rgm04_unclear_regime_shown(self):
+        """RG-M04: regime=unclear → '불명확' 라벨."""
+        data = self._base(regime="unclear", active_strategy=None, has_position=False)
+        text = build_telegram_text("GMOC", "16:00", "btc_jpy", data)
+        assert "⚙️ 체제: 불명확" in text

@@ -28,7 +28,7 @@ from core.data.dto import Decision, GuardrailResult, SignalSnapshot, modify_deci
 logger = logging.getLogger(__name__)
 
 # 진입 액션만 검사
-_ENTRY_ACTIONS = {"entry_long", "entry_short"}
+_ENTRY_ACTIONS = {"entry_long", "entry_short", "add_position"}
 
 # GR-03: 포지션 사이즈 상한
 _MAX_SIZE_PCT = 0.8
@@ -123,6 +123,12 @@ class AiGuardrails:
         if gr05 is not None:
             violations.append(gr05)
 
+        # GR-06: 피라미딩 총 사이즈 상한
+        if decision.action == "add_position":
+            gr06 = self._check_gr06(decision, snapshot)
+            if gr06 is not None:
+                violations.append(gr06)
+
         is_blocked = bool(violations)
 
         if is_blocked:
@@ -137,10 +143,15 @@ class AiGuardrails:
             )
         else:
             today_count = _today_count if _today_count is not None else 0
+            action_label = "추가 매수" if decision.action == "add_position" else "진입"
+            pyramid_info = ""
+            if decision.action == "add_position" and snapshot.position:
+                pc = snapshot.position.extra.get("pyramid_count", 0)
+                pyramid_info = f" pyramid={pc}→{pc+1}"
             logger.info(
-                f"[Guardrail] {decision.pair} 진입 승인 — "
+                f"[Guardrail] {decision.pair} {action_label} 승인 — "
                 f"금일 거래 {today_count}/{max_trades}, "
-                f"사이즈 {final_decision.size_pct:.0%}"
+                f"사이즈 {final_decision.size_pct:.0%}{pyramid_info}"
             )
 
         return GuardrailResult(
@@ -373,3 +384,33 @@ class AiGuardrails:
             current_jpy: float | None = row[0] if row is not None else None
 
         return ath_jpy, current_jpy
+
+    # ── GR-06 ────────────────────────────────────────────────────
+
+    def _check_gr06(self, decision: Decision, snapshot: SignalSnapshot) -> str | None:
+        """피라미딩 시 기존 + 추가 사이즈 합계가 position_size_pct 초과 여부.
+
+        add_position 전용. 기존 total_size_pct(Position.extra)와
+        추가분 size_pct의 합이 params의 position_size_pct 상한을 초과하면 위반.
+
+        데이터 부족 시 통과 (차단 안 함).
+        """
+        max_total_pct = float(snapshot.params.get("position_size_pct", 50.0)) / 100.0
+        existing_pct = (
+            snapshot.position.extra.get("total_size_pct", 0.0)
+            if snapshot.position else 0.0
+        )
+        add_pct = decision.size_pct or 0.0
+        new_total = existing_pct + add_pct
+
+        if new_total > max_total_pct:
+            return (
+                f"GR-06: 피라미딩 총 사이즈 {new_total:.0%} > "
+                f"상한 {max_total_pct:.0%} "
+                f"(기존 {existing_pct:.0%} + 추가 {add_pct:.0%})"
+            )
+
+        logger.info(
+            f"[Guardrail] GR-06 통과: 총 사이즈 {new_total:.0%} / 상한 {max_total_pct:.0%}"
+        )
+        return None

@@ -181,7 +181,11 @@ async def activate_strategy(
     state: AppState = Depends(get_state),
     db: AsyncSession = Depends(get_db),
 ):
-    """proposed → active. 동일 pair 기존 전략은 archive."""
+    """proposed → active. 동일 pair + 동일 trading_style 기존 전략은 archive.
+
+    서로 다른 trading_style(trend_following / box_mean_reversion)은
+    같은 pair에 동시에 active 상태로 공존 가능 — 듀얼 매니저 운용.
+    """
     Model = state.models.strategy
     row = await db.get(Model, strategy_id)
     if not row:
@@ -190,8 +194,10 @@ async def activate_strategy(
         raise HTTPException(400, f"proposed 상태만 활성화 가능 (현재: {row.status})")
     _validate_gmo_safety(row.parameters or {}, state)
 
-    # 동일 pair 기존 active 아카이브
+    # 동일 pair + 동일 trading_style 기존 active 아카이브
+    # (trading_style이 다르면 공존 허용 — 듀얼 매니저)
     pair = (row.parameters or {}).get("pair")
+    style = (row.parameters or {}).get("trading_style")
     if pair:
         stmt = (
             select(Model)
@@ -201,7 +207,8 @@ async def activate_strategy(
         result = await db.execute(stmt)
         for existing in result.scalars().all():
             existing_pair = (existing.parameters or {}).get("pair")
-            if existing_pair == pair:
+            existing_style = (existing.parameters or {}).get("trading_style")
+            if existing_pair == pair and existing_style == style:
                 existing.status = "archived"
                 existing.archived_at = datetime.now(timezone.utc)
 
@@ -217,8 +224,10 @@ async def activate_strategy(
         hot_style = params.get("trading_style")
         if registry and hot_pair and hot_style:
             hot_pair = state.normalize_pair(hot_pair)
-            # 해당 pair 실행 중인 모든 전략 중단 (기존 active + paper 포함)
-            await registry.stop_pair_all_managers(hot_pair)
+            # 동일 스타일 매니저만 중단 (다른 스타일은 계속 실행 — 듀얼 매니저 운용)
+            manager = registry.get(hot_style)
+            if manager and manager.is_running(hot_pair):
+                await manager.stop(hot_pair)
             # 새 전략 실전 모드 기동
             start_params = {**params, "strategy_id": row.id}
             if not await registry.start_strategy(hot_style, hot_pair, start_params):

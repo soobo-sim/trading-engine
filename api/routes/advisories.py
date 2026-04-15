@@ -24,8 +24,9 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/advisories", tags=["Advisories"])
 
-_VALID_ACTIONS = frozenset({"entry_long", "entry_short", "hold", "exit", "adjust_risk"})
+_VALID_ACTIONS = frozenset({"entry_long", "entry_short", "hold", "exit", "adjust_risk", "add_position"})
 _VALID_REGIMES = frozenset({"trending", "ranging", "uncertain"})
+_VALID_STYLES = frozenset({"trend_following", "box_mean_reversion"})
 
 
 # ── Schemas ───────────────────────────────────────────────────
@@ -42,6 +43,7 @@ class AdvisoryCreateRequest(BaseModel):
     risk_notes: str | None = None
     alice_summary: str | None = None
     samantha_summary: str | None = None
+    trading_style: str = Field("trend_following", description="trend_following|box_mean_reversion")
     ttl_hours: float = Field(5.0, gt=0.0, le=48.0, description="만료까지 시간 (기본 5H, 최대 48H)")
     adjustments: dict | None = Field(
         None,
@@ -64,6 +66,7 @@ class AdvisoryResponse(BaseModel):
     alice_summary: str | None
     samantha_summary: str | None
     adjustments: dict | None
+    trading_style: str
     created_at: datetime
     expires_at: datetime
     is_expired: bool
@@ -91,6 +94,7 @@ def _to_response(advisory: RachelAdvisory) -> AdvisoryResponse:
         alice_summary=advisory.alice_summary,
         samantha_summary=advisory.samantha_summary,
         adjustments=advisory.adjustments,
+        trading_style=advisory.trading_style,
         created_at=advisory.created_at,
         expires_at=expires_at,
         is_expired=now >= expires_at,
@@ -126,6 +130,11 @@ async def create_advisory(
             400,
             {"blocked_code": "ADJUSTMENTS_REQUIRED", "detail": "action=adjust_risk 이면 adjustments 필수."},
         )
+    if body.trading_style not in _VALID_STYLES:
+        raise HTTPException(
+            400,
+            {"blocked_code": "INVALID_STYLE", "detail": f"trading_style은 {sorted(_VALID_STYLES)} 중 하나여야 합니다."},
+        )
 
     now = datetime.now(timezone.utc)
     expires_at = now + timedelta(hours=body.ttl_hours)
@@ -148,6 +157,7 @@ async def create_advisory(
         alice_summary=body.alice_summary,
         samantha_summary=body.samantha_summary,
         adjustments=adjustments,
+        trading_style=body.trading_style,
         expires_at=expires_at,
     )
     db.add(advisory)
@@ -156,7 +166,10 @@ async def create_advisory(
 
     logger.info(
         f"[Advisory] 저장 완료: pair={advisory.pair} action={advisory.action} "
-        f"confidence={advisory.confidence:.2f} expires={expires_at.astimezone(JST).isoformat()}"
+        f"confidence={advisory.confidence:.2f} size_pct={advisory.size_pct} "
+        f"regime={advisory.regime} expires={expires_at.astimezone(JST).isoformat()}\n"
+        f"  근거: {advisory.reasoning}\n"
+        f"  리스크: {advisory.risk_notes or '없음'}"
     )
     return _to_response(advisory)
 

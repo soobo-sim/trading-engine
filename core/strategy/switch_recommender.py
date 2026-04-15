@@ -13,6 +13,11 @@ SwitchRecommender — 전략 스위칭 추천 엔진.
 SnapshotCollector가 collect_all_snapshots() 완료 후 evaluate()를 호출한다.
 on_recommendation 콜백은 Step 4/4에서 Telegram 연동에 사용된다.
 
+역할 분리:
+    - SwitchRecommender: 동일 타입 내 파라미터 비교 추천 (trend_following ↔ trend_following 등)
+    - RegimeGate (core/execution/regime_gate.py): cross-type 전환 담당
+      (trend_following ↔ box_mean_reversion) — regime 기반 자동 전환
+
 참조: solution-design/DYNAMIC_STRATEGY_SWITCHING.md §P-1
 """
 from __future__ import annotations

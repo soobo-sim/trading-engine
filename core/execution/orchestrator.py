@@ -120,7 +120,7 @@ class ExecutionOrchestrator:
         # Step 3: 승인 게이트 (진입 액션만)
         if (
             self._approval_gate is not None
-            and result.final_decision.action in {"entry_long", "entry_short"}
+            and result.final_decision.action in {"entry_long", "entry_short", "add_position"}
         ):
             try:
                 approved = await self._approval_gate.request_approval(
@@ -146,10 +146,22 @@ class ExecutionOrchestrator:
 
         # 최종 승인: 매니저에서 실행할 것
         judgment_id = await self._save_judgment(snapshot, decision, guardrail_result=result)
-        logger.info(
-            f"[Orchestrator] {snapshot.pair}: 판단={result.final_decision.action} "
-            f"→ 안전장치 통과 → 실행 대기 (매니저에게 위임)"
-        )
+        final = result.final_decision
+        if final.action in {"entry_long", "entry_short", "add_position"}:
+            pos_label = "포지션 있음" if snapshot.position else "포지션 없음"
+            pyramid = snapshot.position.extra.get("pyramid_count", 0) if snapshot.position else 0
+            logger.info(
+                f"[Orchestrator] {snapshot.pair}: 판단={final.action} "
+                f"→ 안전장치 통과 → 실행 대기\n"
+                f"  확신도={final.confidence:.2f} 사이즈={final.size_pct} "
+                f"{pos_label} pyramid={pyramid}\n"
+                f"  근거: {final.reasoning[:120]}"
+            )
+        else:
+            logger.info(
+                f"[Orchestrator] {snapshot.pair}: 판단={final.action} "
+                f"→ 안전장치 통과 → 실행 대기 (매니저에게 위임)"
+            )
         return ExecutionResult(
             action=result.final_decision.action,
             executed=False,  # 실제 실행은 매니저가 함

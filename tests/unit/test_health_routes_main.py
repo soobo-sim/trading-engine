@@ -462,11 +462,12 @@ class TestStrategiesRoute:
 
     @pytest.mark.asyncio
     async def test_activate_archives_same_pair(self, app_state):
-        """동일 pair 기존 active 전략이 자동 archive."""
+        """동일 pair + 동일 trading_style 기존 active 전략이 자동 archive.
+        다른 trading_style은 공존 허용 (듀얼 매니저)."""
         app = _create_test_app(app_state)
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
-            # 전략 1 생성 + 활성화
+            # 전략 1 생성 + 활성화 (trend_following)
             resp = await client.post("/api/strategies", json={
                 "name": "V1",
                 "description": "첫 번째 전략",
@@ -476,7 +477,8 @@ class TestStrategiesRoute:
             sid1 = resp.json()["id"]
             await client.put(f"/api/strategies/{sid1}/activate")
 
-            # 전략 2 생성 + 활성화 → 전략 1 자동 archive
+            # 전략 2 생성 + 활성화 (box_mean_reversion — 다른 스타일)
+            # → 전략 1은 archive되지 않아야 함 (스타일 다름, 공존 허용)
             resp = await client.post("/api/strategies", json={
                 "name": "V2",
                 "description": "두 번째 전략",
@@ -486,9 +488,30 @@ class TestStrategiesRoute:
             sid2 = resp.json()["id"]
             await client.put(f"/api/strategies/{sid2}/activate")
 
-            # 전략 1 확인 → archived
+            # 전략 1은 여전히 active (다른 스타일이므로 archive 안 됨)
+            resp = await client.get(f"/api/strategies/{sid1}")
+            assert resp.json()["status"] == "active"
+
+            # 전략 2도 active
+            resp = await client.get(f"/api/strategies/{sid2}")
+            assert resp.json()["status"] == "active"
+
+            # 같은 스타일(trend_following) 새 버전 활성화 → 기존 것은 archive됨
+            resp = await client.post("/api/strategies", json={
+                "name": "V3",
+                "description": "세 번째 전략",
+                "parameters": {"pair": "eth_jpy", "trading_style": "trend_following"},
+                "rationale": "ETH 추세추종 파라미터 개선 세 번째 버전",
+            })
+            sid3 = resp.json()["id"]
+            await client.put(f"/api/strategies/{sid3}/activate")
+
+            # 전략 1 (trend_following) → archived (같은 스타일 충돌)
             resp = await client.get(f"/api/strategies/{sid1}")
             assert resp.json()["status"] == "archived"
+            # 전략 2 (box_mean_reversion) → 여전히 active
+            resp = await client.get(f"/api/strategies/{sid2}")
+            assert resp.json()["status"] == "active"
 
 
 # ═══════════════════════════════════════════════════════════════

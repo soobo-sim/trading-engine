@@ -84,16 +84,20 @@ class RachelAdvisoryDecision:
     # ── 내부 헬퍼 ──────────────────────────────────────────────
 
     async def _fetch_advisory(self, pair: str, exchange: str):
-        """DB에서 최신 미만료 advisory 조회."""
+        """DB에서 최신 미만료 advisory 조회.
+
+        Note: trading_style 조건 없음 — Rachel은 체제를 이미 고려한 시장 판단을
+        1건 생성한다. 전략 선택은 RegimeGate가 담당하므로 여기서 trading_style
+        로 필터링하지 않는다.
+        """
         now = datetime.now(timezone.utc)
-        pair_upper = pair.upper()  # btc_jpy → BTC_JPY (레이첼은 대문자로 저장)
         model = self._advisory_model
         try:
             async with self._session_factory() as session:
                 stmt = (
                     select(model)
                     .where(
-                        model.pair == pair_upper,
+                        model.pair == pair,
                         model.exchange == exchange,
                         model.expires_at > now,
                     )
@@ -120,6 +124,7 @@ class RachelAdvisoryDecision:
           청산/스탑: 어느 쪽이든 요구하면 실행 (보수적)
           advisory hold: 항상 hold (레이첼 보류 존중)
           advisory exit: 포지션 있으면 즉시 exit
+          add_position: 포지션 보유 + P&L>0 + pyramid<3 + 청산 시그널 없음
 
         만료 근접 (< 1H) 시 진입 억제.
         """
@@ -128,6 +133,19 @@ class RachelAdvisoryDecision:
         exit_action = exit_signal.get("action", "hold")
         has_position = snapshot.position is not None
         now_ts = now
+
+        # ── advisory 읽기 로그 ────────────────────────────────────
+        remaining_h = (expires_at - now_ts).total_seconds() / 3600
+        pos_label = "포지션 있음" if has_position else "포지션 없음"
+        pyramid_count_log = snapshot.position.extra.get("pyramid_count", 0) if snapshot.position else 0
+        style = snapshot.params.get("trading_style", "?")
+        logger.info(
+            f"[RachelAdvisory:{style}] {snapshot.pair}: advisory 읽음 — "
+            f"action={advisory.action} confidence={advisory.confidence:.2f} "
+            f"size_pct={advisory.size_pct} 잔여={remaining_h:.1f}H "
+            f"signal={snapshot.signal} {pos_label} pyramid={pyramid_count_log}\n"
+            f"  근거: {advisory.reasoning[:100]}"
+        )
 
         advisory_action = advisory.action  # "entry_long"|"entry_short"|"hold"|"exit"
         confidence = advisory.confidence
@@ -262,6 +280,95 @@ class RachelAdvisoryDecision:
                     f"advisory=entry_short이나 signal={signal} → 타이밍 미충족. "
                     f"advisory 근거: {advisory.reasoning}"
                 ),
+            )
+
+        # ── add_position: 포지션 보유 중 추가 매수 (피라미딩) ─────
+        _MAX_PYRAMID = 3
+        if advisory_action == "add_position" and has_position:
+            pyramid_count = snapshot.position.extra.get("pyramid_count", 0)
+
+            # 조건 1: 피라미딩 횟수 제한
+            if pyramid_count >= _MAX_PYRAMID:
+                logger.info(
+                    f"[RachelAdvisory] {snapshot.pair}: add_position 차단 — "
+                    f"피라미딩 상한 도달 ({pyramid_count}/{_MAX_PYRAMID})"
+                )
+                return self._decision(
+                    action="hold", snapshot=snapshot, confidence=confidence,
+                    size_pct=0.0, stop_loss=None, take_profit=None,
+                    reasoning=f"피라미딩 상한 도달 ({pyramid_count}/{_MAX_PYRAMID})",
+                )
+
+            # 조건 2: 현재 수익 구간에서만 (물타기 방지)
+            entry_price = snapshot.position.entry_price
+            current_price = snapshot.current_price
+            side = snapshot.position.extra.get("side", "buy")
+            if side in ("buy", "long"):
+                pnl_jpy = (current_price - entry_price) * snapshot.position.entry_amount
+                is_profitable = current_price > entry_price
+            else:
+                pnl_jpy = (entry_price - current_price) * snapshot.position.entry_amount
+                is_profitable = current_price < entry_price
+
+            if not is_profitable:
+                logger.info(
+                    f"[RachelAdvisory] {snapshot.pair}: add_position 차단 — "
+                    f"손실 구간 (P&L ¥{pnl_jpy:+,.0f}). 물타기 방지"
+                )
+                return self._decision(
+                    action="hold", snapshot=snapshot, confidence=confidence,
+                    size_pct=0.0, stop_loss=None, take_profit=None,
+                    reasoning=f"손실 구간 — 물타기 방지 (P&L ¥{pnl_jpy:+,.0f})",
+                )
+
+            # 조건 3: 청산 시그널 활성 시 차단
+            if signal in ("exit_warning",) or exit_action in ("full_exit", "tighten_stop"):
+                logger.info(
+                    f"[RachelAdvisory] {snapshot.pair}: add_position 차단 — "
+                    f"청산 시그널 활성 (signal={signal}, exit={exit_action})"
+                )
+                return self._decision(
+                    action="hold", snapshot=snapshot, confidence=confidence,
+                    size_pct=0.0, stop_loss=None, take_profit=None,
+                    reasoning=f"청산 시그널 활성 — 추가 매수 차단 (signal={signal})",
+                )
+
+            # 조건 4: 만료 근접 시 차단
+            remaining_sec = (expires_at - now_ts).total_seconds()
+            if remaining_sec < _EXPIRY_GUARD_SEC:
+                logger.info(
+                    f"[RachelAdvisory] {snapshot.pair}: add_position 차단 — "
+                    f"advisory 만료 임박 ({remaining_sec/3600:.1f}H)"
+                )
+                return self._decision(
+                    action="hold", snapshot=snapshot, confidence=confidence,
+                    size_pct=0.0, stop_loss=None, take_profit=None,
+                    reasoning=f"advisory 만료 임박 ({remaining_sec/3600:.1f}H) → 추가 매수 보류",
+                )
+
+            # 모든 조건 통과 → add_position 승인
+            logger.info(
+                f"[RachelAdvisory] {snapshot.pair}: add_position 승인 — "
+                f"피라미딩 #{pyramid_count+1}/{_MAX_PYRAMID} "
+                f"P&L ¥{pnl_jpy:+,.0f} confidence={confidence:.2f} "
+                f"size_pct={size_pct}\n"
+                f"  근거: {advisory.reasoning[:100]}"
+            )
+            return self._decision(
+                action="add_position", snapshot=snapshot,
+                confidence=confidence, size_pct=size_pct,
+                stop_loss=stop_loss, take_profit=take_profit,
+                reasoning=f"레이첼 add_position #{pyramid_count+1}: {advisory.reasoning}",
+            )
+
+        if advisory_action == "add_position" and not has_position:
+            logger.info(
+                f"[RachelAdvisory] {snapshot.pair}: add_position이나 포지션 없음 → hold"
+            )
+            return self._decision(
+                action="hold", snapshot=snapshot, confidence=confidence,
+                size_pct=0.0, stop_loss=None, take_profit=None,
+                reasoning="add_position이나 포지션 없음 → hold",
             )
 
         # ── adjust_risk: 리스크 파라미터 동적 재조정 ─────────────

@@ -36,6 +36,9 @@ class GmoCoinTrendManager(CfdTrendFollowingManager):
     _log_prefix = "[GmocMgr]"
     # _supports_short = True — CdfTrendFollowingManager에서 상속
 
+    def _get_strategy_type(self) -> str:
+        return "trend_following"
+
     # ──────────────────────────────────────────
     # 진입
     # ──────────────────────────────────────────
@@ -201,7 +204,13 @@ class GmoCoinTrendManager(CfdTrendFollowingManager):
                 entry_price=exec_price,
                 entry_amount=exec_amount,
                 stop_loss_price=initial_sl,
-                extra={"side": side, "opened_at": datetime.now(timezone.utc)},
+                extra={
+                    "side": side,
+                    "opened_at": datetime.now(timezone.utc),
+                    "pyramid_count": 0,
+                    "pyramid_entries": [],
+                    "total_size_pct": position_size_pct / 100.0,
+                },
             )
             self._position[product_code] = pos
 
@@ -305,6 +314,200 @@ class GmoCoinTrendManager(CfdTrendFollowingManager):
             )
         except Exception as e:
             logger.error(f"[GmocMgr] {product_code}: 청산 오류 — {e}", exc_info=True)
+
+    # ──────────────────────────────────────────
+    # 피라미딩 (포지션 추가 매수)
+    # ──────────────────────────────────────────
+
+    async def _add_to_position(
+        self,
+        product_code: str,
+        side: str,
+        price: float,
+        atr: Optional[float],
+        params: Dict,
+        *,
+        result: Any = None,
+    ) -> None:
+        """피라미딩 추가 매수 실행.
+
+        1) 증거금 여유 확인
+        2) 투입 JPY 계산 (decision.size_pct 또는 position_size_pct 사용)
+        3) 레버리지 체크 후 주문 실행
+        4) 가중평균가 · 합산 수량 갱신
+        5) SL 재계산 (not-worsen: 롱은 더 아래로만, 숏은 더 위로만)
+        6) DB 업데이트
+        """
+        try:
+            pos = self._position.get(product_code)
+            if pos is None:
+                logger.warning(f"[GmocMgr] {product_code}: add_to_position 호출 시 포지션 없음 — 스킵")
+                return
+
+            # ── 투입 비율 결정 ──
+            # Decision.size_pct는 소수(0.0~1.0), params.position_size_pct는 퍼센트(10~100) 단위.
+            # 내부 계산 단위를 퍼센트(0~100)로 통일.
+            add_size_pct: float
+            if result is not None and hasattr(result, "decision") and result.decision is not None:
+                raw_size = getattr(result.decision, "size_pct", None)
+                if raw_size is not None:
+                    add_size_pct = float(raw_size) * 100  # 소수 → 퍼센트 변환 (0.15 → 15.0)
+                else:
+                    add_size_pct = float(params.get("position_size_pct", 10.0))
+            else:
+                add_size_pct = float(params.get("position_size_pct", 10.0))
+
+            # ── 증거금 조회 ──
+            if not hasattr(self._adapter, "get_collateral"):
+                logger.error(f"[GmocMgr] {product_code}: 어댑터에 get_collateral 없음")
+                return
+
+            collateral = await self._adapter.get_collateral()
+            available_collateral = collateral.collateral - collateral.require_collateral
+            if available_collateral <= 0:
+                logger.warning(f"[GmocMgr] {product_code}: 피라미딩 — 여유 증거금 없음, 스킵")
+                return
+
+            invest_jpy = available_collateral * add_size_pct / 100
+            min_jpy = float(params.get("min_order_jpy", 500))
+            if invest_jpy < min_jpy:
+                logger.info(
+                    f"[GmocMgr] {product_code}: 피라미딩 투입 JPY({invest_jpy:.0f}) < {min_jpy:.0f}, 스킵"
+                )
+                return
+
+            # ── 레버리지 체크 ──
+            max_leverage = float(params.get("max_leverage", 1.5))
+            coin_size = round(invest_jpy / price, 8)
+            effective_leverage = (
+                (coin_size * price) / collateral.collateral
+                if collateral.collateral > 0
+                else 0
+            )
+            if effective_leverage > max_leverage:
+                coin_size = round(collateral.collateral * max_leverage / price, 8)
+                logger.info(f"[GmocMgr] {product_code}: 피라미딩 레버리지 제한 → size={coin_size:.8f}")
+
+            min_coin = float(params.get("min_coin_size", 0.001))
+            if coin_size < min_coin:
+                logger.info(f"[GmocMgr] {product_code}: 피라미딩 수량 부족 ({coin_size} < {min_coin}), 스킵")
+                return
+
+            # ── 주문 실행 ──
+            if side == "buy":
+                order = await self._adapter.place_order(
+                    order_type=OrderType.MARKET_BUY,
+                    pair=product_code,
+                    amount=round(invest_jpy, 0),
+                )
+            else:
+                order = await self._adapter.place_order(
+                    order_type=OrderType.MARKET_SELL,
+                    pair=product_code,
+                    amount=coin_size,
+                )
+
+            exec_price = order.price or price
+            exec_amount = order.amount if order.amount > 0 else coin_size
+
+            # ── 가중평균가 계산 ──
+            prev_entry = pos.entry_price
+            prev_amount = pos.entry_amount
+            new_amount = round(prev_amount + exec_amount, 8)
+            if new_amount > 0:
+                new_avg_price = round(
+                    (prev_entry * prev_amount + exec_price * exec_amount) / new_amount, 2
+                )
+            else:
+                new_avg_price = exec_price
+
+            # ── SL 재계산 (not-worsen) ──
+            atr_mult = float(params.get("atr_multiplier_stop", 2.0))
+            prev_sl = pos.stop_loss_price
+            if atr:
+                if side == "buy":
+                    new_sl_candidate = round(new_avg_price - atr * atr_mult, 6)
+                    # 롱: 기존 SL보다 낮으면 not-worsen으로 유지
+                    new_sl = max(prev_sl, new_sl_candidate) if prev_sl else new_sl_candidate
+                else:
+                    new_sl_candidate = round(new_avg_price + atr * atr_mult, 6)
+                    # 숏: 기존 SL보다 높으면 not-worsen으로 유지
+                    new_sl = min(prev_sl, new_sl_candidate) if prev_sl else new_sl_candidate
+            else:
+                new_sl = prev_sl
+
+            # ── pyramid_entries 기록 ──
+            pyramid_entries: list = pos.extra.get("pyramid_entries", [])
+            pyramid_count = pos.extra.get("pyramid_count", 0)
+            pyramid_entries.append({
+                "n": pyramid_count + 1,
+                "price": exec_price,
+                "amount": exec_amount,
+                "order_id": order.order_id,
+            })
+
+            # ── 인메모리 Position 업데이트 ──
+            pos.entry_price = new_avg_price
+            pos.entry_amount = new_amount
+            pos.stop_loss_price = new_sl
+            pos.extra["pyramid_count"] = pyramid_count + 1
+            pos.extra["pyramid_entries"] = pyramid_entries
+            pos.extra["total_size_pct"] = pos.extra.get("total_size_pct", 0.0) + add_size_pct / 100.0
+
+            logger.info(
+                f"[GmocMgr] {product_code}: 피라미딩 #{pyramid_count + 1}/3 완료 "
+                f"order_id={order.order_id} exec_price=¥{exec_price} exec_amount={exec_amount} "
+                f"new_avg=¥{new_avg_price} total_amount={new_amount} new_sl=¥{new_sl}"
+            )
+
+            # ── DB 업데이트 ──
+            await self._update_position_in_db(
+                product_code=product_code,
+                db_record_id=pos.db_record_id,
+                entry_price=new_avg_price,
+                size=new_amount,
+                stop_loss_price=new_sl,
+                pyramid_count=pyramid_count + 1,
+            )
+
+        except Exception as e:
+            logger.error(f"[GmocMgr] {product_code}: 피라미딩 오류 — {e}", exc_info=True)
+
+    async def _update_position_in_db(
+        self,
+        product_code: str,
+        db_record_id: Optional[int],
+        entry_price: float,
+        size: float,
+        stop_loss_price: Optional[float],
+        pyramid_count: int,
+    ) -> None:
+        """gmoc_trend_positions 레코드를 피라미딩 후 상태로 업데이트."""
+        if db_record_id is None:
+            logger.warning(f"[GmocMgr] {product_code}: DB 업데이트 스킵 — db_record_id 없음")
+            return
+        try:
+            from sqlalchemy import update as sa_update
+
+            Model = self._position_model
+            async with self._session_factory() as db:
+                await db.execute(
+                    sa_update(Model)
+                    .where(Model.id == db_record_id)
+                    .values(
+                        entry_price=entry_price,
+                        entry_size=size,
+                        stop_loss_price=stop_loss_price,
+                        pyramid_count=pyramid_count,
+                    )
+                )
+                await db.commit()
+            logger.debug(
+                f"[GmocMgr] {product_code}: DB 피라미딩 업데이트 id={db_record_id} "
+                f"avg=¥{entry_price} size={size} sl=¥{stop_loss_price} pyramid={pyramid_count}"
+            )
+        except Exception as e:
+            logger.error(f"[GmocMgr] {product_code}: DB 피라미딩 업데이트 실패 — {e}", exc_info=True)
 
     # ──────────────────────────────────────────
     # 진입 전 체크 오버라이드

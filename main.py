@@ -115,9 +115,11 @@ from core.notifications.switch_telegram import send_switch_recommendation_telegr
 from core.monitoring.health import HealthChecker
 from core.analysis.event_filter import create_event_filter
 from core.analysis.intermarket import create_intermarket_client
+from core.strategy.box_mean_reversion import GmoCoinBoxManager
 from core.strategy.cfd_trend_following import MarginTrendManager
 from core.strategy.gmo_coin_trend import GmoCoinTrendManager
 from core.strategy.registry import StrategyRegistry
+from core.execution.regime_gate import RegimeGate
 from core.strategy.snapshot_collector import SnapshotCollector
 from core.strategy.switch_recommender import SwitchRecommender
 from core.task.auto_reporter import create_auto_reporter
@@ -235,7 +237,26 @@ async def lifespan(app: FastAPI):
         snapshot_collector=snapshot_collector,
     )
     strategy_registry = StrategyRegistry()
-    strategy_registry.register("cfd_trend_following", trend_manager)
+    strategy_registry.register("trend_following", trend_manager)
+
+    # 5.5-pre. GmoCoinBoxManager (박스역추세) + RegimeGate
+    box_manager = GmoCoinBoxManager(
+        adapter=adapter,
+        supervisor=supervisor,
+        session_factory=session_factory,
+        candle_model=models.candle,
+        cfd_position_model=models.box_position,
+        pair_column=pair_column,
+        snapshot_collector=snapshot_collector,
+    )
+    strategy_registry.register("box_mean_reversion", box_manager)
+
+    # GMO Coin 단일 페어 btc_jpy → RegimeGate 1개 공유
+    # TODO: 멀티 페어 지원 시 per-pair gate로 확장 필요
+    _regime_gate = RegimeGate("btc_jpy")
+    trend_manager.set_regime_gate(_regime_gate)
+    box_manager.set_regime_gate(_regime_gate)
+    logger.debug("RegimeGate 초기화: trend_manager + box_manager 공유 (btc_jpy)")
 
     # 5.5. Execution Layer 조립 (TRADING_MODE 환경변수)
     trading_mode = os.environ.get("TRADING_MODE", "v1").lower()
@@ -295,6 +316,7 @@ async def lifespan(app: FastAPI):
             approval_gate=_approval_gate,
         )
         trend_manager.set_orchestrator(_orchestrator)
+        box_manager.set_orchestrator(_orchestrator)
         logger.debug(f"Execution Layer 초기화: TRADING_MODE={trading_mode}")
     elif trading_mode in ("v2", "ai"):
         from core.decision.ai_decision import AiDecision
@@ -329,6 +351,7 @@ async def lifespan(app: FastAPI):
             approval_gate=_approval_gate,
         )
         trend_manager.set_orchestrator(_orchestrator)
+        box_manager.set_orchestrator(_orchestrator)
         logger.debug(f"Execution Layer 초기화: TRADING_MODE={trading_mode} [DEPRECATED: v2/ai는 rachel 모드로 전환 권장]")
     elif trading_mode == "rachel":
         from core.decision.rachel_advisory import RachelAdvisoryDecision
@@ -355,7 +378,8 @@ async def lifespan(app: FastAPI):
             approval_gate=_approval_gate,
         )
         trend_manager.set_orchestrator(_orchestrator)
-        logger.debug(f"Execution Layer 초기화: TRADING_MODE={trading_mode} (OpenClaw 레이첼 advisory 연동)")
+        box_manager.set_orchestrator(_orchestrator)
+        logger.debug(f"Execution Layer 초기화: TRADING_MODE={trading_mode} (OpenClaw 레이첼 advisory 연동, 양쪽 매니저 공유)")
     else:
         logger.warning(
             f"TRADING_MODE={trading_mode!r} 미지원. 기본값 v1을 사용합니다."
@@ -377,6 +401,7 @@ async def lifespan(app: FastAPI):
             approval_gate=_approval_gate,
         )
         trend_manager.set_orchestrator(_orchestrator)
+        box_manager.set_orchestrator(_orchestrator)
 
     # 5.6. Data Layer (DataHub v1.5)
     from core.data.hub import DataHub
@@ -393,6 +418,7 @@ async def lifespan(app: FastAPI):
         lesson_model=WakeUpReview,
     )
     trend_manager.set_data_hub(_data_hub)
+    box_manager.set_data_hub(_data_hub)
     logger.debug(f"DataHub v1.5 초기화: trading_data_url={_trading_data_url}")
 
     health_checker = HealthChecker(

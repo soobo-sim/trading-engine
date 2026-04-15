@@ -33,31 +33,86 @@ from .alerts import (
 logger = logging.getLogger(__name__)
 
 
+def _format_situation_with_basis(
+    situation: str,
+    ema_slope_pct: float | None,
+    rsi: float | None,
+) -> str:
+    """📊 지금: 판단 근거(EMA slope + RSI)를 괄호로 append."""
+    if ema_slope_pct is not None and rsi is not None:
+        if ema_slope_pct > 0:
+            arrow = "↑"
+        elif ema_slope_pct < 0:
+            arrow = "↓"
+        else:
+            arrow = "→"
+        return f"{situation} (EMA{arrow}{ema_slope_pct:+.2f}%, RSI {rsi:.0f})"
+    return situation
+
+
+def _format_balance_line(data: dict) -> str:
+    """💼 증거금 (레버리지) or 💰 잔고 (현물) 한 줄."""
+    collateral = data.get("collateral")
+    if collateral:
+        total = collateral["collateral"]
+        required = collateral["require_collateral"]
+        available = max(total - required, 0)
+        return f"💼 증거금 ¥{total:,.0f} | 필요 ¥{required:,.0f} | 여력 ¥{available:,.0f}"
+    return f"💰 ¥{data['jpy_available']:,.0f}"
+
+
+_STRATEGY_LABEL = {
+    "trend_following": "추세추종",
+    "box_mean_reversion": "박스역추세",
+}
+_REGIME_LABEL = {
+    "trending": "추세장",
+    "ranging": "횡보장",
+    "unclear": "불명확",
+}
+
+
 def build_telegram_text(prefix: str, time_str: str, pair: str, data: dict) -> str:
     icon = data["trend_icon"]
     currency = pair.split("_")[0].upper()
+    ema_slope_pct = data.get("ema_slope_pct")
+    rsi = data.get("rsi")
+    regime = data.get("regime")
+    active_strategy = data.get("active_strategy")
     lines = []
 
     if data["position"]:
         p = data["position"]
         pnl_jpy = p["unrealized_pnl_jpy"]
         pnl_pct = p["unrealized_pnl_pct"]
-        pnl_sign = "+" if pnl_jpy >= 0 else ""
         current_price = data["current_price"]
 
         p_side = p.get("side", "buy")
         side_label = "롱" if p_side == "buy" else "숏"
         lines.append(f"[{prefix}] {time_str} | {pair} {icon}추세추종 — {side_label} 보유")
-        lines.append(f"📍 ¥{current_price:,.0f}")
-        lines.append(f"💰 미실현 {pnl_sign}¥{pnl_jpy:,.0f} ({pnl_sign}{pnl_pct:.2f}%)")
+
+        # 현시세 + 진입가 대비 차이 (부호를 ¥ 앞에)
+        price_diff = p.get("price_diff", 0)
+        if price_diff >= 0:
+            diff_str = f"+¥{price_diff:,.0f}"
+        else:
+            diff_str = f"-¥{abs(price_diff):,.0f}"
+        lines.append(f"📍 ¥{current_price:,.0f} (진입가 대비 {diff_str})")
+
+        # 미실현 P&L — 부호를 ¥ 앞에 표시
+        if pnl_jpy >= 0:
+            lines.append(f"💰 미실현 +¥{pnl_jpy:,.0f} (+{pnl_pct:.2f}%)")
+        else:
+            lines.append(f"💰 미실현 -¥{abs(pnl_jpy):,.0f} ({pnl_pct:.2f}%)")
+
         lines.append(f" · 진입 {p['entry_amount']}{currency} @ ¥{p['entry_price']:,.0f}")
         stop = p.get("stop_loss_price", 0)
         distance = p.get("trailing_stop_distance", 0)
         stop_pct = (stop - current_price) / current_price * 100 if stop and current_price > 0 else 0.0
-        lines.append(f" · 손절 ¥{stop:,.0f} (현재가 {stop_pct:.2f}%, 거리 ¥{distance:,.0f})")
+        lines.append(f" · 손절 ¥{stop:,.0f} ({stop_pct:.2f}%, 거리 ¥{distance:,.0f})")
 
         situation = data.get("position_summary") or "보유 유지"
-        lines.append(f"📊 지금: {situation}")
+        lines.append(f"📊 지금: {_format_situation_with_basis(situation, ema_slope_pct, rsi)}")
 
         exit_sig = data.get("exit_signal")
         if exit_sig:
@@ -74,7 +129,11 @@ def build_telegram_text(prefix: str, time_str: str, pair: str, data: dict) -> st
                 outlook = "추세 이어지면 트레일링 스탑 자동 상향"
             lines.append(f"⚡ 전망: {outlook}")
 
-        lines.append(f"💰 ¥{data['jpy_available']:,.0f}")
+        if regime or active_strategy:
+            regime_label = _REGIME_LABEL.get(regime, regime or "-")
+            strategy_label = _STRATEGY_LABEL.get(active_strategy, active_strategy or "-")
+            lines.append(f"⚙️ 체제: {regime_label} | 활성전략: {strategy_label}")
+        lines.append(_format_balance_line(data))
     else:
         wait_dir = data.get("wait_direction")  # None = 현물 (롱 전용)
         if wait_dir == "short":
@@ -96,7 +155,7 @@ def build_telegram_text(prefix: str, time_str: str, pair: str, data: dict) -> st
             lines.append("💡 진입 조건: 가격이 EMA 위에서 우상향할 때 매수")
 
         situation = data.get("market_summary") or "관망"
-        lines.append(f"📊 지금: {situation}")
+        lines.append(f"📊 지금: {_format_situation_with_basis(situation, ema_slope_pct, rsi)}")
 
         met = data.get("conditions_met", 0)
         total = data.get("conditions_total", 5)
@@ -108,7 +167,11 @@ def build_telegram_text(prefix: str, time_str: str, pair: str, data: dict) -> st
         else:
             lines.append(f"✅ {met}/{total} 진입 조건 충족")
 
-        lines.append(f"💰 ¥{data['jpy_available']:,.0f}")
+        if regime or active_strategy:
+            regime_label = _REGIME_LABEL.get(regime, regime or "-")
+            strategy_label = _STRATEGY_LABEL.get(active_strategy, active_strategy or "-")
+            lines.append(f"⚙️ 체제: {regime_label} | 활성전략: {strategy_label}")
+        lines.append(_format_balance_line(data))
 
     return "\n".join(lines)
 
@@ -232,11 +295,24 @@ async def generate_trend_report(
         if candle_1h_close and candle_1h_close > 0 else 0.0
     )
 
-    # 4. 잔고 조회
+    # 4. 잔고 조회 + 증거금 (레버리지 어댑터)
     balance = await adapter.get_balance()
     jpy_available = balance.get_available("jpy")
     coin_currency = pair.split("_")[0].lower()
     coin_available = balance.get_available(coin_currency)
+
+    collateral_data = None
+    if hasattr(adapter, "get_collateral"):
+        try:
+            c = await adapter.get_collateral()
+            collateral_data = {
+                "collateral": c.collateral,
+                "open_position_pnl": c.open_position_pnl,
+                "require_collateral": c.require_collateral,
+                "keep_rate": c.keep_rate,
+            }
+        except Exception as e:
+            logger.warning(f"[TrendReport] {pair}: 증거금 조회 실패: {e}")
 
     # 5. 표시 값 조립
     trend_icon = get_trend_icon(ema_slope_pct)
@@ -248,15 +324,22 @@ async def generate_trend_report(
     position_data = None
     position_summary = None
     if position_obj and position_obj.entry_price:
-        unrealized_pnl_jpy = (current_price - position_obj.entry_price) * position_obj.entry_amount
+        side = (position_obj.extra or {}).get("side", "buy")
+        # 롱: (현재가 - 진입가) × 수량 / 숏: (진입가 - 현재가) × 수량
+        if side == "sell":
+            unrealized_pnl_jpy = (position_obj.entry_price - current_price) * position_obj.entry_amount
+        else:
+            unrealized_pnl_jpy = (current_price - position_obj.entry_price) * position_obj.entry_amount
         unrealized_pnl_pct = (
-            (current_price - position_obj.entry_price) / position_obj.entry_price * 100
+            unrealized_pnl_jpy / (position_obj.entry_price * position_obj.entry_amount) * 100
             if position_obj.entry_price > 0 else 0.0
         )
         stop_price = position_obj.stop_loss_price or 0.0
-        trailing_distance = current_price - stop_price if stop_price else 0.0
+        trailing_distance = abs(current_price - stop_price) if stop_price else 0.0
+        price_diff = current_price - position_obj.entry_price  # 부호 있는 가격차
 
         position_data = {
+            "side": side,
             "entry_price": position_obj.entry_price,
             "entry_amount": position_obj.entry_amount,
             "current_price": current_price,
@@ -264,6 +347,7 @@ async def generate_trend_report(
             "unrealized_pnl_pct": round(unrealized_pnl_pct, 2),
             "stop_loss_price": round(stop_price, 0),
             "trailing_stop_distance": round(trailing_distance, 0),
+            "price_diff": round(price_diff, 0),
         }
         position_summary = get_position_summary(exit_signal, rsi, unrealized_pnl_pct)
 
@@ -294,10 +378,16 @@ async def generate_trend_report(
     else:
         wait_direction = None  # spot (BF 등) — 기존 동작 유지
     # 7. 텍스트 조립용 데이터
+    regime = sig.get("regime")  # "trending" | "ranging" | "unclear"
+    _regime_gate = getattr(trend_manager, "_regime_gate", None)
+    active_strategy = _regime_gate.active_strategy if _regime_gate is not None else None
     report_data = {
         "current_price": current_price,
         "signal": signal,
         "trend_icon": trend_icon,
+        "ema_slope_pct": ema_slope_pct,
+        "rsi": rsi,
+        "atr": atr,
         "ema_state": ema_state,
         "rsi_state": rsi_state,
         "volatility_state": volatility_state,
@@ -311,9 +401,12 @@ async def generate_trend_report(
         "conditions_total": conditions_total,
         "jpy_available": jpy_available,
         "coin_available": coin_available,
+        "collateral": collateral_data,
         "ema20": ema,
         "strategy_name": strategy.name,
         "strategy_id": strategy.id,
+        "regime": regime,
+        "active_strategy": active_strategy,
     }
 
     telegram_text = build_telegram_text(prefix.upper(), time_str, pair, report_data)

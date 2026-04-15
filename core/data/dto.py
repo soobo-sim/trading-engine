@@ -157,6 +157,9 @@ class SignalSnapshot:
     # 미완성 캔들 기반 프리뷰 시그널 여부 (True → 4H 완성 시 재검증 필요)
     is_preview: bool = False
 
+    # 이 스냅샷을 생성한 매니저 전략 타입 (듀얼 매니저 advisory 분리용)
+    strategy_type: str = "trend_following"
+
 
 # ──────────────────────────────────────────────────────────────
 # Layer 3: Decision
