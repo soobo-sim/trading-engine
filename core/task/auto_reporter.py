@@ -206,6 +206,27 @@ class AutoReporter:
                     continue
                 pair = state.normalize_pair(pair)  # 거래소별 대소문자 정규화
 
+                # RegimeGate 체제 필터: 체제가 확정된 상태에서 비활성 전략은 보고 스킵.
+                # 단, 포지션 보유 중이면 항상 보고 (청산 상태 모니터링 필요).
+                # warm-up 중(active_strategy=None)이거나 gate 미설정이면 필터 안 함.
+                trend_mgr = getattr(state, "trend_manager", None)
+                regime_gate = getattr(trend_mgr, "_regime_gate", None) if trend_mgr else None
+                if regime_gate is not None and regime_gate.active_strategy is not None:
+                    if style != regime_gate.active_strategy:
+                        registry = getattr(state, "strategy_registry", None)
+                        mgr = registry.get(style) if registry is not None else None
+                        has_position = (
+                            mgr is not None
+                            and hasattr(mgr, "get_position")
+                            and mgr.get_position(pair) is not None
+                        )
+                        if not has_position:
+                            logger.debug(
+                                f"[AutoReporter] {pair} {style} 보고 스킵 "
+                                f"(체제 불일치: active={regime_gate.active_strategy})"
+                            )
+                            continue
+
                 try:
                     report = await self._generate_report(
                         style, pair, strategy, state, db

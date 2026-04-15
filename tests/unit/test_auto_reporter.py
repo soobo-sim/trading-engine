@@ -257,6 +257,222 @@ class TestAutoReporter:
         assert call_count >= 1  # 예외 발생 후에도 루프가 계속됨
 
 
+class TestAutoReporterRegimeFilter:
+    """AR-R01~R05: RegimeGate 체제 필터 — 체제에 맞지 않는 전략 보고 스킵."""
+
+    def _make_reporter(self, state):
+        return AutoReporter(
+            session_factory=MagicMock(),
+            state=state,
+            bot_token="tok",
+            chat_id="123",
+        )
+
+    def _make_state(self, regime_active_strategy, trend_has_position=False, box_has_position=False):
+        """Mock AppState 생성 헬퍼.
+
+        Args:
+            regime_active_strategy: RegimeGate.active_strategy 값 ("trend_following" / "box_mean_reversion" / None)
+            trend_has_position: trend_manager가 포지션 보유 여부
+            box_has_position: box_manager(registry에서 조회)가 포지션 보유 여부
+        """
+        from adapters.database.models import create_strategy_model
+        StrategyModel = create_strategy_model("gmoc")
+
+        # RegimeGate mock
+        mock_gate = MagicMock()
+        mock_gate.active_strategy = regime_active_strategy
+
+        # trend_manager
+        mock_trend_mgr = MagicMock()
+        mock_trend_mgr._regime_gate = mock_gate
+        mock_trend_mgr.get_position = MagicMock(
+            return_value=MagicMock() if trend_has_position else None
+        )
+
+        # box_manager
+        mock_box_mgr = MagicMock()
+        mock_box_mgr.get_position = MagicMock(
+            return_value=MagicMock() if box_has_position else None
+        )
+
+        # strategy_registry
+        mock_registry = MagicMock()
+        def _registry_get(style):
+            if style == "trend_following":
+                return mock_trend_mgr
+            if style == "box_mean_reversion":
+                return mock_box_mgr
+            return None
+        mock_registry.get = MagicMock(side_effect=_registry_get)
+
+        # AppState
+        mock_state = MagicMock()
+        mock_state.trend_manager = mock_trend_mgr
+        mock_state.strategy_registry = mock_registry
+        mock_state.models.strategy = StrategyModel
+        mock_state.prefix = "gmoc"
+        mock_state.pair_column = "pair"
+        mock_state.normalize_pair = lambda p: p.lower()
+
+        mock_safety = MagicMock()
+        mock_safety.status = "all_ok"
+        mock_safety.checks = []
+        mock_state.health_checker.check_safety_only = AsyncMock(return_value=mock_safety)
+
+        return mock_state
+
+    def _make_db_with_strategies(self, styles: list[str]):
+        """지정된 trading_style 목록에 해당하는 활성 전략 mock DB 반환."""
+        strategies = []
+        for style in styles:
+            s = MagicMock()
+            s.parameters = {"pair": "btc_jpy", "trading_style": style}
+            s.name = f"test_{style}"
+            s.id = styles.index(style) + 1
+            strategies.append(s)
+
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.all.return_value = strategies
+
+        mock_db = AsyncMock()
+        mock_db.execute.return_value = mock_result
+        mock_db.__aenter__ = AsyncMock(return_value=mock_db)
+        mock_db.__aexit__ = AsyncMock(return_value=False)
+        return MagicMock(return_value=mock_db)
+
+    @pytest.mark.asyncio
+    async def test_ar_r01_trend_active_skips_box(self):
+        """AR-R01: regime=trend_following 확정 시 box 보고는 스킵."""
+        state = self._make_state(regime_active_strategy="trend_following")
+        reporter = self._make_reporter(state)
+        reporter._session_factory = self._make_db_with_strategies(
+            ["trend_following", "box_mean_reversion"]
+        )
+
+        fake_report = {"success": True, "report": {"telegram_text": "보고"}}
+        generated_styles = []
+
+        async def mock_generate(style, pair, strategy, state, db):
+            generated_styles.append(style)
+            return fake_report
+
+        with patch.object(reporter, "_generate_report", side_effect=mock_generate):
+            with patch("core.task.auto_reporter.send_telegram_message", new_callable=AsyncMock, return_value=True):
+                with patch("core.task.auto_reporter.is_maintenance_window", return_value=False):
+                    await reporter._run_once()
+
+        assert generated_styles == ["trend_following"], (
+            f"trend만 보고 생성되어야 함, 실제: {generated_styles}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_ar_r02_box_active_skips_trend(self):
+        """AR-R02: regime=box_mean_reversion 확정 시 trend 보고는 스킵."""
+        state = self._make_state(regime_active_strategy="box_mean_reversion")
+        reporter = self._make_reporter(state)
+        reporter._session_factory = self._make_db_with_strategies(
+            ["trend_following", "box_mean_reversion"]
+        )
+
+        fake_report = {"success": True, "report": {"telegram_text": "보고"}}
+        generated_styles = []
+
+        async def mock_generate(style, pair, strategy, state, db):
+            generated_styles.append(style)
+            return fake_report
+
+        with patch.object(reporter, "_generate_report", side_effect=mock_generate):
+            with patch("core.task.auto_reporter.send_telegram_message", new_callable=AsyncMock, return_value=True):
+                with patch("core.task.auto_reporter.is_maintenance_window", return_value=False):
+                    await reporter._run_once()
+
+        assert generated_styles == ["box_mean_reversion"], (
+            f"box만 보고 생성되어야 함, 실제: {generated_styles}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_ar_r03_skipped_strategy_with_position_still_reports(self):
+        """AR-R03: regime=trend_following이지만 box가 포지션 보유 중이면 box도 보고."""
+        state = self._make_state(
+            regime_active_strategy="trend_following",
+            box_has_position=True,
+        )
+        reporter = self._make_reporter(state)
+        reporter._session_factory = self._make_db_with_strategies(
+            ["trend_following", "box_mean_reversion"]
+        )
+
+        fake_report = {"success": True, "report": {"telegram_text": "보고"}}
+        generated_styles = []
+
+        async def mock_generate(style, pair, strategy, state, db):
+            generated_styles.append(style)
+            return fake_report
+
+        with patch.object(reporter, "_generate_report", side_effect=mock_generate):
+            with patch("core.task.auto_reporter.send_telegram_message", new_callable=AsyncMock, return_value=True):
+                with patch("core.task.auto_reporter.is_maintenance_window", return_value=False):
+                    await reporter._run_once()
+
+        assert set(generated_styles) == {"trend_following", "box_mean_reversion"}, (
+            f"포지션 보유 중인 box도 보고되어야 함, 실제: {generated_styles}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_ar_r04_warmup_reports_both(self):
+        """AR-R04: active_strategy=None (warm-up 중) → 양쪽 다 보고."""
+        state = self._make_state(regime_active_strategy=None)
+        reporter = self._make_reporter(state)
+        reporter._session_factory = self._make_db_with_strategies(
+            ["trend_following", "box_mean_reversion"]
+        )
+
+        fake_report = {"success": True, "report": {"telegram_text": "보고"}}
+        generated_styles = []
+
+        async def mock_generate(style, pair, strategy, state, db):
+            generated_styles.append(style)
+            return fake_report
+
+        with patch.object(reporter, "_generate_report", side_effect=mock_generate):
+            with patch("core.task.auto_reporter.send_telegram_message", new_callable=AsyncMock, return_value=True):
+                with patch("core.task.auto_reporter.is_maintenance_window", return_value=False):
+                    await reporter._run_once()
+
+        assert set(generated_styles) == {"trend_following", "box_mean_reversion"}, (
+            f"warm-up 중에는 양쪽 다 보고되어야 함, 실제: {generated_styles}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_ar_r05_no_regime_gate_reports_both(self):
+        """AR-R05: _regime_gate 미설정 시 기존 동작 유지 (양쪽 다 보고)."""
+        state = self._make_state(regime_active_strategy="trend_following")
+        # trend_manager에서 _regime_gate 제거
+        del state.trend_manager._regime_gate
+
+        reporter = self._make_reporter(state)
+        reporter._session_factory = self._make_db_with_strategies(
+            ["trend_following", "box_mean_reversion"]
+        )
+
+        fake_report = {"success": True, "report": {"telegram_text": "보고"}}
+        generated_styles = []
+
+        async def mock_generate(style, pair, strategy, state, db):
+            generated_styles.append(style)
+            return fake_report
+
+        with patch.object(reporter, "_generate_report", side_effect=mock_generate):
+            with patch("core.task.auto_reporter.send_telegram_message", new_callable=AsyncMock, return_value=True):
+                with patch("core.task.auto_reporter.is_maintenance_window", return_value=False):
+                    await reporter._run_once()
+
+        assert set(generated_styles) == {"trend_following", "box_mean_reversion"}, (
+            f"regime_gate 없으면 필터 미적용, 실제: {generated_styles}"
+        )
+
+
 class TestFormatSafetySummary:
     """format_safety_summary n/a 제외 테스트."""
 
