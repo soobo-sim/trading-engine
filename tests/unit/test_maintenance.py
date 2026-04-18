@@ -27,7 +27,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from core.monitoring.maintenance import is_maintenance_window
+from core.punisher.monitoring.maintenance import is_maintenance_window
 
 JST = ZoneInfo("Asia/Tokyo")
 
@@ -94,8 +94,8 @@ class TestTelegramAlertSkipDuringMaintenance:
     async def test_alert_skipped_during_maintenance(self):
         """메인터넌스 중이면 Telegram를 전송하지 않는다."""
         # SafetyChecksMixin 인스턴스 임시 구성
-        from core.monitoring.safety_checks import SafetyChecksMixin
-        from core.monitoring.health import SafetyCheck
+        from core.punisher.monitoring.safety_checks import SafetyChecksMixin
+        from core.punisher.monitoring.health import SafetyCheck
 
         mixin = SafetyChecksMixin.__new__(SafetyChecksMixin)
         mixin._telegram_alert_cooldown = {}
@@ -109,7 +109,7 @@ class TestTelegramAlertSkipDuringMaintenance:
         # GMO FX 메인터넌스 시간대 + EXCHANGE 환경변수 설정
         sat_930 = _jst(*_SAT, 9, 30)
         with patch.dict("os.environ", {"EXCHANGE": "GMOFX"}), \
-             patch("core.monitoring.maintenance.is_maintenance_window", return_value=True), \
+             patch("core.punisher.monitoring.maintenance.is_maintenance_window", return_value=True), \
              patch("httpx.AsyncClient") as mock_client_cls:
             await mixin._send_safety_telegram_alert([check])
             # httpx 호출 없어야 함
@@ -118,8 +118,8 @@ class TestTelegramAlertSkipDuringMaintenance:
     @pytest.mark.asyncio
     async def test_alert_sent_outside_maintenance(self):
         """메인터넌스 시간 외에는 Telegram 전송 시도."""
-        from core.monitoring.safety_checks import SafetyChecksMixin
-        from core.monitoring.health import SafetyCheck
+        from core.punisher.monitoring.safety_checks import SafetyChecksMixin
+        from core.punisher.monitoring.health import SafetyCheck
 
         mixin = SafetyChecksMixin.__new__(SafetyChecksMixin)
         mixin._telegram_alert_cooldown = {}
@@ -145,7 +145,7 @@ class TestTelegramAlertSkipDuringMaintenance:
             "EXCHANGE": "GMOFX",
             "TELEGRAM_BOT_TOKEN": "dummy_token",
             "TELEGRAM_CHAT_ID": "dummy_chat",
-        }), patch("core.monitoring.maintenance.is_maintenance_window", return_value=False), \
+        }), patch("core.punisher.monitoring.maintenance.is_maintenance_window", return_value=False), \
              patch("httpx.AsyncClient", return_value=mock_client):
             await mixin._send_safety_telegram_alert([check])
             mock_client.post.assert_called_once()
@@ -181,28 +181,28 @@ class TestSecondsUntilMaintenanceEnd:
 
     def test_end_1_during_maintenance(self):
         """T-end-1: 메인터넌스 중 (토 09:30) → 남은 초 = 100분 = 6000초."""
-        from core.monitoring.maintenance import seconds_until_maintenance_end
+        from core.punisher.monitoring.maintenance import seconds_until_maintenance_end
         dt = _jst(*_SAT, 9, 30)  # 종료 11:10 까지 100분 = 6000초
         result = seconds_until_maintenance_end("gmofx", dt)
         assert result == 6000
 
     def test_end_2_outside_maintenance(self):
         """T-end-2: 메인터넌스 외 → 0."""
-        from core.monitoring.maintenance import seconds_until_maintenance_end
+        from core.punisher.monitoring.maintenance import seconds_until_maintenance_end
         dt = _jst(*_SAT, 11, 30)
         result = seconds_until_maintenance_end("gmofx", dt)
         assert result == 0
 
     def test_end_3_unknown_exchange(self):
         """T-end-3: 미등록 거래소 → 0."""
-        from core.monitoring.maintenance import seconds_until_maintenance_end
+        from core.punisher.monitoring.maintenance import seconds_until_maintenance_end
         dt = _jst(*_SAT, 9, 30)
         result = seconds_until_maintenance_end("bitflyer", dt)
         assert result == 0
 
     def test_end_4_near_boundary(self):
         """T-end-4: 종료 직전 (토 11:09) → 60초."""
-        from core.monitoring.maintenance import seconds_until_maintenance_end
+        from core.punisher.monitoring.maintenance import seconds_until_maintenance_end
         dt = _jst(*_SAT, 11, 9)  # 종료 11:10 까지 1분 = 60초
         result = seconds_until_maintenance_end("gmofx", dt)
         assert result == 60
@@ -214,14 +214,14 @@ class TestSF03SF06DuringMaintenance:
     @pytest.mark.asyncio
     async def test_sf03_maintenance_returns_na(self):
         """T-sf03-1: SF-03 메인터넌스 중 n/a."""
-        from core.monitoring.safety_checks import SafetyChecksMixin
+        from core.punisher.monitoring.safety_checks import SafetyChecksMixin
 
         mixin = SafetyChecksMixin.__new__(SafetyChecksMixin)
         mixin._adapter = MagicMock()
         mixin._adapter.has_credentials.return_value = True
 
         with patch.dict("os.environ", {"EXCHANGE": "GMOFX"}), \
-             patch("core.monitoring.safety_checks.is_maintenance_window", return_value=True):
+             patch("core.punisher.monitoring.safety_checks.is_maintenance_window", return_value=True):
             result = mixin._check_sf03(ws_connected=False)
 
         assert result.status == "n/a"
@@ -230,7 +230,7 @@ class TestSF03SF06DuringMaintenance:
     @pytest.mark.asyncio
     async def test_sf06_maintenance_returns_na_no_api_call(self):
         """T-sf06-1: SF-06 메인터넌스 중 n/a + get_balance 미호출."""
-        from core.monitoring.safety_checks import SafetyChecksMixin
+        from core.punisher.monitoring.safety_checks import SafetyChecksMixin
 
         mixin = SafetyChecksMixin.__new__(SafetyChecksMixin)
         mixin._adapter = MagicMock()
@@ -238,7 +238,7 @@ class TestSF03SF06DuringMaintenance:
         mixin._adapter.get_balance = AsyncMock()
 
         with patch.dict("os.environ", {"EXCHANGE": "GMOFX"}), \
-             patch("core.monitoring.safety_checks.is_maintenance_window", return_value=True):
+             patch("core.punisher.monitoring.safety_checks.is_maintenance_window", return_value=True):
             result = await mixin._check_sf06()
 
         assert result.status == "n/a"
@@ -248,7 +248,7 @@ class TestSF03SF06DuringMaintenance:
     @pytest.mark.asyncio
     async def test_sf03_normal_critical_outside_maintenance(self):
         """T-sf03-2: 메인터넌스 외 WS 끊김 → critical."""
-        from core.monitoring.safety_checks import SafetyChecksMixin
+        from core.punisher.monitoring.safety_checks import SafetyChecksMixin
 
         mixin = SafetyChecksMixin.__new__(SafetyChecksMixin)
         mixin._adapter = MagicMock()
@@ -256,7 +256,7 @@ class TestSF03SF06DuringMaintenance:
         mixin._has_active_strategies = True
 
         with patch.dict("os.environ", {"EXCHANGE": "GMOFX"}), \
-             patch("core.monitoring.safety_checks.is_maintenance_window", return_value=False):
+             patch("core.punisher.monitoring.safety_checks.is_maintenance_window", return_value=False):
             result = mixin._check_sf03(ws_connected=False)
 
         assert result.status == "critical"
@@ -268,7 +268,7 @@ class TestAutoReporterMaintenanceMode:
     @pytest.mark.asyncio
     async def test_reporter_maintenance_sends_brief_no_generate(self):
         """T-reporter-1: 메인터넌스 중 → 간소 보고 전송, _generate_report 미호출."""
-        from core.task.auto_reporter import AutoReporter
+        from core.punisher.task.auto_reporter import AutoReporter
 
         reporter = AutoReporter.__new__(AutoReporter)
         reporter._bot_token = "token"
@@ -280,8 +280,8 @@ class TestAutoReporterMaintenanceMode:
         reporter._generate_report = AsyncMock()
 
         with patch.dict("os.environ", {"EXCHANGE": "GMOFX"}), \
-             patch("core.task.auto_reporter.is_maintenance_window", return_value=True), \
-             patch("core.task.auto_reporter.send_telegram_message", new_callable=AsyncMock) as mock_send:
+             patch("core.punisher.task.auto_reporter.is_maintenance_window", return_value=True), \
+             patch("core.punisher.task.auto_reporter.send_telegram_message", new_callable=AsyncMock) as mock_send:
             await reporter._run_once()
 
         # 간소 보고 1회 전송
@@ -295,7 +295,7 @@ class TestAutoReporterMaintenanceMode:
     @pytest.mark.asyncio
     async def test_reporter_normal_outside_maintenance(self):
         """T-reporter-2: 메인터넌스 외 → 일반 보고 경로 진입 (send_telegram_message 미호출, _generate_report 호출 시도)."""
-        from core.task.auto_reporter import AutoReporter
+        from core.punisher.task.auto_reporter import AutoReporter
 
         reporter = AutoReporter.__new__(AutoReporter)
         reporter._bot_token = "token"
@@ -309,8 +309,8 @@ class TestAutoReporterMaintenanceMode:
         # DB 조회가 시도되면 예외 — 이 경우 _run_once가 except로 잡고 계속
         # 중요한 건 메인터넌스 간소 보고 send_telegram_message가 호출되지 않은 것
         with patch.dict("os.environ", {"EXCHANGE": "GMOFX"}), \
-             patch("core.task.auto_reporter.is_maintenance_window", return_value=False), \
-             patch("core.task.auto_reporter.send_telegram_message", new_callable=AsyncMock) as mock_send:
+             patch("core.punisher.task.auto_reporter.is_maintenance_window", return_value=False), \
+             patch("core.punisher.task.auto_reporter.send_telegram_message", new_callable=AsyncMock) as mock_send:
             try:
                 await reporter._run_once()
             except Exception:
@@ -327,7 +327,7 @@ class TestBalanceConsistencyDuringMaintenance:
     @pytest.mark.asyncio
     async def test_balance_check_skipped_during_maintenance(self):
         """T-balance-1: 메인터넌스 중 → get_balance 미호출, 빈 리스트 반환."""
-        from core.monitoring.health import HealthChecker
+        from core.punisher.monitoring.health import HealthChecker
 
         checker = HealthChecker.__new__(HealthChecker)
         checker._adapter = MagicMock()
@@ -337,7 +337,7 @@ class TestBalanceConsistencyDuringMaintenance:
         checker._pair_column = "pair"
 
         with patch.dict("os.environ", {"EXCHANGE": "GMOFX"}), \
-             patch("core.monitoring.health.is_maintenance_window", return_value=True):
+             patch("core.punisher.monitoring.health.is_maintenance_window", return_value=True):
             result = await checker._check_position_balance_consistency()
 
         assert result == []
@@ -346,7 +346,7 @@ class TestBalanceConsistencyDuringMaintenance:
     @pytest.mark.asyncio
     async def test_balance_check_runs_outside_maintenance(self):
         """T-balance-2: 메인터넌스 외 → 정상 경로 진입 (API 미설정이라 빈 리스트만 확인)."""
-        from core.monitoring.health import HealthChecker
+        from core.punisher.monitoring.health import HealthChecker
 
         checker = HealthChecker.__new__(HealthChecker)
         checker._adapter = MagicMock()
@@ -356,7 +356,7 @@ class TestBalanceConsistencyDuringMaintenance:
         checker._pair_column = "pair"
 
         with patch.dict("os.environ", {"EXCHANGE": "GMOFX"}), \
-             patch("core.monitoring.health.is_maintenance_window", return_value=False):
+             patch("core.punisher.monitoring.health.is_maintenance_window", return_value=False):
             result = await checker._check_position_balance_consistency()
 
         # API 키 미설정이므로 빈 리스트 반환 (메인터넌스 스킵과 구분됨)
@@ -369,7 +369,7 @@ class TestSecondsUntilEndBoundary:
 
     def test_end_boundary_exact_end_time(self):
         """T-end-5: 정확히 종료 시각(11:10:00) → 0초 (잔여 없음)."""
-        from core.monitoring.maintenance import seconds_until_maintenance_end
+        from core.punisher.monitoring.maintenance import seconds_until_maintenance_end
         from datetime import datetime
         from zoneinfo import ZoneInfo
         JST = ZoneInfo("Asia/Tokyo")
@@ -380,7 +380,7 @@ class TestSecondsUntilEndBoundary:
 
     def test_end_during_maintenance_large_window(self):
         """T-end-6: 메인터넌스 시작(09:00) → 2h10m = 7800초 (130분)."""
-        from core.monitoring.maintenance import seconds_until_maintenance_end
+        from core.punisher.monitoring.maintenance import seconds_until_maintenance_end
         from datetime import datetime
         from zoneinfo import ZoneInfo
         JST = ZoneInfo("Asia/Tokyo")

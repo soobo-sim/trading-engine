@@ -16,7 +16,7 @@ from core.data.dto import (
     SentimentDTO,
     SignalSnapshot,
 )
-from core.decision.ai_types import (
+from core.judge.decision.ai_types import (
     AliceProposal,
     RachelVerdict,
     SamanthaAudit,

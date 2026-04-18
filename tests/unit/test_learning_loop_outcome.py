@@ -65,7 +65,7 @@ def _make_minimal_manager(session_factory=None):
     추상 메서드를 MagicMock으로 채운 서브클래스를 동적 생성한다.
     """
     from core.strategy.base_trend import BaseTrendManager
-    from core.task.supervisor import TaskSupervisor
+    from core.punisher.task.supervisor import TaskSupervisor
 
     class _TestMgr(BaseTrendManager):
         _task_prefix = "test"
@@ -812,7 +812,7 @@ class TestNarrativeLogging:
         Then:  INFO 로그 — pair 포함 (기존 judgment_id만 있던 형식에서 변경)
         """
         import logging
-        from core.learning.post_analyzer import PostAnalyzer
+        from core.punisher.learning.post_analyzer import PostAnalyzer
 
         db_factory, judgment_id = db_and_factory
 
@@ -826,7 +826,7 @@ class TestNarrativeLogging:
             judgment_model=_AiJudgment,
         )
 
-        with caplog.at_level(logging.INFO, logger="core.learning.post_analyzer"):
+        with caplog.at_level(logging.INFO, logger="core.punisher.learning.post_analyzer"):
             await analyzer.analyze(
                 judgment_id=judgment_id,
                 outcome="win",

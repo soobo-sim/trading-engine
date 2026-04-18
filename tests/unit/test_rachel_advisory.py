@@ -26,7 +26,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from core.data.dto import Decision, PositionDTO, SignalSnapshot
-from core.decision.rachel_advisory import RachelAdvisoryDecision
+from core.judge.decision.rachel_advisory import RachelAdvisoryDecision
 
 # ──────────────────────────────────────────────────────────────
 # 헬퍼
@@ -140,7 +140,7 @@ async def test_entry_long_advisory_with_entry_ok_signal():
     adv = _advisory(action="entry_long", confidence=0.65)
     dec, _ = _make_decision(advisory=adv)
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         result = await dec.decide(_snapshot(signal="entry_ok"))
 
@@ -160,7 +160,7 @@ async def test_entry_long_advisory_with_hold_signal_returns_hold():
     adv = _advisory(action="entry_long")
     dec, _ = _make_decision(advisory=adv)
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         result = await dec.decide(_snapshot(signal="hold"))
 
@@ -179,7 +179,7 @@ async def test_entry_short_advisory_with_entry_sell_signal():
     adv = _advisory(action="entry_short")
     dec, _ = _make_decision(advisory=adv)
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         result = await dec.decide(_snapshot(signal="entry_sell"))
 
@@ -197,7 +197,7 @@ async def test_entry_short_advisory_with_wrong_signal_returns_hold():
     adv = _advisory(action="entry_short")
     dec, _ = _make_decision(advisory=adv)
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         result = await dec.decide(_snapshot(signal="entry_ok"))
 
@@ -219,7 +219,7 @@ async def test_hold_advisory_overrides_entry_signal():
     adv = _advisory(action="hold")
     dec, _ = _make_decision(advisory=adv)
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         result = await dec.decide(_snapshot(signal="entry_ok"))
 
@@ -237,7 +237,7 @@ async def test_exit_advisory_with_position_triggers_exit():
     adv = _advisory(action="exit")
     dec, _ = _make_decision(advisory=adv)
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         result = await dec.decide(_snapshot(position=_pos()))
 
@@ -255,7 +255,7 @@ async def test_exit_advisory_without_position_returns_hold():
     adv = _advisory(action="exit")
     dec, _ = _make_decision(advisory=adv)
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         result = await dec.decide(_snapshot(position=None))
 
@@ -277,7 +277,7 @@ async def test_exit_warning_signal_always_exits():
     adv = _advisory(action="entry_long")
     dec, _ = _make_decision(advisory=adv)
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         result = await dec.decide(
             _snapshot(signal="hold", exit_action="exit_warning", position=_pos())
@@ -297,7 +297,7 @@ async def test_tighten_stop_signal_always_applies():
     adv = _advisory(action="hold")
     dec, _ = _make_decision(advisory=adv)
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         result = await dec.decide(
             _snapshot(signal="hold", exit_action="tighten_stop", position=_pos())
@@ -322,7 +322,7 @@ async def test_expired_advisory_falls_back_to_v1():
     adv = _advisory(expires_offset_hours=-1.0)  # 과거
     dec, fallback = _make_decision(advisory=adv, fallback_action="hold")
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         result = await dec.decide(_snapshot())
 
@@ -339,7 +339,7 @@ async def test_no_advisory_falls_back_to_v1():
     """
     dec, fallback = _make_decision(advisory=None, fallback_action="entry_long")
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         result = await dec.decide(_snapshot())
 
@@ -359,7 +359,7 @@ async def test_db_exception_falls_back_to_v1():
     """
     dec, fallback = _make_decision(advisory=None, fallback_action="hold")
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         result = await dec.decide(_snapshot())
 
@@ -377,7 +377,7 @@ async def test_expiry_guard_suppresses_entry():
     adv = _advisory(action="entry_long", expires_offset_hours=0.5)  # 30분 후 만료
     dec, _ = _make_decision(advisory=adv)
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         result = await dec.decide(_snapshot(signal="entry_ok"))
 
@@ -403,7 +403,7 @@ async def test_entry_long_advisory_with_existing_position_auto_converts_to_add_p
     adv = _advisory(action="entry_long")
     dec, _ = _make_decision(advisory=adv)
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         result = await dec.decide(_snapshot(signal="entry_ok", position=_pos()))
 
@@ -423,7 +423,7 @@ async def test_full_exit_signal_triggers_exit_regardless_of_advisory():
     adv = _advisory(action="hold")
     dec, _ = _make_decision(advisory=adv)
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         result = await dec.decide(
             _snapshot(signal="hold", exit_action="full_exit", position=_pos())
@@ -443,7 +443,7 @@ async def test_advisory_without_size_pct_uses_none():
     adv = _advisory(action="entry_long", size_pct=None)
     dec, _ = _make_decision(advisory=adv)
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         result = await dec.decide(_snapshot(signal="entry_ok"))
 
@@ -465,7 +465,7 @@ async def test_expired_advisory_with_exit_warning_delegates_to_fallback():
     adv = _advisory(expires_offset_hours=-1.0)  # 만료됨
     dec, fallback = _make_decision(advisory=adv, fallback_action="exit")
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         result = await dec.decide(
             _snapshot(signal="hold", exit_action="exit_warning", position=_pos())
@@ -485,7 +485,7 @@ async def test_high_confidence_advisory_propagates_to_decision():
     adv = _advisory(action="entry_long", confidence=0.95)
     dec, _ = _make_decision(advisory=adv)
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         result = await dec.decide(_snapshot(signal="entry_ok"))
 
@@ -518,7 +518,7 @@ async def test_adjust_risk_returns_adjust_risk_when_position_exists():
     )
     dec, _ = _make_decision(advisory=adv)
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         result = await dec.decide(_snapshot(signal="hold", position=_pos()))
 
@@ -549,7 +549,7 @@ async def test_adjust_risk_returns_hold_when_no_position():
     )
     dec, _ = _make_decision(advisory=adv)
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         # position=None — 포지션 없음
         result = await dec.decide(_snapshot(signal="hold"))
@@ -580,7 +580,7 @@ async def test_adjust_risk_empty_adjustments_still_returns_adjust_risk():
     )
     dec, _ = _make_decision(advisory=adv)
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         result = await dec.decide(_snapshot(signal="hold", position=_pos()))
 
@@ -733,7 +733,7 @@ async def test_p01_add_position_profitable_under_limit():
     adv = _advisory(action="add_position", confidence=0.80, size_pct=0.2)
     dec, _ = _make_decision(advisory=adv)
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         pos = _pos_with_pyramid(pyramid_count=0, unrealized_pnl=200_000.0)
         result = await dec.decide(_snapshot(signal="entry_ok", position=pos))
@@ -751,7 +751,7 @@ async def test_p02_add_position_blocks_when_pyramid_limit_reached():
     adv = _advisory(action="add_position", confidence=0.80)
     dec, _ = _make_decision(advisory=adv)
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         pos = _pos_with_pyramid(pyramid_count=3, unrealized_pnl=300_000.0)
         result = await dec.decide(_snapshot(signal="entry_ok", position=pos))
@@ -768,7 +768,7 @@ async def test_p03_add_position_blocks_when_loss_position():
     adv = _advisory(action="add_position", confidence=0.80)
     dec, _ = _make_decision(advisory=adv)
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         pos = _pos_with_pyramid(
             entry_price=10_500_000.0,  # 진입가 > 현재가(10M) → 손실
@@ -794,7 +794,7 @@ async def test_p04_add_position_blocks_when_exit_signal_active():
     adv = _advisory(action="add_position", confidence=0.80)
     dec, _ = _make_decision(advisory=adv)
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         pos = _pos_with_pyramid(pyramid_count=0, unrealized_pnl=200_000.0)
         result = await dec.decide(
@@ -813,7 +813,7 @@ async def test_p05_add_position_blocks_near_expiry():
     adv = _advisory(action="add_position", confidence=0.80, expires_offset_hours=0.5)
     dec, _ = _make_decision(advisory=adv)
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         pos = _pos_with_pyramid(pyramid_count=0, unrealized_pnl=200_000.0)
         result = await dec.decide(_snapshot(signal="entry_ok", position=pos))
@@ -830,7 +830,7 @@ async def test_p06_add_position_without_open_position_returns_hold():
     adv = _advisory(action="add_position", confidence=0.80)
     dec, _ = _make_decision(advisory=adv)
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         result = await dec.decide(_snapshot(signal="entry_ok", position=None))
 
@@ -846,7 +846,7 @@ async def test_p07_add_position_second_pyramid_allowed():
     adv = _advisory(action="add_position", confidence=0.75)
     dec, _ = _make_decision(advisory=adv)
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         pos = _pos_with_pyramid(pyramid_count=1, unrealized_pnl=500_000.0)
         result = await dec.decide(_snapshot(signal="entry_ok", position=pos))
@@ -866,7 +866,7 @@ async def test_p08_add_position_full_exit_signal_blocks():
     adv = _advisory(action="add_position", confidence=0.80)
     dec, _ = _make_decision(advisory=adv)
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         pos = _pos_with_pyramid(pyramid_count=0, unrealized_pnl=300_000.0)
         result = await dec.decide(
@@ -893,7 +893,7 @@ async def test_p_short_profitable_allows_add_position():
     adv = _advisory(action="add_position", confidence=0.75)
     dec, _ = _make_decision(advisory=adv)
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
 
         # 숏 포지션: entry=10M, current=9.5M → 숏 수익
@@ -932,7 +932,7 @@ async def test_p_short_losing_blocks_add_position():
     adv = _advisory(action="add_position", confidence=0.80)
     dec, _ = _make_decision(advisory=adv)
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
 
         short_pos = PositionDTO(
@@ -969,7 +969,7 @@ async def test_p_pyramid_count_missing_from_extra_defaults_to_zero():
     adv = _advisory(action="add_position", confidence=0.70)
     dec, _ = _make_decision(advisory=adv)
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
 
         # extra에 pyramid_count 키 없음
@@ -1022,7 +1022,7 @@ async def test_ts01_fetch_advisory_called_with_pair_and_exchange():
         params={},
         strategy_type="box_mean_reversion",
     )
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         await dec.decide(snap)
 
@@ -1089,7 +1089,7 @@ async def test_ts03_different_strategy_type_goes_to_fallback():
         params={},
         strategy_type="box_mean_reversion",
     )
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         result = await dec.decide(snap)
 
@@ -1104,7 +1104,7 @@ async def test_ts04_fetch_advisory_uses_pair_exchange_only():
     dec, _ = _make_decision(advisory=adv)
 
     snap = _snapshot(signal="entry_ok")  # strategy_type 기본값 "trend_following"
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         await dec.decide(snap)
 
@@ -1140,7 +1140,7 @@ async def test_ec01_box_manager_snapshot_queries_same_advisory():
         params={},
         strategy_type="box_mean_reversion",
     )
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         result = await dec.decide(box_snap)
 
@@ -1178,7 +1178,7 @@ async def test_ec02_different_strategy_types_get_same_advisory():
         exit_signal={"action": "hold"}, params={},
         strategy_type="box_mean_reversion",
     )
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         result_trend = await dec_trend.decide(trend_snap)
         result_box = await dec_box.decide(box_snap)
@@ -1221,9 +1221,9 @@ async def test_rl01_log_prefix_includes_trading_style(caplog):
         exit_signal={"action": "hold", "reason": ""},
         params={"position_size_pct": 0.5, "trading_style": "trend_following"},
     )
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
-        with caplog.at_level(logging.INFO, logger="core.decision.rachel_advisory"):
+        with caplog.at_level(logging.INFO, logger="core.judge.decision.rachel_advisory"):
             await dec.decide(snap)
 
     assert any(
@@ -1252,9 +1252,9 @@ async def test_rl02_log_prefix_fallback_when_no_trading_style(caplog):
         exit_signal={"action": "hold", "reason": ""},
         params={},  # trading_style 없음
     )
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
-        with caplog.at_level(logging.INFO, logger="core.decision.rachel_advisory"):
+        with caplog.at_level(logging.INFO, logger="core.judge.decision.rachel_advisory"):
             await dec.decide(snap)
 
     assert any(
@@ -1277,7 +1277,7 @@ async def test_ho01_hold_override_entry_ok_returns_entry_long():
     adv = _advisory(action="hold", confidence=0.65, hold_override_policy="signal_entry_ok")
     dec, _ = _make_decision(advisory=adv)
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         result = await dec.decide(_snapshot(signal="entry_ok"))
 
@@ -1296,7 +1296,7 @@ async def test_ho02_hold_override_entry_sell_returns_entry_short():
     adv = _advisory(action="hold", confidence=0.65, hold_override_policy="signal_entry_ok")
     dec, _ = _make_decision(advisory=adv)
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         result = await dec.decide(_snapshot(signal="entry_sell"))
 
@@ -1314,7 +1314,7 @@ async def test_ho03_hold_override_wait_dip_stays_hold():
     adv = _advisory(action="hold", confidence=0.65, hold_override_policy="signal_entry_ok")
     dec, _ = _make_decision(advisory=adv)
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         result = await dec.decide(_snapshot(signal="wait_dip"))
 
@@ -1331,7 +1331,7 @@ async def test_ho04_hold_policy_none_entry_ok_stays_hold():
     adv = _advisory(action="hold", confidence=0.65, hold_override_policy="none")
     dec, _ = _make_decision(advisory=adv)
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         result = await dec.decide(_snapshot(signal="entry_ok"))
 
@@ -1348,7 +1348,7 @@ async def test_ho05_hold_override_with_position_stays_hold():
     adv = _advisory(action="hold", confidence=0.65, hold_override_policy="signal_entry_ok")
     dec, _ = _make_decision(advisory=adv)
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         result = await dec.decide(_snapshot(signal="entry_ok", position=_pos()))
 
@@ -1369,7 +1369,7 @@ async def test_ho06_hold_override_near_expiry_suppresses_entry():
     )
     dec, _ = _make_decision(advisory=adv)
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         result = await dec.decide(_snapshot(signal="entry_ok"))
 
@@ -1399,7 +1399,7 @@ async def test_ho07_hold_override_policy_missing_attribute_falls_back():
     )
     dec, _ = _make_decision(advisory=adv)
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         result = await dec.decide(_snapshot(signal="entry_ok"))
 
@@ -1420,7 +1420,7 @@ async def test_ho08_non_hold_advisory_ignores_override_policy():
     )
     dec, _ = _make_decision(advisory=adv)
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         result = await dec.decide(_snapshot(signal="entry_ok"))
 
@@ -1476,7 +1476,7 @@ async def test_ap02_entry_long_plus_long_position_loss_returns_hold():
     adv = _advisory(action="entry_long", confidence=0.75, size_pct=0.2)
     dec, _ = _make_decision(advisory=adv)
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         # entry_price > current_price → 손실 구간
         pos = _pos_long(entry_price=10_500_000.0, pyramid_count=0)
@@ -1495,7 +1495,7 @@ async def test_ap03_entry_long_plus_long_position_pyramid_limit_returns_hold():
     adv = _advisory(action="entry_long", confidence=0.80)
     dec, _ = _make_decision(advisory=adv)
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         pos = _pos_long(entry_price=9_800_000.0, pyramid_count=3)
         result = await dec.decide(_snapshot(signal="entry_ok", position=pos))
@@ -1513,7 +1513,7 @@ async def test_ap04_entry_long_plus_short_position_direction_mismatch_returns_ho
     adv = _advisory(action="entry_long", confidence=0.75)
     dec, _ = _make_decision(advisory=adv)
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         pos = _pos_short(entry_price=10_200_000.0, pyramid_count=0)
         result = await dec.decide(_snapshot(signal="entry_ok", position=pos))
@@ -1534,7 +1534,7 @@ async def test_ap05_entry_short_plus_short_position_profitable_converts_to_add_p
     adv = _advisory(action="entry_short", confidence=0.70, size_pct=0.15)
     dec, _ = _make_decision(advisory=adv)
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         pos = _pos_short(entry_price=10_200_000.0, pyramid_count=1)
         snap = SignalSnapshot(
@@ -1562,7 +1562,7 @@ async def test_ap07_entry_long_plus_long_position_near_expiry_returns_hold():
     adv = _advisory(action="entry_long", confidence=0.75, expires_offset_hours=0.5)
     dec, _ = _make_decision(advisory=adv)
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         pos = _pos_long(entry_price=9_800_000.0, pyramid_count=0)
         result = await dec.decide(_snapshot(signal="entry_ok", position=pos))
@@ -1584,9 +1584,9 @@ async def test_ec01_entry_short_plus_long_position_direction_mismatch_logs_warni
     adv = _advisory(action="entry_short", confidence=0.65)
     dec, _ = _make_decision(advisory=adv)
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
-        with caplog.at_level(logging.WARNING, logger="core.decision.rachel_advisory"):
+        with caplog.at_level(logging.WARNING, logger="core.judge.decision.rachel_advisory"):
             pos = _pos_long(entry_price=9_800_000.0)
             result = await dec.decide(_snapshot(signal="entry_sell", position=pos))
 

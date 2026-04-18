@@ -64,12 +64,12 @@ def _make_db(positions):
 
 async def _call_detect(positions, *, record_ok=True, box_positions=None):
     """Helper: DB 기록을 모킹해서 detect_and_notify_losses 호출."""
-    from core.task.loss_detector import detect_and_notify_losses
+    from core.punisher.task.loss_detector import detect_and_notify_losses
 
     db = _make_db(positions)
 
     # _record_loss 모킹
-    with patch("core.task.loss_detector._record_loss", new_callable=AsyncMock, return_value=record_ok) as mock_record:
+    with patch("core.punisher.task.loss_detector._record_loss", new_callable=AsyncMock, return_value=record_ok) as mock_record:
         if box_positions is not None:
             # box 포지션용 별도 DB execute mock (두 번째 호출)
             box_result = MagicMock()
@@ -177,7 +177,7 @@ async def test_b1_db_failure_keeps_flag_false():
 # B2: Telegram 토큰 미설정 → DB 기록은 성공 (Telegram은 optional)
 @pytest.mark.asyncio
 async def test_b2_no_telegram_token_still_records():
-    from core.task.loss_detector import _record_loss
+    from core.punisher.task.loss_detector import _record_loss
     from adapters.database.models import WakeUpReview
 
     pos = _make_position()
@@ -186,9 +186,9 @@ async def test_b2_no_telegram_token_still_records():
     review_mock.id = 42
     db.flush = AsyncMock()
 
-    with patch("core.task.loss_detector.TELEGRAM_BOT_TOKEN", ""), \
-         patch("core.task.loss_detector.TELEGRAM_CHAT_ID", ""), \
-         patch("core.task.loss_detector.WakeUpReview", return_value=review_mock):
+    with patch("core.punisher.task.loss_detector.TELEGRAM_BOT_TOKEN", ""), \
+         patch("core.punisher.task.loss_detector.TELEGRAM_CHAT_ID", ""), \
+         patch("core.punisher.task.loss_detector.WakeUpReview", return_value=review_mock):
         result = await _record_loss(db, pos, position_type="trend", prefix="bf", http_client=None)
 
     assert result is True  # DB 기록 성공
@@ -197,13 +197,13 @@ async def test_b2_no_telegram_token_still_records():
 # B3: WakeUpReview 생성 예외 → False 반환
 @pytest.mark.asyncio
 async def test_b3_wake_up_review_exception_returns_false():
-    from core.task.loss_detector import _record_loss
+    from core.punisher.task.loss_detector import _record_loss
 
     pos = _make_position()
     db = AsyncMock()
     db.flush = AsyncMock(side_effect=Exception("DB error"))
 
-    with patch("core.task.loss_detector.WakeUpReview", side_effect=Exception("model error")):
+    with patch("core.punisher.task.loss_detector.WakeUpReview", side_effect=Exception("model error")):
         result = await _record_loss(db, pos, position_type="trend", prefix="bf", http_client=None)
 
     assert result is False
@@ -233,10 +233,10 @@ async def test_c1_box_position_loss_recorded():
 async def test_c2_no_box_model_skips_box():
     pos = _make_position(realized_pnl_jpy=Decimal("-300"))
 
-    from core.task.loss_detector import detect_and_notify_losses
+    from core.punisher.task.loss_detector import detect_and_notify_losses
     db = _make_db([pos])
 
-    with patch("core.task.loss_detector._record_loss", new_callable=AsyncMock, return_value=True) as mock_record:
+    with patch("core.punisher.task.loss_detector._record_loss", new_callable=AsyncMock, return_value=True) as mock_record:
         count = await detect_and_notify_losses(db, BfTrendPosition, box_position_model=None, prefix="bf")
 
     assert count == 1
@@ -260,7 +260,7 @@ def test_c3_box_model_has_loss_webhook_sent():
 # D1: scheduled_at 경과 pending_pipeline 리뷰 → pipeline_status=triggered
 @pytest.mark.asyncio
 async def test_d1_trigger_pending_review():
-    from core.task.wake_up_trigger import trigger_pending_reviews
+    from core.punisher.task.wake_up_trigger import trigger_pending_reviews
 
     review = MagicMock()
     review.id = 1
@@ -277,7 +277,7 @@ async def test_d1_trigger_pending_review():
     db.execute = AsyncMock(return_value=result_mock)
     db.commit = AsyncMock()
 
-    with patch("core.task.wake_up_trigger._send_pipeline_webhook", new_callable=AsyncMock, return_value=True):
+    with patch("core.punisher.task.wake_up_trigger._send_pipeline_webhook", new_callable=AsyncMock, return_value=True):
         count = await trigger_pending_reviews(db)
 
     assert count == 1
@@ -288,7 +288,7 @@ async def test_d1_trigger_pending_review():
 # D2: webhook 전송 실패 → status 유지 (pending_pipeline)
 @pytest.mark.asyncio
 async def test_d2_trigger_webhook_failure_keeps_status():
-    from core.task.wake_up_trigger import trigger_pending_reviews
+    from core.punisher.task.wake_up_trigger import trigger_pending_reviews
 
     review = MagicMock()
     review.id = 2
@@ -305,7 +305,7 @@ async def test_d2_trigger_webhook_failure_keeps_status():
     db.execute = AsyncMock(return_value=result_mock)
     db.commit = AsyncMock()
 
-    with patch("core.task.wake_up_trigger._send_pipeline_webhook", new_callable=AsyncMock, return_value=False):
+    with patch("core.punisher.task.wake_up_trigger._send_pipeline_webhook", new_callable=AsyncMock, return_value=False):
         count = await trigger_pending_reviews(db)
 
     assert count == 0
@@ -340,10 +340,10 @@ async def test_e3_gmoc_detect_and_notify_losses_works():
     GmocTrendPosition = create_trend_position_model("gmoc")
     pos = _make_position(realized_pnl_jpy=Decimal("-999"))
 
-    from core.task.loss_detector import detect_and_notify_losses
+    from core.punisher.task.loss_detector import detect_and_notify_losses
     db = _make_db([pos])
 
-    with patch("core.task.loss_detector._record_loss", new_callable=AsyncMock, return_value=True):
+    with patch("core.punisher.task.loss_detector._record_loss", new_callable=AsyncMock, return_value=True):
         count = await detect_and_notify_losses(db, GmocTrendPosition, prefix="gmoc")
 
     assert count == 1

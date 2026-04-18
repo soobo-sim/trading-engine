@@ -206,7 +206,7 @@ class TestLogging:
         gate = RegimeGate("btc_jpy")
         gate.update_regime("trending")
         gate.update_regime("ranging")
-        with caplog.at_level(logging.INFO, logger="core.execution.regime_gate"):
+        with caplog.at_level(logging.INFO, logger="core.punisher.execution.regime_gate"):
             gate.update_regime("ranging")
         assert any(r.levelno == logging.INFO for r in caplog.records)
 
@@ -253,7 +253,7 @@ class TestConsecutiveCount:
         gate = RegimeGate("btc_jpy")
         for _ in range(4):
             gate.update_regime("trending")
-        with caplog.at_level(logging.INFO, logger="core.execution.regime_gate"):
+        with caplog.at_level(logging.INFO, logger="core.punisher.execution.regime_gate"):
             gate.update_regime("trending")
         assert any("연속 5회" in r.message for r in caplog.records)
 

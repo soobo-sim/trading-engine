@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.dependencies import AppState
 from core.backtest.engine import BacktestConfig, run_backtest, run_grid_search
+from core.backtest.regime_simulator import simulate_regime
 
 logger = logging.getLogger(__name__)
 
@@ -346,6 +347,30 @@ async def compute_performance_summary(
     metrics["period_start"] = since.isoformat()
     metrics["period_end"] = until.isoformat()
     return metrics
+
+
+# ──────────────────────────────────────────────────────────────
+# 체제 시뮬레이션
+# ──────────────────────────────────────────────────────────────
+
+async def run_regime_simulation(
+    pair: str,
+    params: dict,
+    days: int,
+    timeframe: str,
+    streak_required: int,
+    state: AppState,
+    db: AsyncSession,
+) -> dict:
+    """체제 판정 파라미터 시뮬레이션. 실전 코드(compute_trend_signal + RegimeGate)를 그대로 사용."""
+    from fastapi import HTTPException
+    pair = state.normalize_pair(pair)
+    candles = await fetch_candles(db, state, pair, timeframe, days)
+    if not candles:
+        raise HTTPException(404, {"blocked_code": "NO_CANDLES"})
+
+    result = simulate_regime(candles, params, streak_required=streak_required)
+    return result.to_dict()
 
 
 # ──────────────────────────────────────────────────────────────

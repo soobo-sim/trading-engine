@@ -7,7 +7,7 @@ import pytest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from core.analysis.event_filter import EventFilter
+from core.judge.analysis.event_filter import EventFilter
 
 
 _UTC = timezone.utc

@@ -58,11 +58,11 @@ class TestClassifyRegime:
         assert is_trending is False
         assert is_ranging is True
 
-    def test_rc03_middle_zone_unclear(self):
-        """RC-03: BB=4.0%, range=7.0% → unclear (중간 지대)."""
+    def test_rc03_middle_zone_trending(self):
+        """RC-03: BB=4.0%, range=7.0% → trending (BB≥3.0 충족)."""
         regime, is_trending, is_ranging = classify_regime(bb_width_pct=4.0, range_pct=7.0)
-        assert regime == "unclear"
-        assert is_trending is False
+        assert regime == "trending"
+        assert is_trending is True
         assert is_ranging is False
 
     def test_rc04_custom_params_still_unclear(self):
@@ -78,7 +78,7 @@ class TestClassifyRegime:
         assert regime == "trending"
 
     def test_rc06_bb_triggers_trending_with_default_params(self):
-        """RC-06: BB=6.1% → trending (BB≥6.0 기본 기준 충족)."""
+        """RC-06: BB=6.1% → trending (BB≥4.5 기본 기준 충족)."""
         regime, _, _ = classify_regime(bb_width_pct=6.1, range_pct=5.0)
         assert regime == "trending"
 
@@ -89,11 +89,10 @@ class TestClassifyRegime:
         assert is_trending is True
         assert is_ranging is False
 
-    def test_rc08_boundary_ranging_max(self):
-        """RC-08: BB=3.0% (ranging max와 정확히 일치) → unclear (< 조건 미충족)."""
-        # bb_ranging_max 기본값=3.0, 조건은 bb_width_pct < bb_ranging_max
+    def test_rc08_boundary_trending_min(self):
+        """RC-08: BB=3.0% (trending min과 정확히 일치) → trending (BB≥3.0 충족)."""
         regime, _, _ = classify_regime(bb_width_pct=3.0, range_pct=4.5)
-        assert regime == "unclear"
+        assert regime == "trending"
 
     # ── EC-01~EC-02: 엣지 케이스 ─────────────────────────────────────────
 
@@ -193,14 +192,14 @@ class TestClassifyRegimeEdgeCases:
         assert regime in ("ranging", "unclear", "trending")  # 에러 없이 동작
 
     def test_ec04_bb_trending_min_boundary(self):
-        """EC-04: BB가 bb_trending_min과 정확히 같으면 trending (≥ 조건)."""
-        regime, is_trending, _ = classify_regime(bb_width_pct=6.0, range_pct=0.0)
+        """EC-04: BB가 bb_trending_min(기본=4.5)과 정확히 같으면 trending (≥ 조건)."""
+        regime, is_trending, _ = classify_regime(bb_width_pct=4.5, range_pct=0.0)
         assert is_trending is True
         assert regime == "trending"
 
     def test_ec05_range_trending_min_boundary(self):
-        """EC-05: range가 range_trending_min과 정확히 같으면 trending (≥ 조건)."""
-        regime, is_trending, _ = classify_regime(bb_width_pct=0.0, range_pct=10.0)
+        """EC-05: range가 range_trending_min(기본=8.5)과 정확히 같으면 trending (≥ 조건)."""
+        regime, is_trending, _ = classify_regime(bb_width_pct=0.0, range_pct=8.5)
         assert is_trending is True
         assert regime == "trending"
 
@@ -220,3 +219,28 @@ class TestClassifyRegimeEdgeCases:
             _, is_trending, is_ranging = classify_regime(bb, rng)
             # trending과 ranging이 동시에 True일 수 없음
             assert not (is_trending and is_ranging), f"BB={bb}, range={rng}"
+
+
+# ── RC-09~RC-11: 신규 임계값(4.5/8.5) 검증 ──────────────────────────────────
+
+class TestClassifyRegimeNewThresholds:
+    """2026-04-18 임계값 재보정 (bb 6.0→4.5, range 10.0→8.5) 검증."""
+
+    def test_rc09_current_btc_realworld_now_trending(self):
+        """RC-09: 현실 수치 (BB=5.77%, range=9.83%) → 신규 임계값에서 trending."""
+        regime, is_trending, _ = classify_regime(bb_width_pct=5.769, range_pct=9.826)
+        assert regime == "trending"
+        assert is_trending is True
+
+    def test_rc10_below_new_bb_min_still_unclear(self):
+        """RC-10: BB=2.5% (BB<3.0), range=5.5% (range<6.0) → unclear."""
+        regime, is_trending, is_ranging = classify_regime(bb_width_pct=2.5, range_pct=5.5)
+        assert regime == "unclear"
+        assert is_trending is False
+        assert is_ranging is False
+
+    def test_rc11_exactly_new_bb_min_trending(self):
+        """RC-11: BB=4.5% (신규 경계값 정확히) → trending."""
+        regime, is_trending, _ = classify_regime(bb_width_pct=4.5, range_pct=0.0)
+        assert regime == "trending"
+        assert is_trending is True

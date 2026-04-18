@@ -152,7 +152,7 @@ class TestPaperExecutorRecordEntry:
             pass
         session.flush.side_effect = _flush_side_effect
 
-        with patch("core.execution.executor.PaperTrade") as MockPaperTrade:
+        with patch("core.punisher.execution.executor.PaperTrade") as MockPaperTrade:
             mock_row = MagicMock()
             mock_row.id = 42
             MockPaperTrade.return_value = mock_row

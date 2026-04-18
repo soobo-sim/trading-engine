@@ -533,12 +533,12 @@ async def get_market_regime(
 
     if bb_width_pct < 4.0:
         ranging_score += 2
-    elif bb_width_pct >= 6.0:
+    elif bb_width_pct >= 4.5:  # BTC 최적화: 6.0 → 4.5
         trending_score += 2
 
     if range_pct < 8.0:
         ranging_score += 2
-    elif range_pct >= 10.0:
+    elif range_pct >= 8.5:  # BTC 최적화: 10.0 → 8.5
         trending_score += 2
 
     if atr_pct < 1.5:

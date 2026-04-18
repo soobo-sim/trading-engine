@@ -12,8 +12,8 @@ from unittest.mock import AsyncMock
 import pytest
 
 from core.data.dto import SignalSnapshot
-from core.decision.ai_decision import AiDecision, confidence_to_size
-from core.decision.llm_client import ILlmClient, LlmCallError
+from core.judge.decision.ai_decision import AiDecision, confidence_to_size
+from core.judge.decision.llm_client import ILlmClient, LlmCallError
 
 
 # ──────────────────────────────────────────────────────────────
@@ -490,7 +490,7 @@ class TestAiDecisionLogging:
         import logging
         client = self._make_client()
         dec = AiDecision(llm_client=client)
-        with caplog.at_level(logging.INFO, logger="core.decision.ai_decision"):
+        with caplog.at_level(logging.INFO, logger="core.judge.decision.ai_decision"):
             await dec.decide(_snapshot())
         info_logs = [r for r in caplog.records if r.levelname == "INFO" and "AiDecision" in r.message]
         assert len(info_logs) == 1
@@ -510,7 +510,7 @@ class TestAiDecisionLogging:
         import logging
         client = self._make_client()
         dec = AiDecision(llm_client=client)
-        with caplog.at_level(logging.INFO, logger="core.decision.ai_decision"):
+        with caplog.at_level(logging.INFO, logger="core.judge.decision.ai_decision"):
             await dec.decide(_snapshot())
         msg = [r.message for r in caplog.records if "AiDecision" in r.message][0]
         assert "70%" in msg   # final_confidence=0.70
@@ -527,7 +527,7 @@ class TestAiDecisionLogging:
         client = AsyncMock(spec=ILlmClient)
         client.chat.side_effect = LlmCallError("timeout")
         dec = AiDecision(llm_client=client)
-        with caplog.at_level(logging.INFO, logger="core.decision.ai_decision"):
+        with caplog.at_level(logging.INFO, logger="core.judge.decision.ai_decision"):
             await dec.decide(_snapshot())
         info_logs = [r for r in caplog.records if r.levelname == "INFO" and "AiDecision" in r.message]
         assert len(info_logs) == 0

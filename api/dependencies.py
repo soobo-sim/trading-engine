@@ -13,11 +13,11 @@ from fastapi import Request
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from core.exchange.base import ExchangeAdapter
-from core.monitoring.health import HealthChecker
+from core.punisher.monitoring.health import HealthChecker
 from core.strategy.cfd_trend_following import MarginTrendManager
 from core.strategy.gmo_coin_trend import GmoCoinTrendManager
 from core.strategy.registry import StrategyRegistry
-from core.task.supervisor import TaskSupervisor
+from core.punisher.task.supervisor import TaskSupervisor
 
 
 @dataclass

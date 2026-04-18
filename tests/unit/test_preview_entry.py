@@ -16,8 +16,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from core.data.dto import Decision, PositionDTO, SignalSnapshot
-from core.decision.rachel_advisory import RachelAdvisoryDecision
-from core.decision.rule_based import RuleBasedDecision
+from core.judge.decision.rachel_advisory import RachelAdvisoryDecision
+from core.judge.decision.rule_based import RuleBasedDecision
 
 # ──────────────────────────────────────────────────────────────
 # 헬퍼
@@ -172,7 +172,7 @@ async def test_rachel_entry_long_advisory_with_entry_preview_signal():
     adv = _advisory(action="entry_long", confidence=0.65, size_pct=0.5)
     dec, _ = _make_rachel(advisory=adv)
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         result = await dec.decide(_snapshot(signal="entry_preview"))
 
@@ -191,7 +191,7 @@ async def test_rachel_entry_preview_size_is_reduced():
     adv = _advisory(action="entry_long", confidence=0.65, size_pct=0.5)
     dec, _ = _make_rachel(advisory=adv)
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         result = await dec.decide(_snapshot(signal="entry_preview"))
 
@@ -208,7 +208,7 @@ async def test_rachel_hold_advisory_with_entry_preview_returns_hold():
     adv = _advisory(action="hold", confidence=0.3)
     dec, _ = _make_rachel(advisory=adv)
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         result = await dec.decide(_snapshot(signal="entry_preview"))
 
@@ -227,7 +227,7 @@ async def test_rachel_entry_preview_less_confident_than_entry_ok():
     dec_preview, _ = _make_rachel(advisory=adv)
     dec_ok, _ = _make_rachel(advisory=adv)
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         preview_result = await dec_preview.decide(_snapshot(signal="entry_preview"))
         ok_result = await dec_ok.decide(_snapshot(signal="entry_ok"))
@@ -245,7 +245,7 @@ async def test_rachel_no_advisory_with_entry_preview_falls_back_to_v1():
     """
     dec, fallback = _make_rachel(advisory=None)
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         result = await dec.decide(_snapshot(signal="entry_preview"))
 
@@ -320,7 +320,7 @@ async def test_rachel_entry_preview_zero_size_stays_zero():
     adv = _advisory(action="entry_long", confidence=0.65, size_pct=None)
     dec, _ = _make_rachel(advisory=adv)
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         result = await dec.decide(_snapshot(signal="entry_preview"))
 
@@ -338,7 +338,7 @@ async def test_rachel_entry_preview_confidence_precision():
     adv = _advisory(action="entry_long", confidence=0.70, size_pct=0.5)
     dec, _ = _make_rachel(advisory=adv)
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         result = await dec.decide(_snapshot(signal="entry_preview"))
 
@@ -356,7 +356,7 @@ async def test_rachel_expiry_near_with_entry_preview_suppressed():
     adv = _advisory(action="entry_long", confidence=0.65, expires_offset_hours=0.5)
     dec, _ = _make_rachel(advisory=adv)
 
-    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         result = await dec.decide(_snapshot(signal="entry_preview"))
 

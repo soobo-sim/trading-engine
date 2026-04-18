@@ -404,7 +404,7 @@ async def generate_box_report(
     else:
         # 박스 미형성 시 진행 상황 계산
         try:
-            from core.analysis.box_detector import detect_box_progress
+            from core.judge.analysis.box_detector import detect_box_progress
             lookback = int(params.get("lookback_candles", 40))
             tol = float(params.get("box_tolerance_pct", 0.5))
             min_t = int(params.get("min_touches", 3))

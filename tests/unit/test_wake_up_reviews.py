@@ -997,7 +997,7 @@ def test_serialize_pipeline_fields_all_none():
 @pytest.mark.asyncio
 async def test_pipeline_webhook_skipped_when_no_token():
     """RACHEL_WEBHOOK_TOKEN 미설정 시 _send_pipeline_webhook → False."""
-    from core.task.wake_up_trigger import _send_pipeline_webhook
+    from core.punisher.task.wake_up_trigger import _send_pipeline_webhook
 
     review = MagicMock()
     review.id = 1
@@ -1007,7 +1007,7 @@ async def test_pipeline_webhook_skipped_when_no_token():
     review.exchange = "gmo"
     review.realized_pnl = Decimal("-200")
 
-    with patch("core.task.wake_up_trigger.RACHEL_WEBHOOK_TOKEN", ""):
+    with patch("core.punisher.task.wake_up_trigger.RACHEL_WEBHOOK_TOKEN", ""):
         result = await _send_pipeline_webhook(review, http_client=None)
 
     assert result is False

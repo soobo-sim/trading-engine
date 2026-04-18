@@ -6,7 +6,7 @@ from __future__ import annotations
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
-from core.analysis.intermarket import IntermarketClient
+from core.judge.analysis.intermarket import IntermarketClient
 
 
 @pytest.fixture

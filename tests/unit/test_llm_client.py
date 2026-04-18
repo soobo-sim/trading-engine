@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-from core.decision.llm_client import LlmCallError, OpenAiLlmClient
+from core.judge.decision.llm_client import LlmCallError, OpenAiLlmClient
 
 _SCHEMA: dict = {"name": "test_schema", "strict": True, "schema": {"type": "object"}}
 _SYSTEM = "system prompt"

@@ -80,6 +80,7 @@ class TestToDict:
             "pair", "active_strategy", "regime_history",
             "last_switch_at", "switch_count",
             "consecutive_count", "consecutive_regime", "last_candle_key",
+            "streak_required",
         }
         assert required_keys == set(d.keys())
 

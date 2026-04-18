@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.dependencies import AppState, get_db, get_state
 from api.services import analysis_service as svc
-from core.analysis.box_detector import detect_box
+from core.judge.analysis.box_detector import detect_box
 
 router = APIRouter(prefix="/api/analysis", tags=["Analysis (Rachel)"])
 

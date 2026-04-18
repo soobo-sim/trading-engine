@@ -32,7 +32,7 @@ from core.exchange.types import (
     Position,
 )
 from core.strategy.gmo_coin_trend import GmoCoinTrendManager
-from core.task.supervisor import TaskSupervisor
+from core.punisher.task.supervisor import TaskSupervisor
 from tests.fake_exchange import FakeExchangeAdapter
 
 # ── 테스트용 ORM 모델 ──────────────────────────────────────────

@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.dependencies import get_db
 from api.services import strategy_analysis_service as svc
-from core.notifications.analysis_telegram import send_analysis_report_telegram
+from core.punisher.notifications.analysis_telegram import send_analysis_report_telegram
 
 logger = logging.getLogger(__name__)
 

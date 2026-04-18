@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 import pytest
 
 from core.data.dto import PositionDTO, SignalSnapshot
-from core.decision.rule_based import RuleBasedDecision
+from core.judge.decision.rule_based import RuleBasedDecision
 
 
 def _make_snapshot(
@@ -320,7 +320,7 @@ class TestRuleBasedDecisionLogging:
         import logging
         dec = RuleBasedDecision()
         snapshot = _make_snapshot("entry_ok", position=None)
-        with caplog.at_level(logging.INFO, logger="core.decision.rule_based"):
+        with caplog.at_level(logging.INFO, logger="core.judge.decision.rule_based"):
             result = await dec.decide(snapshot)
         assert result.action == "entry_long"
         info = [r for r in caplog.records if r.levelname == "INFO" and "RuleBasedDecision" in r.message]
@@ -337,7 +337,7 @@ class TestRuleBasedDecisionLogging:
         import logging
         dec = RuleBasedDecision()
         snapshot = _make_snapshot("hold", position=None)
-        with caplog.at_level(logging.DEBUG, logger="core.decision.rule_based"):
+        with caplog.at_level(logging.DEBUG, logger="core.judge.decision.rule_based"):
             result = await dec.decide(snapshot)
         assert result.action == "hold"
         info = [r for r in caplog.records if r.levelname == "INFO" and "RuleBasedDecision" in r.message]
@@ -356,7 +356,7 @@ class TestRuleBasedDecisionLogging:
         import logging
         dec = RuleBasedDecision()
         snapshot = _make_snapshot("exit_warning", position=_pos())
-        with caplog.at_level(logging.INFO, logger="core.decision.rule_based"):
+        with caplog.at_level(logging.INFO, logger="core.judge.decision.rule_based"):
             result = await dec.decide(snapshot)
         assert result.action == "exit"
         info = [r for r in caplog.records if r.levelname == "INFO" and "RuleBasedDecision" in r.message]
@@ -373,7 +373,7 @@ class TestRuleBasedDecisionLogging:
         import logging
         dec = RuleBasedDecision()
         snapshot = _make_snapshot("no_signal", exit_action="tighten_stop", position=_pos(stop_tightened=False))
-        with caplog.at_level(logging.DEBUG, logger="core.decision.rule_based"):
+        with caplog.at_level(logging.DEBUG, logger="core.judge.decision.rule_based"):
             result = await dec.decide(snapshot)
         assert result.action == "tighten_stop"
         info = [r for r in caplog.records if r.levelname == "INFO" and "RuleBasedDecision" in r.message]

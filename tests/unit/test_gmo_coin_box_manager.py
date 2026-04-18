@@ -144,7 +144,7 @@ class TestComputeSignalMapping:
             mgr._compute_signal.__func__  # 존재 확인
 
         # 직접 detect_box + classify 로직만 테스트
-        from core.analysis.box_detector import detect_box
+        from core.judge.analysis.box_detector import detect_box
         from core.strategy.box_signals import classify_price_in_box
 
         highs = [float(c.high) for c in box_candles]

@@ -111,10 +111,10 @@ from adapters.database.models import (
 from adapters.database.session import create_db_engine, create_session_factory
 from api.dependencies import AppState, ModelRegistry
 from api.routes import system, trading, account, strategies, boxes, candles, techniques, analysis, monitoring, cfd, performance, wake_up_reviews, strategy_changes, strategy_analysis, paper_trades, strategy_scores, advisories
-from core.notifications.switch_telegram import send_switch_recommendation_telegram
-from core.monitoring.health import HealthChecker
-from core.analysis.event_filter import create_event_filter
-from core.analysis.intermarket import create_intermarket_client
+from core.punisher.notifications.switch_telegram import send_switch_recommendation_telegram
+from core.punisher.monitoring.health import HealthChecker
+from core.judge.analysis.event_filter import create_event_filter
+from core.judge.analysis.intermarket import create_intermarket_client
 from core.strategy.box_mean_reversion import GmoCoinBoxManager
 from core.strategy.cfd_trend_following import MarginTrendManager
 from core.strategy.gmo_coin_trend import GmoCoinTrendManager
@@ -122,8 +122,8 @@ from core.strategy.registry import StrategyRegistry
 from core.execution.regime_gate import RegimeGate
 from core.strategy.snapshot_collector import SnapshotCollector
 from core.strategy.switch_recommender import SwitchRecommender
-from core.task.auto_reporter import create_auto_reporter
-from core.task.supervisor import TaskSupervisor
+from core.punisher.task.auto_reporter import create_auto_reporter
+from core.punisher.task.supervisor import TaskSupervisor
 
 logger = logging.getLogger(__name__)
 
@@ -306,9 +306,9 @@ async def lifespan(app: FastAPI):
             )
 
     if trading_mode in ("v1", "rule_based"):
-        from core.decision.rule_based import RuleBasedDecision
+        from core.judge.decision.rule_based import RuleBasedDecision
         from core.execution.orchestrator import ExecutionOrchestrator
-        from core.safety.guardrails import AiGuardrails
+        from core.judge.safety.guardrails import AiGuardrails
 
         _guardrail = AiGuardrails(
             session_factory=session_factory,
@@ -326,10 +326,10 @@ async def lifespan(app: FastAPI):
         box_manager.set_orchestrator(_orchestrator)
         logger.debug(f"Execution Layer 초기화: TRADING_MODE={trading_mode}")
     elif trading_mode in ("v2", "ai"):
-        from core.decision.ai_decision import AiDecision
-        from core.decision.llm_client import OpenAiLlmClient
+        from core.judge.decision.ai_decision import AiDecision
+        from core.judge.decision.llm_client import OpenAiLlmClient
         from core.execution.orchestrator import ExecutionOrchestrator
-        from core.safety.guardrails import AiGuardrails
+        from core.judge.safety.guardrails import AiGuardrails
 
         _openai_key = os.environ.get("OPENAI_API_KEY")
         if not _openai_key:
@@ -361,10 +361,10 @@ async def lifespan(app: FastAPI):
         box_manager.set_orchestrator(_orchestrator)
         logger.debug(f"Execution Layer 초기화: TRADING_MODE={trading_mode} [DEPRECATED: v2/ai는 rachel 모드로 전환 권장]")
     elif trading_mode == "rachel":
-        from core.decision.rachel_advisory import RachelAdvisoryDecision
-        from core.decision.rule_based import RuleBasedDecision
+        from core.judge.decision.rachel_advisory import RachelAdvisoryDecision
+        from core.judge.decision.rule_based import RuleBasedDecision
         from core.execution.orchestrator import ExecutionOrchestrator
-        from core.safety.guardrails import AiGuardrails
+        from core.judge.safety.guardrails import AiGuardrails
 
         _fallback = RuleBasedDecision()
         _rachel_decision = RachelAdvisoryDecision(
@@ -391,9 +391,9 @@ async def lifespan(app: FastAPI):
         logger.warning(
             f"TRADING_MODE={trading_mode!r} 미지원. 기본값 v1을 사용합니다."
         )
-        from core.decision.rule_based import RuleBasedDecision
+        from core.judge.decision.rule_based import RuleBasedDecision
         from core.execution.orchestrator import ExecutionOrchestrator
-        from core.safety.guardrails import AiGuardrails
+        from core.judge.safety.guardrails import AiGuardrails
 
         _guardrail = AiGuardrails(
             session_factory=session_factory,
@@ -510,8 +510,8 @@ async def lifespan(app: FastAPI):
     if _enable_post_analysis:
         _openai_key_pa = os.environ.get("OPENAI_API_KEY")
         if _openai_key_pa:
-            from core.decision.llm_client import OpenAiLlmClient
-            from core.learning.post_analyzer import PostAnalyzer
+            from core.judge.decision.llm_client import OpenAiLlmClient
+            from core.punisher.learning.post_analyzer import PostAnalyzer
             _pa_llm = OpenAiLlmClient(
                 api_key=_openai_key_pa,
                 default_model=os.environ.get("POST_ANALYSIS_MODEL", "gpt-4o-mini"),
@@ -545,7 +545,7 @@ async def lifespan(app: FastAPI):
         except Exception as _e:
             logger.warning(f"EventDetector: 활성 pair 조회 실패 — {_e}")
         _advisory_base_url = os.environ.get("SELF_BASE_URL", f"http://localhost:{os.environ.get('PORT', '8001')}")
-        from core.monitoring.event_detector import EventDetector
+        from core.judge.monitoring.event_detector import EventDetector
         _event_detector = EventDetector(
             data_hub=_data_hub,
             advisory_base_url=_advisory_base_url,
@@ -562,7 +562,7 @@ async def lifespan(app: FastAPI):
         _tg_token_db = os.environ.get("TELEGRAM_BOT_TOKEN", "")
         _tg_chat_db = os.environ.get("TELEGRAM_CHAT_ID", "")
         if _tg_token_db and _tg_chat_db:
-            from core.monitoring.daily_briefing import DailyBriefing
+            from core.punisher.monitoring.daily_briefing import DailyBriefing
             _daily_briefing = DailyBriefing(
                 session_factory=session_factory,
                 trade_model=models.trade,

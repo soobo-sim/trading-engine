@@ -18,7 +18,7 @@ from adapters.database.models import (
 )
 from adapters.database.session import Base
 from core.data.dto import Decision, SignalSnapshot, modify_decision
-from core.safety.guardrails import AiGuardrails
+from core.judge.safety.guardrails import AiGuardrails
 
 
 TstTrade = create_trade_model("tst3", order_id_length=40, pair_column="pair")
@@ -554,7 +554,7 @@ class TestGuardrailsLogging:
         """
         import logging
         d = _make_decision("entry_long")
-        with caplog.at_level(logging.INFO, logger="core.safety.guardrails"):
+        with caplog.at_level(logging.INFO, logger="core.judge.safety.guardrails"):
             result = await guardrail.check(d, _make_snapshot())
         assert result.approved is True
         info = [r for r in caplog.records if r.levelname == "INFO" and "진입 승인" in r.message]
@@ -570,7 +570,7 @@ class TestGuardrailsLogging:
         """
         import logging
         d = _make_decision("entry_long")
-        with caplog.at_level(logging.INFO, logger="core.safety.guardrails"):
+        with caplog.at_level(logging.INFO, logger="core.judge.safety.guardrails"):
             await guardrail.check(d, _make_snapshot())
         info = [r for r in caplog.records if "진입 승인" in r.message]
         assert len(info) == 1
@@ -601,7 +601,7 @@ class TestGuardrailsLogging:
                 ))
             await db.commit()
         d = _make_decision("entry_long")
-        with caplog.at_level(logging.DEBUG, logger="core.safety.guardrails"):
+        with caplog.at_level(logging.DEBUG, logger="core.judge.safety.guardrails"):
             result = await guardrail.check(d, _make_snapshot())
         assert result.approved is False
         warn = [r for r in caplog.records if r.levelname == "WARNING" and "진입 거부" in r.message]
@@ -619,7 +619,7 @@ class TestGuardrailsLogging:
         """
         import logging
         d = _make_decision(action)
-        with caplog.at_level(logging.DEBUG, logger="core.safety.guardrails"):
+        with caplog.at_level(logging.DEBUG, logger="core.judge.safety.guardrails"):
             result = await guardrail.check(d, _make_snapshot())
         assert result.approved is True
         info = [r for r in caplog.records if r.levelname in {"INFO", "WARNING"}]

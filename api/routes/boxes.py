@@ -97,7 +97,7 @@ async def get_price_position(
         # 박스 미형성 시 형성 진행 상황 계산
         progress_data = None
         try:
-            from core.analysis.box_detector import detect_box_progress
+            from core.judge.analysis.box_detector import detect_box_progress
             from sqlalchemy import and_
 
             # 활성 전략에서 파라미터 가져오기

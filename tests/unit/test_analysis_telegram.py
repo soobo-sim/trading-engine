@@ -6,7 +6,7 @@ import pytest
 from unittest.mock import AsyncMock, patch
 from datetime import datetime, timezone, timedelta
 
-from core.notifications.analysis_telegram import (
+from core.punisher.notifications.analysis_telegram import (
     format_analysis_report_message,
     send_analysis_report_telegram,
     AGENT_ORDER,
@@ -154,7 +154,7 @@ class TestSendAnalysisReportTelegram:
     async def test_calls_send_telegram_message_when_configured(self):
         """토큰+채팅ID 설정 시 send_telegram_message 호출."""
         mock_send = AsyncMock(return_value=True)
-        with patch("core.notifications.analysis_telegram.send_telegram_message", mock_send):
+        with patch("core.punisher.notifications.analysis_telegram.send_telegram_message", mock_send):
             result = await self._send(
                 {"TELEGRAM_BOT_TOKEN": "tok123", "TELEGRAM_CHAT_ID": "chat456"}
             )
@@ -169,7 +169,7 @@ class TestSendAnalysisReportTelegram:
     async def test_returns_false_on_send_failure(self):
         """send_telegram_message가 False 반환 시 False."""
         mock_send = AsyncMock(return_value=False)
-        with patch("core.notifications.analysis_telegram.send_telegram_message", mock_send):
+        with patch("core.punisher.notifications.analysis_telegram.send_telegram_message", mock_send):
             result = await self._send(
                 {"TELEGRAM_BOT_TOKEN": "tok", "TELEGRAM_CHAT_ID": "chat"}
             )
@@ -179,7 +179,7 @@ class TestSendAnalysisReportTelegram:
     async def test_returns_false_on_exception(self):
         """send_telegram_message 예외 시 False (호출자 crash 방지)."""
         mock_send = AsyncMock(side_effect=Exception("네트워크 오류"))
-        with patch("core.notifications.analysis_telegram.send_telegram_message", mock_send):
+        with patch("core.punisher.notifications.analysis_telegram.send_telegram_message", mock_send):
             result = await self._send(
                 {"TELEGRAM_BOT_TOKEN": "tok", "TELEGRAM_CHAT_ID": "chat"}
             )
@@ -202,7 +202,7 @@ class TestCreateReportFireAndForget:
 
         with (
             patch("api.services.strategy_analysis_service.create_report", mock_create_report),
-            patch("core.notifications.analysis_telegram.send_analysis_report_telegram", mock_send),
+            patch("core.punisher.notifications.analysis_telegram.send_analysis_report_telegram", mock_send),
             patch("asyncio.create_task", mock_task),
         ):
             # create_task에 코루틴이 전달됐는지 검증

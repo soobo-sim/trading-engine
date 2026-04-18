@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from core.analysis.box_detector import find_cluster, find_cluster_percentile, detect_box
+from core.judge.analysis.box_detector import find_cluster, find_cluster_percentile, detect_box
 from core.backtest.engine import BacktestConfig, run_backtest
 
 

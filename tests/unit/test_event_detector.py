@@ -21,7 +21,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from core.exchange.types import Ticker
-from core.monitoring.event_detector import EventDetector, _DETECTION_COOLDOWN_SEC
+from core.judge.monitoring.event_detector import EventDetector, _DETECTION_COOLDOWN_SEC
 
 
 # ──────────────────────────────────────────────────────────────
@@ -628,7 +628,7 @@ class TestEventDetectorLogging:
         det._prev_prices["USD_JPY"] = 150.0
         det._data_hub.get_ticker = AsyncMock(return_value=SimpleNamespace(last=146.85))  # -2.1%
 
-        with caplog.at_level(logging.INFO, logger="core.monitoring.event_detector"):
+        with caplog.at_level(logging.INFO, logger="core.judge.monitoring.event_detector"):
             result = await det._check_price_spike("USD_JPY", datetime.now(timezone.utc))
 
         assert result is not None
@@ -655,7 +655,7 @@ class TestEventDetectorLogging:
         sentiment = SimpleNamespace(score=5, classification="Extreme Fear")
         det._data_hub.get_sentiment = AsyncMock(return_value=sentiment)
 
-        with caplog.at_level(logging.INFO, logger="core.monitoring.event_detector"):
+        with caplog.at_level(logging.INFO, logger="core.judge.monitoring.event_detector"):
             result = await det._check_sentiment_extreme(datetime.now(timezone.utc))
 
         assert result is not None
@@ -681,7 +681,7 @@ class TestEventDetectorLogging:
         sentiment = SimpleNamespace(score=95, classification="Extreme Greed")
         det._data_hub.get_sentiment = AsyncMock(return_value=sentiment)
 
-        with caplog.at_level(logging.INFO, logger="core.monitoring.event_detector"):
+        with caplog.at_level(logging.INFO, logger="core.judge.monitoring.event_detector"):
             result = await det._check_sentiment_extreme(datetime.now(timezone.utc))
 
         assert result is not None
@@ -711,7 +711,7 @@ class TestEventDetectorLogging:
             mock_resp = MagicMock()
             mock_resp.status_code = 201
             mock_http.return_value.__aenter__.return_value.post = AsyncMock(return_value=mock_resp)
-            with caplog.at_level(logging.INFO, logger="core.monitoring.event_detector"):
+            with caplog.at_level(logging.INFO, logger="core.judge.monitoring.event_detector"):
                 await det._handle_detections(detections)
 
         summary = [r for r in caplog.records if "2건 감지" in r.message]

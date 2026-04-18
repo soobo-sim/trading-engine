@@ -5,7 +5,7 @@ import asyncio
 import pytest
 import pytest_asyncio
 
-from core.task.supervisor import TaskSupervisor
+from core.punisher.task.supervisor import TaskSupervisor
 
 
 @pytest_asyncio.fixture

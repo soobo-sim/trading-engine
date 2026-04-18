@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from core.task.auto_reporter import (
+from core.punisher.task.auto_reporter import (
     AutoReporter,
     create_auto_reporter,
     send_telegram_message,
@@ -47,7 +47,7 @@ class TestSendTelegramMessage:
         mock_client = AsyncMock()
         mock_client.post.side_effect = [mock_fail, mock_ok]
 
-        with patch("core.task.auto_reporter.asyncio.sleep", new_callable=AsyncMock):
+        with patch("core.punisher.task.auto_reporter.asyncio.sleep", new_callable=AsyncMock):
             result = await send_telegram_message(
                 "token123", "12345", "test msg",
                 client=mock_client, backoff_base=0.01,
@@ -63,7 +63,7 @@ class TestSendTelegramMessage:
         mock_client = AsyncMock()
         mock_client.post.return_value = mock_fail
 
-        with patch("core.task.auto_reporter.asyncio.sleep", new_callable=AsyncMock):
+        with patch("core.punisher.task.auto_reporter.asyncio.sleep", new_callable=AsyncMock):
             result = await send_telegram_message(
                 "token123", "12345", "test msg",
                 client=mock_client, max_retries=1, backoff_base=0.01,
@@ -79,7 +79,7 @@ class TestSendTelegramMessage:
         mock_client = AsyncMock()
         mock_client.post.side_effect = [Exception("network"), mock_ok]
 
-        with patch("core.task.auto_reporter.asyncio.sleep", new_callable=AsyncMock):
+        with patch("core.punisher.task.auto_reporter.asyncio.sleep", new_callable=AsyncMock):
             result = await send_telegram_message(
                 "token123", "12345", "test msg",
                 client=mock_client, backoff_base=0.01,
@@ -94,7 +94,7 @@ class TestSendTelegramMessage:
         mock_client_instance = AsyncMock()
         mock_client_instance.post.return_value = mock_resp
 
-        with patch("core.task.auto_reporter.httpx.AsyncClient", return_value=mock_client_instance):
+        with patch("core.punisher.task.auto_reporter.httpx.AsyncClient", return_value=mock_client_instance):
             result = await send_telegram_message("token123", "12345", "test msg")
 
         assert result is True
@@ -212,8 +212,8 @@ class TestAutoReporter:
 
         with patch.object(reporter, "_generate_report", new_callable=AsyncMock, return_value=fake_report):
             with patch.object(reporter, "_has_open_position", new_callable=AsyncMock, return_value=False):
-                with patch("core.task.auto_reporter.send_telegram_message", new_callable=AsyncMock, return_value=True) as mock_send:
-                    with patch("core.task.auto_reporter.is_maintenance_window", return_value=False):
+                with patch("core.punisher.task.auto_reporter.send_telegram_message", new_callable=AsyncMock, return_value=True) as mock_send:
+                    with patch("core.punisher.task.auto_reporter.is_maintenance_window", return_value=False):
                         await reporter._run_once()
 
         mock_send.assert_called_once()
@@ -249,7 +249,7 @@ class TestAutoReporter:
 
         # _loop: sleep(interval) → _run_once → sleep(interval) → ...
         # Patch sleep to skip waits, cancel after first run
-        with patch("core.task.auto_reporter.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        with patch("core.punisher.task.auto_reporter.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
             async def cancel_after_first(*args):
                 if mock_sleep.call_count >= 2:
                     raise asyncio.CancelledError()
@@ -345,8 +345,8 @@ class TestAutoReporterRegimeFilter:
 
         with patch.object(reporter, "_generate_report", side_effect=mock_generate):
             with patch.object(reporter, "_has_open_position", side_effect=mock_has_open_pos):
-                with patch("core.task.auto_reporter.send_telegram_message", new_callable=AsyncMock, return_value=True):
-                    with patch("core.task.auto_reporter.is_maintenance_window", return_value=False):
+                with patch("core.punisher.task.auto_reporter.send_telegram_message", new_callable=AsyncMock, return_value=True):
+                    with patch("core.punisher.task.auto_reporter.is_maintenance_window", return_value=False):
                         await reporter._run_once()
 
         assert generated_styles == ["trend_following"], (
@@ -374,8 +374,8 @@ class TestAutoReporterRegimeFilter:
 
         with patch.object(reporter, "_generate_report", side_effect=mock_generate):
             with patch.object(reporter, "_has_open_position", side_effect=mock_has_open_pos):
-                with patch("core.task.auto_reporter.send_telegram_message", new_callable=AsyncMock, return_value=True):
-                    with patch("core.task.auto_reporter.is_maintenance_window", return_value=False):
+                with patch("core.punisher.task.auto_reporter.send_telegram_message", new_callable=AsyncMock, return_value=True):
+                    with patch("core.punisher.task.auto_reporter.is_maintenance_window", return_value=False):
                         await reporter._run_once()
 
         assert generated_styles == ["box_mean_reversion"], (
@@ -403,8 +403,8 @@ class TestAutoReporterRegimeFilter:
 
         with patch.object(reporter, "_generate_report", side_effect=mock_generate):
             with patch.object(reporter, "_has_open_position", side_effect=mock_has_open_pos):
-                with patch("core.task.auto_reporter.send_telegram_message", new_callable=AsyncMock, return_value=True):
-                    with patch("core.task.auto_reporter.is_maintenance_window", return_value=False):
+                with patch("core.punisher.task.auto_reporter.send_telegram_message", new_callable=AsyncMock, return_value=True):
+                    with patch("core.punisher.task.auto_reporter.is_maintenance_window", return_value=False):
                         await reporter._run_once()
 
         assert set(generated_styles) == {"trend_following", "box_mean_reversion"}, (
@@ -428,8 +428,8 @@ class TestAutoReporterRegimeFilter:
             return fake_report
 
         with patch.object(reporter, "_generate_report", side_effect=mock_generate):
-            with patch("core.task.auto_reporter.send_telegram_message", new_callable=AsyncMock, return_value=True):
-                with patch("core.task.auto_reporter.is_maintenance_window", return_value=False):
+            with patch("core.punisher.task.auto_reporter.send_telegram_message", new_callable=AsyncMock, return_value=True):
+                with patch("core.punisher.task.auto_reporter.is_maintenance_window", return_value=False):
                     await reporter._run_once()
 
         assert set(generated_styles) == {"trend_following", "box_mean_reversion"}, (
@@ -456,8 +456,8 @@ class TestAutoReporterRegimeFilter:
             return fake_report
 
         with patch.object(reporter, "_generate_report", side_effect=mock_generate):
-            with patch("core.task.auto_reporter.send_telegram_message", new_callable=AsyncMock, return_value=True):
-                with patch("core.task.auto_reporter.is_maintenance_window", return_value=False):
+            with patch("core.punisher.task.auto_reporter.send_telegram_message", new_callable=AsyncMock, return_value=True):
+                with patch("core.punisher.task.auto_reporter.is_maintenance_window", return_value=False):
                     await reporter._run_once()
 
         assert set(generated_styles) == {"trend_following", "box_mean_reversion"}, (
@@ -483,8 +483,8 @@ class TestAutoReporterRegimeFilter:
             return fake_report
 
         with patch.object(reporter, "_generate_report", side_effect=mock_generate):
-            with patch("core.task.auto_reporter.send_telegram_message", new_callable=AsyncMock, return_value=True):
-                with patch("core.task.auto_reporter.is_maintenance_window", return_value=False):
+            with patch("core.punisher.task.auto_reporter.send_telegram_message", new_callable=AsyncMock, return_value=True):
+                with patch("core.punisher.task.auto_reporter.is_maintenance_window", return_value=False):
                     await reporter._run_once()
 
         assert set(generated_styles) == {"trend_following", "box_mean_reversion"}, (
@@ -513,8 +513,8 @@ class TestAutoReporterRegimeFilter:
 
         with patch.object(reporter, "_generate_report", side_effect=mock_generate):
             with patch.object(reporter, "_has_open_position", side_effect=mock_has_open_pos_error):
-                with patch("core.task.auto_reporter.send_telegram_message", new_callable=AsyncMock, return_value=True):
-                    with patch("core.task.auto_reporter.is_maintenance_window", return_value=False):
+                with patch("core.punisher.task.auto_reporter.send_telegram_message", new_callable=AsyncMock, return_value=True):
+                    with patch("core.punisher.task.auto_reporter.is_maintenance_window", return_value=False):
                         await reporter._run_once()
 
         assert generated_styles == ["trend_following"], (
@@ -542,8 +542,8 @@ class TestAutoReporterRegimeFilter:
 
         with patch.object(reporter, "_generate_report", side_effect=mock_generate):
             with patch.object(reporter, "_has_open_position", side_effect=mock_has_open_pos):
-                with patch("core.task.auto_reporter.send_telegram_message", new_callable=AsyncMock, return_value=True):
-                    with patch("core.task.auto_reporter.is_maintenance_window", return_value=False):
+                with patch("core.punisher.task.auto_reporter.send_telegram_message", new_callable=AsyncMock, return_value=True):
+                    with patch("core.punisher.task.auto_reporter.is_maintenance_window", return_value=False):
                         await reporter._run_once()
 
         assert generated_styles == ["trend_following"], (
@@ -654,27 +654,27 @@ class TestFormatSafetySummary:
     """format_safety_summary n/a 제외 테스트."""
 
     def _make_report(self, checks, status="all_ok"):
-        from core.monitoring.health import SafetyReport, SafetyCheck
+        from core.punisher.monitoring.health import SafetyReport, SafetyCheck
         sc = [SafetyCheck(id=f"SF-{i+1:02d}", name=c[0], status=c[1], severity="critical", detail="")
               for i, c in enumerate(checks)]
         return SafetyReport(status=status, checks=sc, last_checked="2026-03-25T00:00:00Z")
 
     def test_all_ok_no_na(self):
-        from core.monitoring.health import format_safety_summary
+        from core.punisher.monitoring.health import format_safety_summary
         r = self._make_report([("WS", "ok"), ("태스크", "ok")], "all_ok")
         s = format_safety_summary(r)
         assert "✅" in s
         assert "(2/2)" in s
 
     def test_all_ok_with_na(self):
-        from core.monitoring.health import format_safety_summary
+        from core.punisher.monitoring.health import format_safety_summary
         r = self._make_report([("WS", "ok"), ("태스크", "ok"), ("사만사", "n/a")], "all_ok")
         s = format_safety_summary(r)
         assert "✅" in s
         assert "(3/3)" in s  # n/a 포함 전체 카운트 (대시보드 UI 일치)
 
     def test_warning_with_na(self):
-        from core.monitoring.health import format_safety_summary
+        from core.punisher.monitoring.health import format_safety_summary
         r = self._make_report([("WS", "ok"), ("잔고", "warning"), ("사만사", "n/a")], "degraded")
         s = format_safety_summary(r)
         assert "🟡" in s
@@ -682,7 +682,7 @@ class TestFormatSafetySummary:
         assert "(2/3)" in s  # n/a 포함 전체 카운트 (대시보드 UI 일치)
 
     def test_critical(self):
-        from core.monitoring.health import format_safety_summary
+        from core.punisher.monitoring.health import format_safety_summary
         r = self._make_report([("WS", "critical"), ("태스크", "ok")], "critical")
         s = format_safety_summary(r)
         assert "🔴" in s

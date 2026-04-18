@@ -18,7 +18,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from core.strategy.signals import compute_trend_signal
-from core.analysis.box_detector import detect_box, find_cluster_percentile
+from core.judge.analysis.box_detector import detect_box, find_cluster_percentile
 from core.strategy.box_signals import classify_price_in_box, check_box_invalidation, linear_slope
 
 

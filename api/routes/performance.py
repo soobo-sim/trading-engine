@@ -289,6 +289,39 @@ async def grid_with_wf_api(
 
 
 # ──────────────────────────────────────────────────────────────
+# POST /api/backtest/regime-sim
+# ──────────────────────────────────────────────────────────────
+
+class RegimeSimRequest(BaseModel):
+    pair: str = Field(..., description="페어 (e.g. btc_jpy)")
+    params: dict = Field(..., description="전략 파라미터 (bb_width_trending_min 등)")
+    days: int = Field(30, ge=7, le=365, description="시뮬레이션 기간 (일)")
+    timeframe: str = Field("4h", description="캔들 타임프레임")
+    streak_required: int = Field(3, ge=1, le=10, description="전환 연속 캔들 수")
+
+
+@router.post("/api/backtest/regime-sim", summary="체제 판정 시뮬레이션")
+async def regime_simulation_api(
+    body: RegimeSimRequest,
+    state: AppState = Depends(get_state),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    과거 캔들에 대해 체제 판정 파라미터를 적용한 시뮬레이션.
+
+    실전 코드(compute_trend_signal, RegimeGate)를 그대로 사용하므로
+    파라미터 변경 효과를 실전과 동일한 결과로 사전 검증 가능.
+    """
+    if body.timeframe not in ("1h", "4h"):
+        raise HTTPException(400, {"blocked_code": "INVALID_TIMEFRAME"})
+
+    return await svc.run_regime_simulation(
+        body.pair, body.params, body.days, body.timeframe,
+        body.streak_required, state, db,
+    )
+
+
+# ──────────────────────────────────────────────────────────────
 # POST /api/backtest/walk-forward  (BUG-021)
 # ──────────────────────────────────────────────────────────────
 

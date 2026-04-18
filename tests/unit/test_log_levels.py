@@ -31,7 +31,7 @@ import pytest
 # ──────────────────────────────────────────────────────────────
 
 def _make_daily_briefing():
-    from core.monitoring.daily_briefing import DailyBriefing
+    from core.punisher.monitoring.daily_briefing import DailyBriefing
 
     return DailyBriefing(
         session_factory=MagicMock(),
@@ -50,7 +50,7 @@ async def test_daily_briefing_start_logs_debug(caplog):
     with patch("asyncio.create_task") as mock_create_task:
         mock_task = MagicMock()
         mock_create_task.return_value = mock_task
-        with caplog.at_level(logging.DEBUG, logger="core.monitoring.daily_briefing"):
+        with caplog.at_level(logging.DEBUG, logger="core.punisher.monitoring.daily_briefing"):
             await briefing.start()
 
     debug_msgs = [r for r in caplog.records if r.levelno == logging.DEBUG]
@@ -67,7 +67,7 @@ async def test_daily_briefing_stop_logs_debug(caplog):
     mock_task.__await__ = lambda self: (yield from asyncio.coroutine(lambda: None)())
     # 직접 _task 설정
     briefing._task = asyncio.create_task(asyncio.sleep(999))
-    with caplog.at_level(logging.DEBUG, logger="core.monitoring.daily_briefing"):
+    with caplog.at_level(logging.DEBUG, logger="core.punisher.monitoring.daily_briefing"):
         await briefing.stop()
 
     debug_msgs = [r for r in caplog.records if r.levelno == logging.DEBUG]
@@ -77,7 +77,7 @@ async def test_daily_briefing_stop_logs_debug(caplog):
 @pytest.mark.asyncio
 async def test_daily_briefing_wait_logs_debug(caplog):
     """DailyBriefing._run() 대기 로그 → DEBUG."""
-    from core.monitoring.daily_briefing import DailyBriefing
+    from core.punisher.monitoring.daily_briefing import DailyBriefing
 
     briefing = _make_daily_briefing()
     # _send_briefing을 mock해서 실제 전송 없이 _run 내 대기 로그만 확인
@@ -86,7 +86,7 @@ async def test_daily_briefing_wait_logs_debug(caplog):
 
     with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
         mock_sleep.side_effect = asyncio.CancelledError
-        with caplog.at_level(logging.DEBUG, logger="core.monitoring.daily_briefing"):
+        with caplog.at_level(logging.DEBUG, logger="core.punisher.monitoring.daily_briefing"):
             try:
                 await briefing._run()
             except asyncio.CancelledError:
@@ -99,13 +99,13 @@ async def test_daily_briefing_wait_logs_debug(caplog):
 @pytest.mark.asyncio
 async def test_daily_briefing_send_complete_logs_info(caplog):
     """DailyBriefing 브리핑 전송 완료 → INFO 유지 (§2-3)."""
-    from core.monitoring.daily_briefing import DailyBriefing
+    from core.punisher.monitoring.daily_briefing import DailyBriefing
 
     briefing = _make_daily_briefing()
     mock_send = AsyncMock(return_value=True)
     with patch.object(briefing, "_build_briefing_text", new_callable=AsyncMock, return_value="test"):
         briefing._send_message = mock_send
-        with caplog.at_level(logging.DEBUG, logger="core.monitoring.daily_briefing"):
+        with caplog.at_level(logging.DEBUG, logger="core.punisher.monitoring.daily_briefing"):
             await briefing._send_briefing()
 
     info_msgs = [r for r in caplog.records if r.levelno == logging.INFO]
@@ -119,7 +119,7 @@ async def test_daily_briefing_send_complete_logs_info(caplog):
 # ──────────────────────────────────────────────────────────────
 
 def _make_event_detector(pairs=None):
-    from core.monitoring.event_detector import EventDetector
+    from core.judge.monitoring.event_detector import EventDetector
 
     data_hub = MagicMock()
     data_hub.get_ticker = AsyncMock(return_value=None)
@@ -138,7 +138,7 @@ def _make_event_detector(pairs=None):
 async def test_event_detector_start_no_pairs_logs_debug(caplog):
     """pairs=[] 이면 시작 스킵 → DEBUG 로그."""
     det = _make_event_detector(pairs=[])
-    with caplog.at_level(logging.DEBUG, logger="core.monitoring.event_detector"):
+    with caplog.at_level(logging.DEBUG, logger="core.judge.monitoring.event_detector"):
         await det.start()
 
     debug_msgs = [r for r in caplog.records if r.levelno == logging.DEBUG]
@@ -153,7 +153,7 @@ async def test_event_detector_start_with_pairs_logs_debug(caplog):
     det = _make_event_detector(pairs=["BTC_JPY"])
     with patch("asyncio.create_task") as mock_create_task:
         mock_create_task.return_value = MagicMock()
-        with caplog.at_level(logging.DEBUG, logger="core.monitoring.event_detector"):
+        with caplog.at_level(logging.DEBUG, logger="core.judge.monitoring.event_detector"):
             await det.start()
 
     debug_msgs = [r for r in caplog.records if r.levelno == logging.DEBUG]
@@ -165,7 +165,7 @@ async def test_event_detector_stop_logs_debug(caplog):
     """stop() → DEBUG 로그."""
     det = _make_event_detector()
     det._task = asyncio.create_task(asyncio.sleep(999))
-    with caplog.at_level(logging.DEBUG, logger="core.monitoring.event_detector"):
+    with caplog.at_level(logging.DEBUG, logger="core.judge.monitoring.event_detector"):
         await det.stop()
 
     debug_msgs = [r for r in caplog.records if r.levelno == logging.DEBUG]
@@ -229,7 +229,7 @@ async def test_base_trend_stop_all_logs_debug(caplog):
 def test_base_trend_register_paper_pair_logs_debug(caplog):
     """register_paper_pair() → PaperExecutor 등록 → DEBUG."""
     mgr = _make_trend_manager()
-    with patch("core.execution.executor.PaperExecutor") as mock_paper_exec:
+    with patch("core.punisher.execution.executor.PaperExecutor") as mock_paper_exec:
         mock_paper_exec.return_value = MagicMock()
         with caplog.at_level(logging.DEBUG, logger="core.strategy.base_trend"):
             mgr.register_paper_pair("BTC_JPY", strategy_id=99)

@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from core.monitoring.kill_checker import (
+from core.punisher.monitoring.kill_checker import (
     KillResult,
     check_kill_conditions,
     eval_consecutive_losses,
@@ -223,7 +223,7 @@ async def test_k10_already_killed_idempotent():
 
 @pytest.mark.asyncio
 async def test_k11_max_drawdown_triggers():
-    from core.monitoring.kill_checker import eval_max_drawdown
+    from core.punisher.monitoring.kill_checker import eval_max_drawdown
     pos_model = BfTrendPosition
     old = datetime.now(tz=timezone.utc) - timedelta(days=1)
     # 누적: +1000 → peak=1000, 이후 -900 → dd=90% > 50%

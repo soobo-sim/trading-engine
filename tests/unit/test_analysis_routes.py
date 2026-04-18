@@ -28,9 +28,9 @@ from adapters.database.models import (
 from adapters.database.session import Base
 from api.dependencies import AppState, ModelRegistry
 from api.routes import analysis, system
-from core.monitoring.health import HealthChecker
+from core.punisher.monitoring.health import HealthChecker
 from core.strategy.gmo_coin_trend import GmoCoinTrendManager
-from core.task.supervisor import TaskSupervisor
+from core.punisher.task.supervisor import TaskSupervisor
 from tests.fake_exchange import FakeExchangeAdapter
 
 # ── ORM 모델 (anl_ prefix) ───────────────────────

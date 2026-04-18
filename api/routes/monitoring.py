@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from api.dependencies import AppState, get_db, get_state
 from api.services.monitoring import generate_trend_report, generate_cfd_report
 from api.services.monitoring_status import generate_trend_status
-from core.monitoring.health import _last_report_time
+from core.punisher.monitoring.health import _last_report_time
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/monitoring", tags=["Monitoring"])
@@ -133,7 +133,7 @@ async def get_monitoring_report(
     # 안전장치 요약 추가
     try:
         safety_report = await state.health_checker.check_safety_only()
-        from core.monitoring.health import format_safety_summary
+        from core.punisher.monitoring.health import format_safety_summary
         summary = format_safety_summary(safety_report)
 
         report["safety"] = {

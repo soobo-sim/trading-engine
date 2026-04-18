@@ -138,7 +138,7 @@ class TestTelegramDigestHandler:
 
         sent_texts = []
         with patch(
-            "core.logging.telegram_handlers._send_telegram",
+            "core.shared.logging.telegram_handlers._send_telegram",
             new_callable=AsyncMock,
             side_effect=lambda *a, **k: sent_texts.append(a[2]) or True,
         ):
@@ -154,7 +154,7 @@ class TestTelegramDigestHandler:
         h = TelegramDigestHandler("tok", "chat", exchange="BF", interval_sec=5)
         h.emit(self._make_record(logging.INFO, "msg"))
 
-        with patch("core.logging.telegram_handlers._send_telegram", new_callable=AsyncMock, return_value=True):
+        with patch("core.shared.logging.telegram_handlers._send_telegram", new_callable=AsyncMock, return_value=True):
             await h._flush()
 
         assert len(h._buffer) == 0
@@ -168,7 +168,7 @@ class TestTelegramDigestHandler:
 
         sent_texts = []
         with patch(
-            "core.logging.telegram_handlers._send_telegram",
+            "core.shared.logging.telegram_handlers._send_telegram",
             new_callable=AsyncMock,
             side_effect=lambda *a, **k: sent_texts.append(a[2]) or True,
         ):
@@ -185,7 +185,7 @@ class TestTelegramDigestHandler:
 
         sent_texts = []
         with patch(
-            "core.logging.telegram_handlers._send_telegram",
+            "core.shared.logging.telegram_handlers._send_telegram",
             new_callable=AsyncMock,
             side_effect=lambda *a, **k: sent_texts.append(a[2]) or True,
         ):
@@ -239,7 +239,7 @@ class TestTelegramAlertHandler:
 
         sent_texts = []
         with patch(
-            "core.logging.telegram_handlers._send_telegram",
+            "core.shared.logging.telegram_handlers._send_telegram",
             new_callable=AsyncMock,
             side_effect=lambda *a, **k: sent_texts.append(a[2]) or True,
         ):
@@ -259,7 +259,7 @@ class TestTelegramAlertHandler:
 
         sent_texts = []
         with patch(
-            "core.logging.telegram_handlers._send_telegram",
+            "core.shared.logging.telegram_handlers._send_telegram",
             new_callable=AsyncMock,
             side_effect=lambda *a, **k: sent_texts.append(a[2]) or True,
         ):
@@ -276,7 +276,7 @@ class TestTelegramAlertHandler:
 
         sent_texts = []
         with patch(
-            "core.logging.telegram_handlers._send_telegram",
+            "core.shared.logging.telegram_handlers._send_telegram",
             new_callable=AsyncMock,
             side_effect=lambda *a, **k: sent_texts.append(a[2]) or True,
         ):
@@ -294,7 +294,7 @@ class TestTelegramAlertHandler:
 
         sent_texts = []
         with patch(
-            "core.logging.telegram_handlers._send_telegram",
+            "core.shared.logging.telegram_handlers._send_telegram",
             new_callable=AsyncMock,
             side_effect=lambda *a, **k: sent_texts.append(a[2]) or True,
         ):
@@ -313,7 +313,7 @@ class TestTelegramAlertHandler:
 
         sent_texts = []
         with patch(
-            "core.logging.telegram_handlers._send_telegram",
+            "core.shared.logging.telegram_handlers._send_telegram",
             new_callable=AsyncMock,
             side_effect=lambda *a, **k: sent_texts.append(a[2]) or True,
         ):
@@ -444,14 +444,14 @@ class TestSetupTelegramLogging:
 
         # judge 도메인 logger의 INFO 레코드 → 수집됨
         record = logging.LogRecord(
-            name="core.decision.rule_based", level=logging.INFO, pathname="", lineno=0,
+            name="core.judge.decision.rule_based", level=logging.INFO, pathname="", lineno=0,
             msg="残 메시지", args=(), exc_info=None,
         )
         h.emit(record)
 
         sent_texts = []
         with patch(
-            "core.logging.telegram_handlers._send_telegram",
+            "core.shared.logging.telegram_handlers._send_telegram",
             new_callable=AsyncMock,
             side_effect=lambda *a, **k: sent_texts.append(a[2]) or True,
         ):
@@ -502,7 +502,7 @@ class TestEdgeCases:
             call_count[0] += 1
             return True
 
-        with patch("core.logging.telegram_handlers._send_telegram", side_effect=fake_send):
+        with patch("core.shared.logging.telegram_handlers._send_telegram", side_effect=fake_send):
             await h._flush()
 
         assert call_count[0] == 0
@@ -518,7 +518,7 @@ class TestEdgeCases:
             call_count[0] += 1
             return True
 
-        with patch("core.logging.telegram_handlers._send_telegram", side_effect=fake_send):
+        with patch("core.shared.logging.telegram_handlers._send_telegram", side_effect=fake_send):
             await h._flush()
 
         assert call_count[0] == 0
@@ -543,7 +543,7 @@ class TestEdgeCases:
 
         sent_texts = []
         with patch(
-            "core.logging.telegram_handlers._send_telegram",
+            "core.shared.logging.telegram_handlers._send_telegram",
             new_callable=AsyncMock,
             side_effect=lambda *a, **k: sent_texts.append(a[2]) or True,
         ):
@@ -633,10 +633,10 @@ class TestDomainRouting:
     def test_judge_prefixes_mapped_correctly(self):
         """JUDGE_PREFIXES 속한 logger가 'judge'로 분류됨."""
         from core.logging.telegram_handlers import _get_domain
-        assert _get_domain("core.decision.rule_based") == "judge"
-        assert _get_domain("core.safety.guardrails") == "judge"
+        assert _get_domain("core.judge.decision.rule_based") == "judge"
+        assert _get_domain("core.judge.safety.guardrails") == "judge"
         assert _get_domain("core.execution.orchestrator") == "judge"
-        assert _get_domain("core.monitoring.event_detector") == "judge"
+        assert _get_domain("core.judge.monitoring.event_detector") == "judge"
         assert _get_domain("core.data.hub") == "judge"
         assert _get_domain("core.strategy.signals") == "judge"
 
@@ -646,7 +646,7 @@ class TestDomainRouting:
         assert _get_domain("core.strategy.base_trend") == "punisher"
         assert _get_domain("core.strategy.plugins.gmo_coin_trend") == "punisher"
         assert _get_domain("core.execution.regime_gate") == "punisher"
-        assert _get_domain("core.task.auto_reporter") == "punisher"
+        assert _get_domain("core.punisher.task.auto_reporter") == "punisher"
         assert _get_domain("adapters.gmo_coin.client") == "punisher"
         assert _get_domain("main") == "punisher"
         assert _get_domain("api.routes.strategies") == "punisher"
@@ -667,21 +667,21 @@ class TestDomainRouting:
     def test_judge_digest_collects_judge_logs(self):
         """domain='judge' 핸들러는 judge logger INFO를 수집."""
         h = TelegramDigestHandler("tok", "chat", domain="judge")
-        record = self._make_record("core.decision.rule_based")
+        record = self._make_record("core.judge.decision.rule_based")
         h.emit(record)
         assert len(h._buffer) == 1
 
     def test_punisher_digest_filters_judge_logs(self):
         """domain='punisher' 핸들러는 judge logger INFO를 무시."""
         h = TelegramDigestHandler("tok", "chat", domain="punisher")
-        record = self._make_record("core.decision.rule_based")
+        record = self._make_record("core.judge.decision.rule_based")
         h.emit(record)
         assert len(h._buffer) == 0
 
     def test_punisher_digest_collects_punisher_logs(self):
         """domain='punisher' 핸들러는 punisher logger INFO를 수집."""
         h = TelegramDigestHandler("tok", "chat", domain="punisher")
-        record = self._make_record("core.task.auto_reporter")
+        record = self._make_record("core.punisher.task.auto_reporter")
         h.emit(record)
         assert len(h._buffer) == 1
 
@@ -695,7 +695,7 @@ class TestDomainRouting:
     def test_domain_none_collects_all(self):
         """domain=None(legacy) 시 모든 INFO 수집."""
         h = TelegramDigestHandler("tok", "chat", domain=None)
-        h.emit(self._make_record("core.decision.rule_based"))
-        h.emit(self._make_record("core.task.auto_reporter"))
+        h.emit(self._make_record("core.judge.decision.rule_based"))
+        h.emit(self._make_record("core.punisher.task.auto_reporter"))
         assert len(h._buffer) == 2
 

@@ -30,9 +30,9 @@ from adapters.database.models import (
 from adapters.database.session import Base
 from api.dependencies import AppState, ModelRegistry
 from api.routes import system, trading, account, strategies, boxes, candles, techniques
-from core.monitoring.health import HealthChecker, HealthReport
+from core.punisher.monitoring.health import HealthChecker, HealthReport
 from core.strategy.gmo_coin_trend import GmoCoinTrendManager
-from core.task.supervisor import TaskSupervisor
+from core.punisher.task.supervisor import TaskSupervisor
 from tests.fake_exchange import FakeExchangeAdapter
 
 # ── 테스트용 ORM 모델 (hlth_ 프리픽스) ──────────────────────
