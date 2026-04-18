@@ -205,17 +205,29 @@ class MarginTrendManager(BaseTrendManager):
         return price >= stop_loss_price
 
     async def _update_trailing_stop(self, pair, pos, current_price, atr, ema_slope_pct, rsi, params):
-        """양방향 적응형 트레일링 스탑."""
-        from core.strategy.signals import compute_adaptive_trailing_mult
+        """양방향 적응형 트레일링 스탑 — 이익 비례 mult + 손익분기 바닥."""
+        from core.strategy.signals import compute_adaptive_trailing_mult, compute_profit_based_mult
 
         side = pos.extra.get("side", "buy")
+        profit_mult = compute_profit_based_mult(
+            pos.entry_price or 0.0, current_price, atr, params, side=side
+        )
         if pos.stop_tightened:
-            mult = float(params.get("tighten_stop_atr", 1.0))
+            # tighten_stop_atr는 배수 상한. 이익이 더 크면 profit_mult가 더 좁으므로 그 쪽 사용.
+            tighten_ceiling = float(params.get("tighten_stop_atr", 1.0))
+            mult = min(tighten_ceiling, profit_mult)
         else:
-            mult = compute_adaptive_trailing_mult(ema_slope_pct, rsi, params)
+            adaptive_mult = compute_adaptive_trailing_mult(ema_slope_pct, rsi, params)
+            mult = min(adaptive_mult, profit_mult)
+
+        breakeven_trigger = float(params.get("breakeven_trigger_atr", 1.0))
 
         if side == "buy":
             new_sl = round(current_price - atr * mult, 6)
+            # 손익분기 바닥 (롱: 이익 >= ATR×trigger → floor=진입가)
+            if pos.entry_price and pos.entry_price > 0:
+                if (current_price - pos.entry_price) >= atr * breakeven_trigger:
+                    new_sl = max(new_sl, pos.entry_price)
             current_sl = pos.stop_loss_price
             if current_sl is None or new_sl > current_sl:
                 pos.stop_loss_price = new_sl
@@ -225,6 +237,10 @@ class MarginTrendManager(BaseTrendManager):
                 )
         else:
             new_sl = round(current_price + atr * mult, 6)
+            # 손익분기 바닥 (숏: 이익 >= ATR×trigger → ceiling=진입가)
+            if pos.entry_price and pos.entry_price > 0:
+                if (pos.entry_price - current_price) >= atr * breakeven_trigger:
+                    new_sl = min(new_sl, pos.entry_price)
             current_sl = pos.stop_loss_price
             if current_sl is None or new_sl < current_sl:
                 pos.stop_loss_price = new_sl

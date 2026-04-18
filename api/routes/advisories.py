@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from adapters.database.models import RachelAdvisory
 from api.dependencies import AppState, get_db, get_state
+from core.pair import normalize_pair
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,7 @@ router = APIRouter(prefix="/api/advisories", tags=["Advisories"])
 _VALID_ACTIONS = frozenset({"entry_long", "entry_short", "hold", "exit", "adjust_risk", "add_position"})
 _VALID_REGIMES = frozenset({"trending", "ranging", "uncertain"})
 _VALID_STYLES = frozenset({"trend_following", "box_mean_reversion"})
+_VALID_HOLD_OVERRIDES = frozenset({"none", "signal_entry_ok"})
 
 
 # ── Schemas ───────────────────────────────────────────────────
@@ -44,6 +46,10 @@ class AdvisoryCreateRequest(BaseModel):
     alice_summary: str | None = None
     samantha_summary: str | None = None
     trading_style: str = Field("trend_following", description="trend_following|box_mean_reversion")
+    hold_override_policy: str = Field(
+        "none",
+        description="hold 시 엔진 자율 진입 허용 정책. none=절대 hold | signal_entry_ok=entry_ok/entry_sell 시그널 시 진입 허용 (기술적 hold 전용)",
+    )
     ttl_hours: float = Field(5.0, gt=0.0, le=48.0, description="만료까지 시간 (기본 5H, 최대 48H)")
     adjustments: dict | None = Field(
         None,
@@ -67,6 +73,7 @@ class AdvisoryResponse(BaseModel):
     samantha_summary: str | None
     adjustments: dict | None
     trading_style: str
+    hold_override_policy: str
     created_at: datetime
     expires_at: datetime
     is_expired: bool
@@ -95,6 +102,7 @@ def _to_response(advisory: RachelAdvisory) -> AdvisoryResponse:
         samantha_summary=advisory.samantha_summary,
         adjustments=advisory.adjustments,
         trading_style=advisory.trading_style,
+        hold_override_policy=advisory.hold_override_policy,
         created_at=advisory.created_at,
         expires_at=expires_at,
         is_expired=now >= expires_at,
@@ -112,7 +120,7 @@ async def create_advisory(
     """레이첼이 정기 분석 완료 후 자문을 저장한다.
 
     엔진 candle_monitor()가 TRADING_MODE=rachel 일 때 이 레코드를 읽어 판단에 활용한다.
-    pair는 요청 값 그대로 저장 (대소문자 보존).
+    pair는 소문자로 정규화하여 저장 (normalize_pair 적용).
     exchange는 서버의 EXCHANGE 환경변수에서 자동 결정.
     """
     if body.action not in _VALID_ACTIONS:
@@ -135,6 +143,11 @@ async def create_advisory(
             400,
             {"blocked_code": "INVALID_STYLE", "detail": f"trading_style은 {sorted(_VALID_STYLES)} 중 하나여야 합니다."},
         )
+    if body.hold_override_policy not in _VALID_HOLD_OVERRIDES:
+        raise HTTPException(
+            400,
+            {"blocked_code": "INVALID_HOLD_OVERRIDE", "detail": f"hold_override_policy는 {sorted(_VALID_HOLD_OVERRIDES)} 중 하나여야 합니다."},
+        )
 
     now = datetime.now(timezone.utc)
     expires_at = now + timedelta(hours=body.ttl_hours)
@@ -142,9 +155,12 @@ async def create_advisory(
 
     # adjust_risk 이외 액션은 adjustments 무시
     adjustments = body.adjustments if body.action == "adjust_risk" else None
+    # hold 이외 액션은 hold_override_policy 무의미 → none 고정
+    hold_override_policy = body.hold_override_policy if body.action == "hold" else "none"
 
+    pair = normalize_pair(body.pair)
     advisory = RachelAdvisory(
-        pair=body.pair,
+        pair=pair,
         exchange=exchange,
         action=body.action,
         confidence=body.confidence,
@@ -158,6 +174,7 @@ async def create_advisory(
         samantha_summary=body.samantha_summary,
         adjustments=adjustments,
         trading_style=body.trading_style,
+        hold_override_policy=hold_override_policy,
         expires_at=expires_at,
     )
     db.add(advisory)
@@ -187,6 +204,7 @@ async def get_latest_advisory(
     advisory 없으면 404.
     """
     exchange = os.environ.get("EXCHANGE", "bitflyer").lower()
+    pair = normalize_pair(pair)
     now = datetime.now(timezone.utc)
 
     stmt = (

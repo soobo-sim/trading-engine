@@ -6,6 +6,7 @@ Functions
 compute_ema                   : Exponential Moving Average
 compute_exit_signal           : Priority-based exit signal (trend strategy)
 compute_adaptive_trailing_mult: Dynamic trailing stop ATR multiplier (EMA slope + RSI)
+compute_profit_based_mult     : Trailing stop ATR multiplier based on unrealized profit
 compute_trend_signal          : Full trend entry/exit signal from candle list
 
 These functions are exchange-agnostic and operate on primitive types or
@@ -220,7 +221,103 @@ def compute_adaptive_trailing_mult(
     )
     if is_mature:
         return float(params.get("trailing_stop_atr_mature", 1.2))
-    return float(params.get("trailing_stop_atr_initial", 2.0))
+    return float(params.get("trailing_stop_atr_initial", 1.5))
+
+
+def compute_profit_based_mult(
+    entry_price: float,
+    current_price: float,
+    atr: float,
+    params: dict,
+    side: str = "buy",
+) -> float:
+    """
+    미실현 이익 크기에 따른 트레일링 스탑 ATR 배수 (선형 연속 감쇠).
+
+    이익이 커질수록 ATR 배수를 선형으로 줄여 스탑을 현재가에 점점 가깝게 유지:
+      mult = max(trailing_stop_atr_min, trailing_stop_atr_initial - decay × profit_atr_ratio)
+
+    이익 없음 또는 손실 시: trailing_stop_atr_initial 반환 (넓게 유지).
+
+    파라미터:
+      trailing_stop_atr_initial   : 이익 0일 때 기본 배수 (기본 1.5)
+      trailing_stop_decay_per_atr : ATR 1배 이익당 배수 감소량 (기본 0.2)
+      trailing_stop_atr_min       : 배수 하한 (기본 0.3)
+
+    예시 (initial=1.5, decay=0.2, min=0.3):
+      이익 ATR×1 → 배수 1.3, 이익 ATR×3 → 배수 0.9, 이익 ATR×6 → 배수 0.3(하한)
+
+    compute_adaptive_trailing_mult와 min()으로 결합하여 더 좁은 쪽을 사용한다.
+
+    Args:
+        entry_price:   진입가
+        current_price: 현재가
+        atr:           ATR 값
+        params:        전략 파라미터 dict
+        side:          포지션 방향 ("buy" | "sell")
+
+    Returns:
+        float: ATR 배수
+    """
+    initial = float(params.get("trailing_stop_atr_initial", 1.5))
+    if atr <= 0 or entry_price <= 0:
+        return initial
+
+    is_short = side == "sell"
+    unrealized = (entry_price - current_price) if is_short else (current_price - entry_price)
+
+    # 이익 없음(손실 포함) → initial 배수 유지
+    if unrealized <= 0:
+        return initial
+
+    profit_atr_ratio = unrealized / atr
+    decay = float(params.get("trailing_stop_decay_per_atr", 0.2))
+    min_mult = float(params.get("trailing_stop_atr_min", 0.3))
+
+    return max(min_mult, initial - decay * profit_atr_ratio)
+
+
+def classify_regime(
+    bb_width_pct: float,
+    range_pct: float,
+    params: Optional[dict] = None,
+) -> tuple:
+    """Regime 판정 — Single Source of Truth.
+
+    signals.py / analysis_service.py 전체에서 이 함수만 호출한다.
+    (하드코딩된 임계값 분산 방지)
+
+    Args:
+        bb_width_pct: 볼린저밴드 폭 %
+        range_pct:    기간 내 가격 레인지 %
+        params:       전략 파라미터 dict — None 또는 키 누락 시 기본값 사용
+
+    Returns:
+        (regime, regime_trending, regime_ranging)
+          regime:          "trending" | "ranging" | "unclear"
+          regime_trending: BB≥min OR range≥min
+          regime_ranging:  BB<max AND range<max (명확한 횡보)
+    """
+    if params is None:
+        params = {}
+    bb_trending_min = float(params.get("bb_width_trending_min", 6.0))
+    range_trending_min = float(params.get("range_pct_trending_min", 10.0))
+    bb_ranging_max = float(params.get("bb_width_ranging_max", 3.0))
+    range_ranging_max = float(params.get("range_pct_ranging_max", 5.0))
+
+    regime_trending = bb_width_pct >= bb_trending_min or range_pct >= range_trending_min
+    # ranging = BB폭 < bb_ranging_max AND 가격범위 < range_ranging_max → 명확한 횡보
+    # unclear = trending/ranging 중간 → 진입 허용 (EMA+RSI 필터가 충분)
+    regime_ranging = bb_width_pct < bb_ranging_max and range_pct < range_ranging_max
+
+    if regime_trending:
+        regime = "trending"
+    elif regime_ranging:
+        regime = "ranging"
+    else:
+        regime = "unclear"
+
+    return regime, regime_trending, regime_ranging
 
 
 def compute_trend_signal(
@@ -303,21 +400,14 @@ def compute_trend_signal(
     rsi_in_short_range = (short_rsi_low <= rsi <= short_rsi_high) if rsi is not None else None
     ema_slope_strong_down = (ema_slope_pct is not None and ema_slope_pct < short_slope_th)
 
-    # Regime (BB width + 가격 레인지)
+    # Regime (BB width + 가격 레인지) — classify_regime() 단일 진실 소스 사용
     bb_period = min(int(params.get("bb_period", ema_period)), len(closes))
-    bb_trending_min = float(params.get("bb_width_trending_min", 6.0))
-    range_trending_min = float(params.get("range_pct_trending_min", 10.0))
-    bb_ranging_max = float(params.get("bb_width_ranging_max", 3.0))
-    range_ranging_max = float(params.get("range_pct_ranging_max", 5.0))
     bb_window = closes[-bb_period:]
     sma = sum(bb_window) / bb_period if bb_period > 0 else 0
     std = (sum((c - sma) ** 2 for c in bb_window) / bb_period) ** 0.5 if sma > 0 else 0
     bb_width_pct = (4 * std) / sma * 100 if sma > 0 else 0
     range_pct = (max(highs) - min(lows)) / closes[0] * 100 if closes[0] > 0 else 0
-    regime_trending = bb_width_pct >= bb_trending_min or range_pct >= range_trending_min
-    # ranging = BB폭 < bb_ranging_max AND 가격범위 < range_ranging_max → 명확한 횡보, 진입 차단
-    # unclear = trending/ranging 중간 → 진입 허용 (EMA+RSI 필터가 충분)
-    regime_ranging = bb_width_pct < bb_ranging_max and range_pct < range_ranging_max
+    _, regime_trending, regime_ranging = classify_regime(bb_width_pct, range_pct, params)
 
     # 시그널 결정
     if price_above_ema and ema_slope_positive and rsi_in_range and not regime_ranging:
@@ -363,7 +453,7 @@ def compute_trend_signal(
         "stop_loss_price": stop_loss_price,
         "rsi": rsi,
         "rsi_series": rsi_series,
-        "regime": "trending" if regime_trending else ("ranging" if regime_ranging else "unclear"),
+        "regime": classify_regime(bb_width_pct, range_pct, params)[0],
         "exit_signal": exit_signal,
         "bb_width_pct": bb_width_pct,
         "range_pct": range_pct,  # RegimeGate 로그용

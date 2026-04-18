@@ -11,6 +11,7 @@ from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.dependencies import AppState
+from core.strategy.signals import classify_regime, compute_exit_signal
 
 logger = logging.getLogger(__name__)
 
@@ -550,14 +551,14 @@ async def get_market_regime(
     elif abs(sma_slope_pct) >= 4.0:
         trending_score += 1
 
-    if ranging_score >= 4:
-        regime = "ranging"
-        confidence = "high" if ranging_score >= 5 else "medium"
-    elif trending_score >= 4:
-        regime = "trending"
+    # 최종 regime 판정 — classify_regime() 단일 진실 소스 사용
+    # (6항목 채점은 참고 수치로 metrics에 유지)
+    regime, _, _ = classify_regime(bb_width_pct, range_pct)
+    if regime == "trending":
         confidence = "high" if trending_score >= 5 else "medium"
+    elif regime == "ranging":
+        confidence = "high" if ranging_score >= 5 else "medium"
     else:
-        regime = "unclear"
         confidence = "low"
 
     strategy_suggestion = {
@@ -682,15 +683,14 @@ async def get_trend_signal(
     rsi_in_entry_range = (rsi_entry_low <= rsi <= rsi_entry_high) if rsi is not None else None
     rsi_overbought = (rsi > rsi_entry_high) if rsi is not None else None
 
-    # Regime (간이)
+    # Regime — classify_regime() 단일 진실 소스 사용
     bb_width_pct = compute_bb_width(closes, period=min(20, len(closes)))
     atr_pct_val = compute_atr_pct(candles, period=min(14, len(candles) - 1))
     first_close = closes[0]
     period_high = max(highs)
     period_low = min(lows)
     range_pct = (period_high - period_low) / first_close * 100 if first_close > 0 else 0
-    regime_trending = bb_width_pct >= 6.0 or range_pct >= 10.0
-    regime_ranging = bb_width_pct < 3.0 and range_pct < 5.0
+    _, regime_trending, regime_ranging = classify_regime(bb_width_pct, range_pct)
 
     # 시그널 결정
     if price_above_ema is False:
@@ -717,7 +717,6 @@ async def get_trend_signal(
         "partial_exit_rsi_pct": 50, "tighten_stop_atr": 1.0,
         "atr_multiplier_stop": 2.0,
     }
-    from core.strategy.signals import compute_exit_signal
     exit_signal = compute_exit_signal(
         ema_slope_pct=ema_slope_pct, rsi=rsi, atr=atr,
         current_price=current_price, entry_price=entry_price, params=exit_params,

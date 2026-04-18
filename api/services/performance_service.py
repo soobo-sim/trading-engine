@@ -623,7 +623,7 @@ async def get_performance_by_strategy(
     for s in strategies:
         params = s.parameters or {}
         s_pair = params.get("pair") or params.get("product_code") or ""
-        if s_pair.upper() == pair.upper():
+        if s_pair.lower() == pair.lower():
             pair_strategies.append(s)
 
     # 전략별 포지션 조회

@@ -21,6 +21,7 @@ from typing import Any
 from sqlalchemy import desc, select
 
 from core.data.dto import Decision, SignalSnapshot
+from core.pair import normalize_pair
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +91,7 @@ class RachelAdvisoryDecision:
         1건 생성한다. 전략 선택은 RegimeGate가 담당하므로 여기서 trading_style
         로 필터링하지 않는다.
         """
+        pair = normalize_pair(pair)
         now = datetime.now(timezone.utc)
         model = self._advisory_model
         try:
@@ -188,8 +190,57 @@ class RachelAdvisoryDecision:
                 reasoning=f"레이첼 advisory exit 지시: {advisory.reasoning}",
             )
 
-        # ── advisory hold → 보류 ────────────────────────────────
+        # ── advisory hold → override 정책 체크 후 보류 ─────────
         if advisory_action == "hold":
+            override_policy = getattr(advisory, "hold_override_policy", "none") or "none"
+
+            if override_policy == "signal_entry_ok" and not has_position:
+                # 진입 시그널이 있으면 Rachel의 위임으로 자율 진입
+                entry_action = None
+                if signal == "entry_ok":
+                    entry_action = "entry_long"
+                elif signal == "entry_sell":
+                    entry_action = "entry_short"
+
+                if entry_action is not None:
+                    # 만료 근접(< 1H) 시 override여도 진입 억제
+                    remaining_sec = (expires_at - now_ts).total_seconds()
+                    if remaining_sec < _EXPIRY_GUARD_SEC:
+                        return self._decision(
+                            action="hold",
+                            snapshot=snapshot,
+                            confidence=confidence,
+                            size_pct=0.0,
+                            stop_loss=None,
+                            take_profit=None,
+                            reasoning=(
+                                f"hold override 가능하나 만료 임박 "
+                                f"({remaining_sec/3600:.1f}H) → 진입 억제"
+                            ),
+                        )
+
+                    # confidence 30% 할인 (Rachel 원래 판단 = hold, 불확실성 반영)
+                    override_confidence = round(confidence * 0.7, 4)
+                    logger.info(
+                        f"[RachelAdvisory:{style}] {snapshot.pair}: hold override 발동 — "
+                        f"policy={override_policy} signal={signal} action={entry_action} "
+                        f"confidence={confidence:.2f}→{override_confidence:.2f}"
+                    )
+                    return self._decision(
+                        action=entry_action,
+                        snapshot=snapshot,
+                        confidence=override_confidence,
+                        size_pct=advisory.size_pct,
+                        stop_loss=advisory.stop_loss,
+                        take_profit=advisory.take_profit,
+                        reasoning=(
+                            f"hold override: Rachel hold이나 signal={signal} → "
+                            f"자율 진입 (policy={override_policy}). "
+                            f"원래 hold 사유: {advisory.reasoning}"
+                        ),
+                    )
+
+            # override 조건 미충족 or policy="none" → 기존 hold 유지
             return self._decision(
                 action="hold",
                 snapshot=snapshot,
@@ -199,6 +250,41 @@ class RachelAdvisoryDecision:
                 take_profit=None,
                 reasoning=f"레이첼 advisory hold: {advisory.reasoning}",
             )
+
+        # ── entry + 포지션 보유 → add_position 자동 전환 ──────────
+        # Rachel(LLM)이 포지션 보유 상태에서 entry_long/entry_short를 잘못 출력한 경우
+        # 방향이 일치하면 add_position으로 자동 전환 (기존 4중 안전장치 재활용)
+        if advisory_action in ("entry_long", "entry_short") and has_position:
+            pos_side = snapshot.position.extra.get("side", "buy")
+            same_direction = (
+                (advisory_action == "entry_long" and pos_side in ("buy", "long"))
+                or (advisory_action == "entry_short" and pos_side in ("sell", "short"))
+            )
+            if same_direction:
+                logger.info(
+                    f"[RachelAdvisory:{style}] {snapshot.pair}: "
+                    f"{advisory_action} + 포지션 보유(side={pos_side}) "
+                    f"→ add_position 자동 전환 (피라미딩 안전장치 적용)"
+                )
+                advisory_action = "add_position"
+                # fall-through → add_position + has_position 분기에서 4중 안전장치 실행
+            else:
+                logger.warning(
+                    f"[RachelAdvisory:{style}] {snapshot.pair}: "
+                    f"{advisory_action} + 포지션 보유(side={pos_side}) 방향 불일치 → hold"
+                )
+                return self._decision(
+                    action="hold",
+                    snapshot=snapshot,
+                    confidence=confidence,
+                    size_pct=0.0,
+                    stop_loss=None,
+                    take_profit=None,
+                    reasoning=(
+                        f"advisory={advisory_action}이나 기존 포지션(side={pos_side})과 방향 불일치 → hold. "
+                        f"포지션 방향 전환은 기존 청산 후 재진입 필요"
+                    ),
+                )
 
         # ── 만료 근접 시 진입 억제 ──────────────────────────────
         remaining_sec = (expires_at - now_ts).total_seconds()

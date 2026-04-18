@@ -60,6 +60,7 @@ def _advisory(
     take_profit: float | None = None,
     expires_offset_hours: float = 4.0,
     reasoning: str = "EMA 상향 + RSI 52 + 매크로 금리 동결 기대",
+    hold_override_policy: str = "none",
 ) -> SimpleNamespace:
     """테스트용 RachelAdvisory 유사 객체."""
     return SimpleNamespace(
@@ -74,6 +75,7 @@ def _advisory(
         regime="trending",
         reasoning=reasoning,
         expires_at=_NOW + timedelta(hours=expires_offset_hours),
+        hold_override_policy=hold_override_policy,
     )
 
 
@@ -389,11 +391,14 @@ async def test_expiry_guard_suppresses_entry():
 
 
 @pytest.mark.asyncio
-async def test_entry_long_advisory_with_existing_position_returns_hold():
+async def test_entry_long_advisory_with_existing_position_auto_converts_to_add_position():
     """
-    Given: advisory=entry_long, signal=entry_ok, 포지션 이미 있음
+    AP-01 (BUG-036): advisory=entry_long + 포지션 보유(롱, 수익 중, pyramid=0)
     When:  decide()
-    Then:  action=hold (재진입 차단 — has_position=True로 entry 조건 미충족)
+    Then:  action=add_position (자동 전환 후 4중 안전장치 통과)
+
+    변경 (BUG-036): 기존에는 has_position=True로 entry 조건 미충족 → hold 낙하.
+    수정 후: 동일 방향 포지션 보유 시 entry_long → add_position 자동 전환.
     """
     adv = _advisory(action="entry_long")
     dec, _ = _make_decision(advisory=adv)
@@ -402,7 +407,9 @@ async def test_entry_long_advisory_with_existing_position_returns_hold():
         mock_dt.now.return_value = _NOW
         result = await dec.decide(_snapshot(signal="entry_ok", position=_pos()))
 
-    assert result.action == "hold"
+    # _pos() — entry_price=9.8M < current_price=10M → 수익 중
+    # pyramid_count 미설정(0), side 미설정("buy") → same_direction + 안전장치 통과
+    assert result.action == "add_position"
     assert result.source == "rachel_advisory"
 
 
@@ -631,6 +638,71 @@ async def test_fetch_advisory_matches_lowercase_pair():
     assert result.action == "hold"
 
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_fetch_advisory_uppercase_input_matches_lowercase_db():
+    """
+    ADV-NP-01 (BUG-038): DB에 소문자 pair로 저장된 advisory를
+                          대문자 pair로 조회해도 매칭되어야 한다.
+
+    Given: DB에 pair='btc_jpy' advisory 존재
+    When:  _fetch_advisory('BTC_JPY', 'gmo_coin')  ← 대문자 입력
+    Then:  normalize_pair 정규화 후 매칭 → advisory 반환
+    """
+    from sqlalchemy import select as sa_select
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from adapters.database.models import RachelAdvisory
+    from adapters.database.session import Base
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+    async with engine.begin() as conn:
+        target = [Base.metadata.tables["rachel_advisories"]]
+        await conn.run_sync(lambda sc: Base.metadata.create_all(sc, tables=target))
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+    # 소문자로 저장 (엔진 내부 표준)
+    async with factory() as session:
+        row = RachelAdvisory(
+            pair="btc_jpy",
+            exchange="gmo_coin",
+            action="entry_long",
+            confidence=0.8,
+            reasoning="BUG-038 대소문자 매칭 테스트용 advisory (20자 이상)",
+            expires_at=datetime(2099, 1, 1, tzinfo=timezone.utc),
+        )
+        session.add(row)
+        await session.commit()
+
+    dec = RachelAdvisoryDecision(
+        session_factory=factory,
+        advisory_model=RachelAdvisory,
+        fallback=AsyncMock(),
+    )
+
+    # 대문자 입력으로 조회 → normalize_pair 후 매칭
+    result = await dec._fetch_advisory("BTC_JPY", "gmo_coin")
+    assert result is not None, "대문자 pair 입력 시에도 advisory를 찾아야 함 (BUG-038)"
+    assert result.pair == "btc_jpy"
+    assert result.action == "entry_long"
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_advisory_post_normalizes_pair_to_lowercase():
+    """
+    ADV-NP-02 (BUG-038): POST /api/advisories 로 대문자 pair 저장 시
+                          DB에는 소문자로 저장되어야 한다.
+    """
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from adapters.database.models import RachelAdvisory
+    from adapters.database.session import Base
+    from core.pair import normalize_pair
+
+    # normalize_pair가 대문자를 소문자로 변환함을 검증
+    assert normalize_pair("BTC_JPY") == "btc_jpy"
+    assert normalize_pair("BTC_JPY") == normalize_pair("btc_jpy")
 
 
 # ──────────────────────────────────────────────────────────────
@@ -1189,3 +1261,336 @@ async def test_rl02_log_prefix_fallback_when_no_trading_style(caplog):
         "[RachelAdvisory:?]" in r.message and "advisory 읽음" in r.message
         for r in caplog.records
     ), "로그에 [RachelAdvisory:?] 폴백 prefix가 포함되어야 함"
+
+
+# ──────────────────────────────────────────────────────────────
+# hold_override_policy 테스트 — HO-01 ~ HO-08 (BUG-037)
+# ──────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_ho01_hold_override_entry_ok_returns_entry_long():
+    """
+    HO-01: advisory=hold, policy=signal_entry_ok, signal=entry_ok, 포지션 없음
+    → action=entry_long, confidence 30% 할인(0.65×0.7=0.455)
+    """
+    adv = _advisory(action="hold", confidence=0.65, hold_override_policy="signal_entry_ok")
+    dec, _ = _make_decision(advisory=adv)
+
+    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+        mock_dt.now.return_value = _NOW
+        result = await dec.decide(_snapshot(signal="entry_ok"))
+
+    assert result.action == "entry_long"
+    assert abs(result.confidence - round(0.65 * 0.7, 4)) < 1e-6
+    assert result.source == "rachel_advisory"
+    assert "hold override" in result.reasoning
+
+
+@pytest.mark.asyncio
+async def test_ho02_hold_override_entry_sell_returns_entry_short():
+    """
+    HO-02: advisory=hold, policy=signal_entry_ok, signal=entry_sell, 포지션 없음
+    → action=entry_short, confidence 30% 할인
+    """
+    adv = _advisory(action="hold", confidence=0.65, hold_override_policy="signal_entry_ok")
+    dec, _ = _make_decision(advisory=adv)
+
+    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+        mock_dt.now.return_value = _NOW
+        result = await dec.decide(_snapshot(signal="entry_sell"))
+
+    assert result.action == "entry_short"
+    assert abs(result.confidence - round(0.65 * 0.7, 4)) < 1e-6
+    assert "hold override" in result.reasoning
+
+
+@pytest.mark.asyncio
+async def test_ho03_hold_override_wait_dip_stays_hold():
+    """
+    HO-03: advisory=hold, policy=signal_entry_ok, signal=wait_dip, 포지션 없음
+    → 시그널 미충족 → action=hold 유지
+    """
+    adv = _advisory(action="hold", confidence=0.65, hold_override_policy="signal_entry_ok")
+    dec, _ = _make_decision(advisory=adv)
+
+    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+        mock_dt.now.return_value = _NOW
+        result = await dec.decide(_snapshot(signal="wait_dip"))
+
+    assert result.action == "hold"
+    assert "hold override" not in result.reasoning
+
+
+@pytest.mark.asyncio
+async def test_ho04_hold_policy_none_entry_ok_stays_hold():
+    """
+    HO-04: advisory=hold, policy=none, signal=entry_ok, 포지션 없음
+    → override 비허용 → action=hold
+    """
+    adv = _advisory(action="hold", confidence=0.65, hold_override_policy="none")
+    dec, _ = _make_decision(advisory=adv)
+
+    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+        mock_dt.now.return_value = _NOW
+        result = await dec.decide(_snapshot(signal="entry_ok"))
+
+    assert result.action == "hold"
+    assert "레이첼 advisory hold" in result.reasoning
+
+
+@pytest.mark.asyncio
+async def test_ho05_hold_override_with_position_stays_hold():
+    """
+    HO-05: advisory=hold, policy=signal_entry_ok, signal=entry_ok, 포지션 있음
+    → 포지션 보유 중 신규 진입 조건 미충족 → hold 유지
+    """
+    adv = _advisory(action="hold", confidence=0.65, hold_override_policy="signal_entry_ok")
+    dec, _ = _make_decision(advisory=adv)
+
+    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+        mock_dt.now.return_value = _NOW
+        result = await dec.decide(_snapshot(signal="entry_ok", position=_pos()))
+
+    assert result.action == "hold"
+
+
+@pytest.mark.asyncio
+async def test_ho06_hold_override_near_expiry_suppresses_entry():
+    """
+    HO-06: advisory=hold, policy=signal_entry_ok, signal=entry_ok, 만료 0.5H 남음
+    → override 가능하나 만료 임박(< 1H) → 진입 억제, action=hold
+    """
+    adv = _advisory(
+        action="hold",
+        confidence=0.65,
+        hold_override_policy="signal_entry_ok",
+        expires_offset_hours=0.5,  # 30분 후 만료
+    )
+    dec, _ = _make_decision(advisory=adv)
+
+    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+        mock_dt.now.return_value = _NOW
+        result = await dec.decide(_snapshot(signal="entry_ok"))
+
+    assert result.action == "hold"
+    assert "만료 임박" in result.reasoning
+
+
+@pytest.mark.asyncio
+async def test_ho07_hold_override_policy_missing_attribute_falls_back():
+    """
+    HO-07: advisory에 hold_override_policy 속성 없음 (구 레코드, 하위호환)
+    → getattr 폴백 → "none" → hold 유지
+    """
+    adv = SimpleNamespace(
+        id=99,
+        pair="BTC_JPY",
+        exchange="bitflyer",
+        action="hold",
+        confidence=0.5,
+        size_pct=0.5,
+        stop_loss=None,
+        take_profit=None,
+        regime="trending",
+        reasoning="hold_override_policy 필드 없는 구 레코드 (하위호환 테스트)",
+        expires_at=_NOW + timedelta(hours=4.0),
+        # hold_override_policy 없음 — 의도적
+    )
+    dec, _ = _make_decision(advisory=adv)
+
+    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+        mock_dt.now.return_value = _NOW
+        result = await dec.decide(_snapshot(signal="entry_ok"))
+
+    assert result.action == "hold", "구 레코드는 hold 유지"
+
+
+@pytest.mark.asyncio
+async def test_ho08_non_hold_advisory_ignores_override_policy():
+    """
+    HO-08: advisory=entry_long (hold 아님), policy=signal_entry_ok, signal=entry_ok
+    → hold advisory가 아니므로 override 경로 비진입
+    → 기존 entry_long 경로 정상 동작: action=entry_long, confidence 할인 없음
+    """
+    adv = _advisory(
+        action="entry_long",
+        confidence=0.65,
+        hold_override_policy="signal_entry_ok",  # 무시됨
+    )
+    dec, _ = _make_decision(advisory=adv)
+
+    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+        mock_dt.now.return_value = _NOW
+        result = await dec.decide(_snapshot(signal="entry_ok"))
+
+    assert result.action == "entry_long"
+    # confidence 할인 없음 (override 경로가 아니라 기존 entry_long 경로)
+    assert abs(result.confidence - 0.65) < 1e-6
+    assert "hold override" not in result.reasoning
+
+
+# ──────────────────────────────────────────────────────────────
+# AP: entry_long/entry_short + 포지션 보유 자동 전환 (BUG-036)
+# ──────────────────────────────────────────────────────────────
+
+
+def _pos_long(
+    entry_price: float = 9_800_000.0,
+    pyramid_count: int = 0,
+) -> PositionDTO:
+    """롱 포지션 (side=buy)."""
+    return PositionDTO(
+        pair="BTC_JPY",
+        entry_price=entry_price,
+        entry_amount=0.3,
+        stop_loss_price=9_500_000.0,
+        stop_tightened=False,
+        extra={"side": "buy", "pyramid_count": pyramid_count},
+    )
+
+
+def _pos_short(
+    entry_price: float = 10_200_000.0,
+    pyramid_count: int = 0,
+) -> PositionDTO:
+    """숏 포지션 (side=sell)."""
+    return PositionDTO(
+        pair="BTC_JPY",
+        entry_price=entry_price,
+        entry_amount=0.3,
+        stop_loss_price=10_600_000.0,
+        stop_tightened=False,
+        extra={"side": "sell", "pyramid_count": pyramid_count},
+    )
+
+
+@pytest.mark.asyncio
+async def test_ap02_entry_long_plus_long_position_loss_returns_hold():
+    """
+    AP-02 (BUG-036): advisory=entry_long + 롱 포지션 보유 + 손실 중
+    → add_position 자동 전환 후 물타기 방지 안전장치 차단 → hold
+
+    entry_price=10.5M > current_price=10M → 롱 손실
+    """
+    adv = _advisory(action="entry_long", confidence=0.75, size_pct=0.2)
+    dec, _ = _make_decision(advisory=adv)
+
+    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+        mock_dt.now.return_value = _NOW
+        # entry_price > current_price → 손실 구간
+        pos = _pos_long(entry_price=10_500_000.0, pyramid_count=0)
+        result = await dec.decide(_snapshot(signal="entry_ok", position=pos))
+
+    assert result.action == "hold"
+    assert "물타기 방지" in result.reasoning
+
+
+@pytest.mark.asyncio
+async def test_ap03_entry_long_plus_long_position_pyramid_limit_returns_hold():
+    """
+    AP-03 (BUG-036): advisory=entry_long + 롱 포지션 보유(pyramid_count=3)
+    → add_position 자동 전환 후 피라미딩 상한 안전장치 차단 → hold
+    """
+    adv = _advisory(action="entry_long", confidence=0.80)
+    dec, _ = _make_decision(advisory=adv)
+
+    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+        mock_dt.now.return_value = _NOW
+        pos = _pos_long(entry_price=9_800_000.0, pyramid_count=3)
+        result = await dec.decide(_snapshot(signal="entry_ok", position=pos))
+
+    assert result.action == "hold"
+    assert "상한 도달" in result.reasoning
+
+
+@pytest.mark.asyncio
+async def test_ap04_entry_long_plus_short_position_direction_mismatch_returns_hold():
+    """
+    AP-04 (BUG-036): advisory=entry_long + 숏 포지션 보유
+    → 방향 불일치 → hold (포지션 flip 불허)
+    """
+    adv = _advisory(action="entry_long", confidence=0.75)
+    dec, _ = _make_decision(advisory=adv)
+
+    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+        mock_dt.now.return_value = _NOW
+        pos = _pos_short(entry_price=10_200_000.0, pyramid_count=0)
+        result = await dec.decide(_snapshot(signal="entry_ok", position=pos))
+
+    assert result.action == "hold"
+    assert "방향 불일치" in result.reasoning
+
+
+@pytest.mark.asyncio
+async def test_ap05_entry_short_plus_short_position_profitable_converts_to_add_position():
+    """
+    AP-05 (BUG-036): advisory=entry_short + 숏 포지션 보유(수익 중, pyramid=1)
+    → add_position 자동 전환 + 4중 안전장치 통과 → action=add_position
+
+    숏 수익 조건: current_price < entry_price
+    current=9_500_000 < entry=10_200_000 → 숏 수익
+    """
+    adv = _advisory(action="entry_short", confidence=0.70, size_pct=0.15)
+    dec, _ = _make_decision(advisory=adv)
+
+    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+        mock_dt.now.return_value = _NOW
+        pos = _pos_short(entry_price=10_200_000.0, pyramid_count=1)
+        snap = SignalSnapshot(
+            pair="BTC_JPY",
+            exchange="bitflyer",
+            timestamp=_NOW,
+            signal="entry_sell",
+            current_price=9_500_000.0,   # entry > current → 숏 수익
+            exit_signal={"action": "hold", "reason": ""},
+            position=pos,
+            params={"position_size_pct": 1.0},
+        )
+        result = await dec.decide(snap)
+
+    assert result.action == "add_position"
+    assert result.source == "rachel_advisory"
+
+
+@pytest.mark.asyncio
+async def test_ap07_entry_long_plus_long_position_near_expiry_returns_hold():
+    """
+    AP-07 (BUG-036): advisory=entry_long + 롱 포지션 보유 + 만료 30분 전
+    → add_position 자동 전환 후 만료 임박 안전장치 차단 → hold
+    """
+    adv = _advisory(action="entry_long", confidence=0.75, expires_offset_hours=0.5)
+    dec, _ = _make_decision(advisory=adv)
+
+    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+        mock_dt.now.return_value = _NOW
+        pos = _pos_long(entry_price=9_800_000.0, pyramid_count=0)
+        result = await dec.decide(_snapshot(signal="entry_ok", position=pos))
+
+    assert result.action == "hold"
+    assert "만료 임박" in result.reasoning
+
+
+@pytest.mark.asyncio
+async def test_ec01_entry_short_plus_long_position_direction_mismatch_logs_warning(caplog):
+    """
+    EC-01 (BUG-036): advisory=entry_short + 롱 포지션 보유
+    → 방향 불일치 → hold + WARNING 로그
+
+    entry_short + side=buy (롱) → 불일치
+    """
+    import logging
+
+    adv = _advisory(action="entry_short", confidence=0.65)
+    dec, _ = _make_decision(advisory=adv)
+
+    with patch("core.decision.rachel_advisory.datetime") as mock_dt:
+        mock_dt.now.return_value = _NOW
+        with caplog.at_level(logging.WARNING, logger="core.decision.rachel_advisory"):
+            pos = _pos_long(entry_price=9_800_000.0)
+            result = await dec.decide(_snapshot(signal="entry_sell", position=pos))
+
+    assert result.action == "hold"
+    assert "방향 불일치" in result.reasoning
+    assert any("방향 불일치" in r.message for r in caplog.records), \
+        "방향 불일치 시 WARNING 로그가 출력되어야 한다"

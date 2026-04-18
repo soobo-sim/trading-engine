@@ -532,3 +532,620 @@ async def test_open_position_initializes_pyramid_state():
     assert pos.extra.get("pyramid_count") == 0
     assert pos.extra.get("pyramid_entries") == []
     assert "total_size_pct" in pos.extra
+
+
+# ──────────────────────────────────────────────────────────────
+# GT-18: ERR-422 (거래소 포지션 없음) → 인메모리 클리어 + DB 기록
+# ──────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_close_position_err422_clears_memory():
+    """GT-18: ERR-422 시 인메모리 포지션 클리어하고 DB 기록 시도."""
+    from core.exchange.errors import ExchangeError
+    mgr = _make_gmoc_manager()
+    mgr._position["BTC_JPY"] = Position(
+        pair="BTC_JPY",
+        entry_price=11_000_000.0,
+        entry_amount=0.001,
+        stop_loss_price=10_800_000.0,
+        db_record_id=50,
+        extra={"side": "buy"},
+    )
+    mgr._params["BTC_JPY"] = {"min_coin_size": 0.0001}
+    mgr._latest_price["BTC_JPY"] = 11_200_000.0
+    mgr._adapter.close_position_bulk = AsyncMock(
+        side_effect=ExchangeError(
+            "GMO 코인 비즈니스 에러: ERR-422: There are no open positions that can be settled."
+        )
+    )
+
+    await mgr._close_position_impl("BTC_JPY", "stop_loss")
+
+    assert mgr._position.get("BTC_JPY") is None  # 인메모리 클리어
+
+
+@pytest.mark.asyncio
+async def test_close_position_err422_no_db_record():
+    """GT-19: ERR-422 + db_record_id=None → 인메모리만 클리어."""
+    from core.exchange.errors import ExchangeError
+    mgr = _make_gmoc_manager()
+    mgr._position["BTC_JPY"] = Position(
+        pair="BTC_JPY",
+        entry_price=11_000_000.0,
+        entry_amount=0.001,
+        stop_loss_price=10_800_000.0,
+        db_record_id=None,
+        extra={"side": "sell"},
+    )
+    mgr._params["BTC_JPY"] = {"min_coin_size": 0.0001}
+    mgr._adapter.close_position_bulk = AsyncMock(
+        side_effect=ExchangeError(
+            "GMO 코인 비즈니스 에러: ERR-422: There are no open positions that can be settled."
+        )
+    )
+
+    await mgr._close_position_impl("BTC_JPY", "exit_warning")
+
+    assert mgr._position.get("BTC_JPY") is None
+
+
+@pytest.mark.asyncio
+async def test_close_position_err422_calls_record_close_with_correct_reason():
+    """GT-20: ERR-422 + db_record_id 있음 → _record_close reason에 '_exchange_already_closed' 포함."""
+    from core.exchange.errors import ExchangeError
+    mgr = _make_gmoc_manager()
+    mgr._position["BTC_JPY"] = Position(
+        pair="BTC_JPY",
+        entry_price=11_000_000.0,
+        entry_amount=0.001,
+        stop_loss_price=10_800_000.0,
+        db_record_id=77,
+        extra={"side": "buy"},
+    )
+    mgr._params["BTC_JPY"] = {"min_coin_size": 0.0001}
+    mgr._latest_price["BTC_JPY"] = 11_300_000.0
+    mgr._adapter.close_position_bulk = AsyncMock(
+        side_effect=ExchangeError(
+            "GMO 코인 비즈니스 에러: ERR-422: There are no open positions that can be settled."
+        )
+    )
+
+    await mgr._close_position_impl("BTC_JPY", "stop_loss")
+
+    assert mgr._position.get("BTC_JPY") is None
+    mgr._record_close.assert_called_once()
+    call_kwargs = mgr._record_close.call_args[1]
+    assert call_kwargs["reason"] == "stop_loss_exchange_already_closed"
+    assert call_kwargs["db_record_id"] == 77
+
+
+@pytest.mark.asyncio
+async def test_close_position_err422_record_close_failure_still_clears_memory():
+    """GT-21: ERR-422 + _record_close 실패 → 메모리 클리어는 유지 (에러 복구)."""
+    from core.exchange.errors import ExchangeError
+    mgr = _make_gmoc_manager()
+    mgr._position["BTC_JPY"] = Position(
+        pair="BTC_JPY",
+        entry_price=11_000_000.0,
+        entry_amount=0.001,
+        stop_loss_price=10_800_000.0,
+        db_record_id=88,
+        extra={"side": "buy"},
+    )
+    mgr._params["BTC_JPY"] = {"min_coin_size": 0.0001}
+    mgr._adapter.close_position_bulk = AsyncMock(
+        side_effect=ExchangeError(
+            "GMO 코인 비즈니스 에러: ERR-422: There are no open positions that can be settled."
+        )
+    )
+    mgr._record_close = AsyncMock(side_effect=RuntimeError("DB 연결 실패"))
+
+    await mgr._close_position_impl("BTC_JPY", "trailing_stop")
+
+    # DB 기록 실패해도 인메모리 클리어는 보장
+    assert mgr._position.get("BTC_JPY") is None
+
+
+@pytest.mark.asyncio
+async def test_close_position_non_err422_exchange_error_keeps_position():
+    """GT-22: ERR-422 아닌 ExchangeError → 포지션 유지 (오판 방지)."""
+    from core.exchange.errors import ExchangeError
+    mgr = _make_gmoc_manager()
+    mgr._position["BTC_JPY"] = Position(
+        pair="BTC_JPY",
+        entry_price=11_000_000.0,
+        entry_amount=0.001,
+        stop_loss_price=10_800_000.0,
+        db_record_id=99,
+        extra={"side": "sell"},
+    )
+    mgr._params["BTC_JPY"] = {"min_coin_size": 0.0001}
+    mgr._adapter.close_position_bulk = AsyncMock(
+        side_effect=ExchangeError("GMO 코인 비즈니스 에러: ERR-400: Invalid request.")
+    )
+
+    await mgr._close_position_impl("BTC_JPY", "stop_loss")
+
+    # ERR-422 아니면 포지션 클리어하면 안 됨
+    assert mgr._position.get("BTC_JPY") is not None
+
+
+# ──────────────────────────────────────────────────────────────
+# TRL-01~TRL-08: _update_trailing_stop 손익분기 바닥 + profit mult
+# ──────────────────────────────────────────────────────────────
+
+_TRL_PARAMS = {
+    "trailing_stop_atr_initial": 1.5,
+    "trailing_stop_atr_mature": 1.2,
+    "trailing_stop_decay_per_atr": 0.2,
+    "trailing_stop_atr_min": 0.3,
+    "tighten_stop_atr": 1.0,
+    "breakeven_trigger_atr": 1.0,
+    "ema_slope_weak_threshold": 0.03,
+    "rsi_overbought": 75,
+    "min_coin_size": 0.0001,
+}
+
+
+def _make_long_pos(entry: float, sl: float) -> Position:
+    return Position(
+        pair="BTC_JPY",
+        entry_price=entry,
+        entry_amount=0.004,
+        stop_loss_price=sl,
+        db_record_id=42,
+        extra={"side": "buy"},
+    )
+
+
+def _make_short_pos(entry: float, sl: float) -> Position:
+    return Position(
+        pair="BTC_JPY",
+        entry_price=entry,
+        entry_amount=0.004,
+        stop_loss_price=sl,
+        db_record_id=42,
+        extra={"side": "sell"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_trl01_breakeven_floor_activated():
+    """TRL-01: 이익 >= ATR×breakeven_trigger → 스탑이 진입가 이상으로 상향."""
+    mgr = _make_gmoc_manager()
+    mgr._update_trailing_stop_in_db = AsyncMock()
+
+    entry = 11_000_000.0
+    atr = 100_000.0
+    # 이익 = 110_000 >= ATR×1.0 = 100_000 → 손익분기 바닥 발동
+    current = entry + atr * 1.1  # 11_110_000
+
+    pos = _make_long_pos(entry=entry, sl=entry - 200_000.0)
+    await mgr._update_trailing_stop("BTC_JPY", pos, current, atr, 0.5, 55.0, _TRL_PARAMS)
+
+    # 스탑이 진입가 이상이어야 함
+    assert pos.stop_loss_price >= entry
+
+
+@pytest.mark.asyncio
+async def test_trl02_breakeven_floor_not_triggered():
+    """TRL-02: 이익 < ATR×breakeven_trigger → 스탑이 진입가 아래 유지."""
+    mgr = _make_gmoc_manager()
+    mgr._update_trailing_stop_in_db = AsyncMock()
+
+    entry = 11_000_000.0
+    atr = 100_000.0
+    # 이익 = 50_000 < ATR×1.0 = 100_000 → 손익분기 미발동
+    current = entry + 50_000.0  # 11_050_000
+
+    pos = _make_long_pos(entry=entry, sl=entry - 300_000.0)
+    await mgr._update_trailing_stop("BTC_JPY", pos, current, atr, 0.5, 55.0, _TRL_PARAMS)
+
+    # 스탑이 진입가 아래여야 함 (current - atr*1.5 = 11_050_000 - 150_000 = 10_900_000)
+    assert pos.stop_loss_price < entry
+
+
+@pytest.mark.asyncio
+async def test_trl03_loss_position_no_breakeven():
+    """TRL-03: 손실 중 → breakeven 미발동, 일반 trailing."""
+    mgr = _make_gmoc_manager()
+    mgr._update_trailing_stop_in_db = AsyncMock()
+
+    entry = 11_000_000.0
+    atr = 100_000.0
+    # 현재가 < 진입가 → 손실
+    current = entry - 50_000.0  # 10_950_000
+
+    pos = _make_long_pos(entry=entry, sl=entry - 500_000.0)
+    await mgr._update_trailing_stop("BTC_JPY", pos, current, atr, 0.5, 55.0, _TRL_PARAMS)
+
+    # 스탑이 진입가보다 낮아야 함
+    assert pos.stop_loss_price < entry
+
+
+@pytest.mark.asyncio
+async def test_trl04_stop_tightened_uses_min_of_tighten_and_profit_mult():
+    """TRL-04: stop_tightened=True → min(tighten_stop_atr, profit_mult) — 이익 크면 더 좁아짐."""
+    mgr = _make_gmoc_manager()
+    mgr._update_trailing_stop_in_db = AsyncMock()
+
+    entry = 11_000_000.0
+    atr = 100_000.0
+    # 이익 ATR×3.0 → profit_mult = max(0.3, 1.5-0.2×3.0) = 0.9 < tighten_stop_atr=1.0
+    current = entry + atr * 3.0  # 11_300_000
+
+    pos = _make_long_pos(entry=entry, sl=entry - 100_000.0)
+    pos.stop_tightened = True
+    await mgr._update_trailing_stop("BTC_JPY", pos, current, atr, 0.5, 55.0, _TRL_PARAMS)
+
+    # mult = min(1.0, 0.9) = 0.9 → 11_300_000 - 90_000 = 11_210_000
+    expected = round(current - atr * 0.9, 6)
+    assert pos.stop_loss_price == expected
+
+
+@pytest.mark.asyncio
+async def test_trl05_entry_price_none_no_error():
+    """TRL-05: entry_price=None → AttributeError 없이 정상 처리."""
+    mgr = _make_gmoc_manager()
+    mgr._update_trailing_stop_in_db = AsyncMock()
+
+    pos = Position(
+        pair="BTC_JPY",
+        entry_price=None,
+        entry_amount=0.004,
+        stop_loss_price=10_500_000.0,
+        db_record_id=42,
+        extra={"side": "buy"},
+    )
+    current = 11_000_000.0
+    atr = 100_000.0
+    # 예외 없이 실행되어야 함
+    await mgr._update_trailing_stop("BTC_JPY", pos, current, atr, 0.5, 55.0, _TRL_PARAMS)
+
+
+@pytest.mark.asyncio
+async def test_trl06_short_breakeven_ceiling():
+    """TRL-06: 숏 이익 >= ATR×trigger → 스탑이 진입가 이하(ceiling)로 제한."""
+    mgr = _make_gmoc_manager()
+    mgr._update_trailing_stop_in_db = AsyncMock()
+
+    entry = 11_000_000.0
+    atr = 100_000.0
+    # 숏 이익 = 110_000 >= ATR×1.0 → 손익분기 바닥 발동 (ceiling=진입가)
+    current = entry - atr * 1.1  # 10_890_000
+
+    pos = _make_short_pos(entry=entry, sl=entry + 200_000.0)
+    await mgr._update_trailing_stop("BTC_JPY", pos, current, atr, 0.5, 55.0, _TRL_PARAMS)
+
+    # 숏에서 스탑이 진입가 이하여야 함 (ceiling=진입가)
+    assert pos.stop_loss_price <= entry
+
+
+@pytest.mark.asyncio
+async def test_trl07_profit_mult_beats_adaptive():
+    """TRL-07: profit_mult < adaptive_mult → min()에 의해 profit_mult 사용."""
+    mgr = _make_gmoc_manager()
+    mgr._update_trailing_stop_in_db = AsyncMock()
+
+    entry = 11_000_000.0
+    atr = 100_000.0
+    # 이익 ATR×1.7 → profit_mult = max(0.3, 1.5-0.2×1.7) = 1.16
+    # adaptive_mult = 1.5 (slope=0.5% >= 0.03, RSI=55 < 75 → initial)
+    # min(1.5, 1.16) = 1.16 사용
+    current = entry + atr * 1.7  # 11_170_000
+
+    pos = _make_long_pos(entry=entry, sl=entry - 500_000.0)
+    await mgr._update_trailing_stop("BTC_JPY", pos, current, atr, 0.5, 55.0, _TRL_PARAMS)
+
+    # mult=1.16 → new_sl = 11_170_000 - 116_000 = 11_054_000
+    # breakeven: 170_000 >= ATR×1.0 → floor=entry → max(11_054_000, 11_000_000) = 11_054_000
+    expected = round(current - atr * 1.16, 6)
+    assert pos.stop_loss_price == expected
+
+
+@pytest.mark.asyncio
+async def test_trl08_ratchet_no_downward_update():
+    """TRL-08: 새 스탑 < 현재 스탑 → ratchet 유지, DB 미업데이트."""
+    mgr = _make_gmoc_manager()
+    mgr._update_trailing_stop_in_db = AsyncMock()
+
+    entry = 11_000_000.0
+    atr = 100_000.0
+    # 현재 스탑이 이미 높게 설정된 상황에서 가격이 내려옴
+    current = entry + 50_000.0  # 11_050_000
+    high_sl = 11_030_000.0  # 이미 높은 스탑
+
+    pos = _make_long_pos(entry=entry, sl=high_sl)
+    await mgr._update_trailing_stop("BTC_JPY", pos, current, atr, 0.5, 55.0, _TRL_PARAMS)
+
+    # profit_mult = max(0.3, 1.5-0.2×0.5) = 1.4, mult = min(1.5, 1.4) = 1.4
+    # new_sl = 11_050_000 - 140_000 = 10_910_000 < high_sl → 업데이트 없음
+    assert pos.stop_loss_price == high_sl
+    mgr._update_trailing_stop_in_db.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_trl09_stop_tightened_ceiling_wins_over_large_profit_mult():
+    """TRL-09: stop_tightened=True, 이익 작음 → ceiling(1.0) < profit_mult(1.4) → ceiling 사용."""
+    mgr = _make_gmoc_manager()
+    mgr._update_trailing_stop_in_db = AsyncMock()
+
+    entry = 11_000_000.0
+    atr = 100_000.0
+    # 이익 ATR×0.5 → profit_mult = max(0.3, 1.5-0.2×0.5) = 1.4 > tighten_ceiling=1.0
+    current = entry + atr * 0.5  # 11_050_000
+
+    pos = _make_long_pos(entry=entry, sl=entry - 100_000.0)
+    pos.stop_tightened = True
+    await mgr._update_trailing_stop("BTC_JPY", pos, current, atr, 0.5, 55.0, _TRL_PARAMS)
+
+    # mult = min(1.0, 1.4) = 1.0 → new_sl = 11_050_000 - 100_000 = 10_950_000
+    # breakeven: 50_000 < ATR×1.0 → 미발동 → 이전 스탑(10_900_000)보다 크므로 갱신
+    expected = round(current - atr * 1.0, 6)
+    assert pos.stop_loss_price == expected
+
+
+@pytest.mark.asyncio
+async def test_trl10_stop_tightened_profit_floor_beats_ceiling():
+    """TRL-10: stop_tightened=True, 이익 매우 큼 → profit_mult floor(0.3) < ceiling(1.0) → 더 타이트."""
+    mgr = _make_gmoc_manager()
+    mgr._update_trailing_stop_in_db = AsyncMock()
+
+    entry = 11_000_000.0
+    atr = 100_000.0
+    # 이익 ATR×6.0 → profit_mult = max(0.3, 1.5-1.2) = 0.3 < tighten_ceiling=1.0
+    current = entry + atr * 6.0  # 11_600_000
+
+    pos = _make_long_pos(entry=entry, sl=entry - 100_000.0)
+    pos.stop_tightened = True
+    await mgr._update_trailing_stop("BTC_JPY", pos, current, atr, 0.5, 55.0, _TRL_PARAMS)
+
+    # mult = min(1.0, 0.3) = 0.3 → new_sl = 11_600_000 - 30_000 = 11_570_000
+    # breakeven: 600_000 >= ATR×1.0 → floor=entry → max(11_570_000, 11_000_000) = 11_570_000
+    expected = round(current - atr * 0.3, 6)
+    assert pos.stop_loss_price == expected
+    mgr._update_trailing_stop_in_db.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_trl11_short_stop_tightened_profit_mult():
+    """TRL-11: 숏 + stop_tightened=True + 큰 이익 → min(ceiling, profit_mult) 숏 방향."""
+    mgr = _make_gmoc_manager()
+    mgr._update_trailing_stop_in_db = AsyncMock()
+
+    entry = 11_000_000.0
+    atr = 100_000.0
+    # 숏 이익 ATR×3.0 → profit_mult = max(0.3, 1.5-0.6) = 0.9 < ceiling=1.0
+    current = entry - atr * 3.0  # 10_700_000
+
+    pos = _make_short_pos(entry=entry, sl=entry + 200_000.0)
+    pos.stop_tightened = True
+    await mgr._update_trailing_stop("BTC_JPY", pos, current, atr, 0.5, 55.0, _TRL_PARAMS)
+
+    # mult = min(1.0, 0.9) = 0.9 → 숏 new_sl = 10_700_000 + 90_000 = 10_790_000
+    # breakeven: 300_000 >= ATR×1.0 → ceiling=entry(11_000_000), min(10_790_000, 11_000_000)=10_790_000
+    expected = round(current + atr * 0.9, 6)
+    assert pos.stop_loss_price == expected
+
+
+@pytest.mark.asyncio
+async def test_trl12_side_missing_from_extra_defaults_to_buy():
+    """TRL-12: pos.extra에 side 미설정 → "buy" 기본값 fallback."""
+    mgr = _make_gmoc_manager()
+    mgr._update_trailing_stop_in_db = AsyncMock()
+
+    pos = Position(
+        pair="BTC_JPY",
+        entry_price=11_000_000.0,
+        entry_amount=0.004,
+        stop_loss_price=10_500_000.0,
+        db_record_id=42,
+        extra={},  # side 없음
+    )
+    current = 11_200_000.0
+    atr = 100_000.0
+
+    # 예외 없이 실행, "buy" 기본값으로 처리
+    await mgr._update_trailing_stop("BTC_JPY", pos, current, atr, 0.5, 55.0, _TRL_PARAMS)
+
+    # 롱 방향 계산 확인: new_sl = current - atr × mult (스탑 갱신됨)
+    assert pos.stop_loss_price > 10_500_000.0  # 스탑이 올라갔어야 함
+    mgr._update_trailing_stop_in_db.assert_called_once()
+
+
+# ──────────────────────────────────────────────────────────────
+# LC-01~LC-05: _update_trailing_stop → changeLosscutPrice 거래소 동기화
+# ──────────────────────────────────────────────────────────────
+
+def _make_gmoc_manager_with_losscut(
+    *,
+    positions=None,
+    change_losscut_return: bool = True,
+):
+    """changeLosscutPrice 동작 검증용 매니저 생성."""
+    from core.exchange.types import FxPosition
+    mgr = _make_gmoc_manager()
+    fx_positions = positions if positions is not None else [
+        FxPosition(
+            product_code="BTC_JPY",
+            side="BUY",
+            price=11_728_011.0,
+            size=0.004,
+            pnl=1_000.0,
+            leverage=2.0,
+            require_collateral=0.0,
+            swap_point_accumulate=0.0,
+            sfd=0.0,
+            position_id=305885,
+        )
+    ]
+    mgr._adapter.get_positions = AsyncMock(return_value=fx_positions)
+    mgr._adapter.change_losscut_price = AsyncMock(return_value=change_losscut_return)
+    mgr._update_trailing_stop_in_db = AsyncMock()
+    return mgr
+
+
+@pytest.mark.asyncio
+async def test_lc01_stop_updated_calls_change_losscut():
+    """LC-01: 스탑이 갱신되면 changeLosscutPrice가 호출된다."""
+    mgr = _make_gmoc_manager_with_losscut()
+
+    entry = 11_000_000.0
+    atr = 100_000.0
+    # 충분한 이익으로 스탑이 갱신되는 상황
+    current = entry + atr * 3.0  # 11_300_000
+    pos = _make_long_pos(entry=entry, sl=entry - 500_000.0)
+
+    await mgr._update_trailing_stop("BTC_JPY", pos, current, atr, 0.5, 55.0, _TRL_PARAMS)
+
+    mgr._adapter.change_losscut_price.assert_called_once_with(305885, pos.stop_loss_price)
+
+
+@pytest.mark.asyncio
+async def test_lc02_stop_not_changed_no_losscut_call():
+    """LC-02: ratchet으로 스탑이 갱신되지 않으면 changeLosscutPrice 미호출."""
+    mgr = _make_gmoc_manager_with_losscut()
+    mgr._update_trailing_stop_in_db = AsyncMock()
+
+    entry = 11_000_000.0
+    atr = 100_000.0
+    # 현재 스탑이 이미 높게 설정 → 갱신 없음
+    current = entry + 50_000.0  # 11_050_000
+    high_sl = 11_030_000.0
+
+    pos = _make_long_pos(entry=entry, sl=high_sl)
+
+    await mgr._update_trailing_stop("BTC_JPY", pos, current, atr, 0.5, 55.0, _TRL_PARAMS)
+
+    # 스탑 미갱신 → 거래소 동기화 없음
+    mgr._adapter.change_losscut_price.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_lc03_multiple_positions_all_updated():
+    """LC-03: 피라미딩 등 복수 건옥 → 모든 positionId에 changeLosscutPrice 호출."""
+    from core.exchange.types import FxPosition
+    fx_positions = [
+        FxPosition(
+            product_code="BTC_JPY", side="BUY", price=11_000_000.0, size=0.002,
+            pnl=0.0, leverage=2.0, require_collateral=0.0, swap_point_accumulate=0.0,
+            sfd=0.0, position_id=111111,
+        ),
+        FxPosition(
+            product_code="BTC_JPY", side="BUY", price=11_200_000.0, size=0.002,
+            pnl=0.0, leverage=2.0, require_collateral=0.0, swap_point_accumulate=0.0,
+            sfd=0.0, position_id=222222,
+        ),
+    ]
+    mgr = _make_gmoc_manager_with_losscut(positions=fx_positions)
+
+    entry = 11_000_000.0
+    atr = 100_000.0
+    current = entry + atr * 3.0
+    pos = _make_long_pos(entry=entry, sl=entry - 500_000.0)
+
+    await mgr._update_trailing_stop("BTC_JPY", pos, current, atr, 0.5, 55.0, _TRL_PARAMS)
+
+    calls = [c.args[0] for c in mgr._adapter.change_losscut_price.call_args_list]
+    assert set(calls) == {111111, 222222}
+
+
+@pytest.mark.asyncio
+async def test_lc04_get_positions_empty_no_error():
+    """LC-04: get_positions()가 빈 리스트 반환 → 예외 없이 통과."""
+    mgr = _make_gmoc_manager_with_losscut(positions=[])
+
+    entry = 11_000_000.0
+    atr = 100_000.0
+    current = entry + atr * 3.0
+    pos = _make_long_pos(entry=entry, sl=entry - 500_000.0)
+
+    # 예외 없이 완료
+    await mgr._update_trailing_stop("BTC_JPY", pos, current, atr, 0.5, 55.0, _TRL_PARAMS)
+    mgr._adapter.change_losscut_price.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_lc05_change_losscut_failure_doesnt_break_stop():
+    """LC-05: changeLosscutPrice 실패 → 인메모리 스탑 갱신은 그대로 유지."""
+    mgr = _make_gmoc_manager_with_losscut(change_losscut_return=False)
+
+    entry = 11_000_000.0
+    atr = 100_000.0
+    current = entry + atr * 3.0
+    pos = _make_long_pos(entry=entry, sl=entry - 500_000.0)
+    old_sl = pos.stop_loss_price
+
+    await mgr._update_trailing_stop("BTC_JPY", pos, current, atr, 0.5, 55.0, _TRL_PARAMS)
+
+    # 거래소 동기화 실패해도 인메모리 스탑은 갱신됨
+    assert pos.stop_loss_price != old_sl
+    assert pos.stop_loss_price > old_sl
+
+
+@pytest.mark.asyncio
+async def test_lc06_get_positions_raises_warning_only():
+    """LC-06: get_positions() 예외 → WARNING만, 인메모리 스탑 갱신은 유지."""
+    mgr = _make_gmoc_manager_with_losscut()
+    mgr._adapter.get_positions = AsyncMock(side_effect=RuntimeError("network error"))
+
+    entry = 11_000_000.0
+    atr = 100_000.0
+    current = entry + atr * 3.0
+    pos = _make_long_pos(entry=entry, sl=entry - 500_000.0)
+    old_sl = pos.stop_loss_price
+
+    # 예외 없이 완료
+    await mgr._update_trailing_stop("BTC_JPY", pos, current, atr, 0.5, 55.0, _TRL_PARAMS)
+
+    # 인메모리 스탑은 갱신됨 (거래소 동기화 실패와 무관)
+    assert pos.stop_loss_price > old_sl
+    # changeLosscutPrice는 호출되지 않음
+    mgr._adapter.change_losscut_price.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_lc07_adapter_missing_methods_no_error():
+    """LC-07: 어댑터에 change_losscut_price 없음 → hasattr 체크로 조용히 통과."""
+    mgr = _make_gmoc_manager_with_losscut()
+    # change_losscut_price 제거
+    del mgr._adapter.change_losscut_price
+
+    entry = 11_000_000.0
+    atr = 100_000.0
+    current = entry + atr * 3.0
+    pos = _make_long_pos(entry=entry, sl=entry - 500_000.0)
+    old_sl = pos.stop_loss_price
+
+    # 예외 없이 완료, 인메모리 스탑 갱신 유지
+    await mgr._update_trailing_stop("BTC_JPY", pos, current, atr, 0.5, 55.0, _TRL_PARAMS)
+    assert pos.stop_loss_price > old_sl
+
+
+@pytest.mark.asyncio
+async def test_lc08_position_id_none_skipped():
+    """LC-08: position_id=None 건옥은 건너뛰고, 유효한 건옥만 처리."""
+    from core.exchange.types import FxPosition
+    fx_positions = [
+        FxPosition(
+            product_code="BTC_JPY", side="BUY", price=11_000_000.0, size=0.002,
+            pnl=0.0, leverage=2.0, require_collateral=0.0, swap_point_accumulate=0.0,
+            sfd=0.0, position_id=None,  # None → 건너뜀
+        ),
+        FxPosition(
+            product_code="BTC_JPY", side="BUY", price=11_200_000.0, size=0.002,
+            pnl=0.0, leverage=2.0, require_collateral=0.0, swap_point_accumulate=0.0,
+            sfd=0.0, position_id=999999,  # 유효 → 처리
+        ),
+    ]
+    mgr = _make_gmoc_manager_with_losscut(positions=fx_positions)
+
+    entry = 11_000_000.0
+    atr = 100_000.0
+    current = entry + atr * 3.0
+    pos = _make_long_pos(entry=entry, sl=entry - 500_000.0)
+
+    await mgr._update_trailing_stop("BTC_JPY", pos, current, atr, 0.5, 55.0, _TRL_PARAMS)
+
+    # 유효한 position_id=999999만 호출
+    mgr._adapter.change_losscut_price.assert_called_once_with(999999, pos.stop_loss_price)

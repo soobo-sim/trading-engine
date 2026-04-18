@@ -444,6 +444,8 @@ class TestBuildTelegramText:
                 "unrealized_pnl_jpy": 506,
                 "unrealized_pnl_pct": 0.87,
                 "price_diff": 168810,
+                # (11463739 - 11631190) * 0.003 = -502
+                "pnl_at_stop": -502,
             },
             "entry_blockers": [],
             "jpy_available": 10000,
@@ -566,7 +568,7 @@ class TestBuildTelegramText:
         assert "즉시 청산 실행 중" in text
 
     def test_stop_loss_price_zero_no_crash(self):
-        """stop_loss_price=0 → 에러 없이 처리."""
+        """stop_loss_price=0, pnl_at_stop 미설정 → 에러 없이 손익분기 행 표시."""
         data = self._make_with_pos(
             position={
                 "side": "buy",
@@ -577,11 +579,190 @@ class TestBuildTelegramText:
                 "unrealized_pnl_jpy": 60000,
                 "unrealized_pnl_pct": 1.85,
                 "price_diff": 200000,
+                # pnl_at_stop 미설정 또는 0 → 손익분기 표시
             },
         )
         text = build_telegram_text("BF", "10:00", "BTC_JPY", data)
-        assert "손절" in text  # 행은 존재
+        assert "🔒 손익분기" in text  # pnl_at_stop=0 → 손익분기 표시
         assert "미실현" in text
+
+    # ── 신규: 스탑 라인 3분기 (SR-01~SR-08) ────────────────────────
+
+    def test_sr01_long_profit_stop_above_entry_shows_protection(self):
+        """SR-01: 롱, 이익, stop>entry → 🛡️ 이익보호 + 확정이익 + 전망: 이익보호 중."""
+        data = self._make_with_pos(
+            current_price=12000000,
+            position={
+                "side": "buy",
+                "entry_price": 11500000,
+                "entry_amount": 0.004,
+                "stop_loss_price": 11600000,  # > entry → pnl_at_stop=+400
+                "trailing_stop_distance": 400000,
+                "unrealized_pnl_jpy": 2000,
+                "unrealized_pnl_pct": 4.35,
+                "price_diff": 500000,
+                "pnl_at_stop": 400,  # (11600000 - 11500000) * 0.004 = 400
+            },
+            exit_signal={"action": "hold"},
+        )
+        text = build_telegram_text("GMOC", "12:00", "btc_jpy", data)
+        assert "🛡️ 이익보호" in text
+        assert "+¥400" in text
+        assert "트레일링 스탑이 이익 보호 중" in text
+        assert "최소 +¥400 확정" in text
+
+    def test_sr02_long_profit_stop_below_entry_shows_stop_loss(self):
+        """SR-02: 롱, 이익(+2.3%), stop<entry → 🛑 손절 + 청산 시 손실 + 전망: 진입가 아래."""
+        data = self._make_with_pos(
+            current_price=11997440,
+            position={
+                "side": "buy",
+                "entry_price": 11728011,
+                "entry_amount": 0.004,
+                "stop_loss_price": 11681748,  # < entry
+                "trailing_stop_distance": 315692,
+                "unrealized_pnl_jpy": 1078,
+                "unrealized_pnl_pct": 2.30,
+                "price_diff": 269429,
+                "pnl_at_stop": -185,  # (11681748 - 11728011) * 0.004 ≈ -185
+            },
+            exit_signal={"action": "hold"},
+        )
+        text = build_telegram_text("GMOC", "07:48", "btc_jpy", data)
+        assert "🛑 손절" in text
+        assert "청산 시 -¥185 손실" in text
+        assert "이익 중이나 스탑은 진입가 아래" in text
+        assert "추가 상승 시 이익보호로 전환" in text
+
+    def test_sr03_long_profit_stop_equals_entry_shows_breakeven(self):
+        """SR-03: 롱, 이익, stop=entry → 🔒 손익분기 + 전망: 진입가 아래."""
+        data = self._make_with_pos(
+            current_price=12000000,
+            position={
+                "side": "buy",
+                "entry_price": 11800000,
+                "entry_amount": 0.004,
+                "stop_loss_price": 11800000,  # = entry
+                "trailing_stop_distance": 200000,
+                "unrealized_pnl_jpy": 800,
+                "unrealized_pnl_pct": 1.69,
+                "price_diff": 200000,
+                "pnl_at_stop": 0,
+            },
+            exit_signal={"action": "hold"},
+        )
+        text = build_telegram_text("GMOC", "12:00", "btc_jpy", data)
+        assert "🔒 손익분기" in text
+        assert "이익 중이나 스탑은 진입가 아래" in text
+
+    def test_sr04_long_loss_stop_below_entry_shows_approaching(self):
+        """SR-04: 롱, 손실(-1.5%), stop<entry → 🛑 손절 + 손절선 접근 중."""
+        data = self._make_with_pos(
+            current_price=11500000,
+            position={
+                "side": "buy",
+                "entry_price": 11600000,
+                "entry_amount": 0.004,
+                "stop_loss_price": 11420000,
+                "trailing_stop_distance": 80000,
+                "unrealized_pnl_jpy": -400,
+                "unrealized_pnl_pct": -1.72,
+                "price_diff": -100000,
+                "pnl_at_stop": -720,  # (11420000 - 11600000) * 0.004 = -720
+            },
+            exit_signal={"action": "hold"},
+        )
+        text = build_telegram_text("GMOC", "12:00", "btc_jpy", data)
+        assert "🛑 손절" in text
+        assert "청산 시 -¥720 손실" in text
+        assert "손절선 접근 중" in text
+
+    def test_sr05_short_profit_stop_below_entry_shows_protection(self):
+        """SR-05: 숏, 이익, stop<entry(숏 기준 유리) → pnl_at_stop>0 → 🛡️ 이익보호."""
+        # 숏: entry=10000000, stop=9700000 → pnl_at_stop=(entry-stop)*amount=(10000000-9700000)*0.01=3000
+        data = self._make_with_pos(
+            trend_icon="📉",
+            current_price=9500000,
+            position={
+                "side": "sell",
+                "entry_price": 10000000,
+                "entry_amount": 0.01,
+                "stop_loss_price": 9700000,
+                "trailing_stop_distance": 200000,
+                "unrealized_pnl_jpy": 5000,
+                "unrealized_pnl_pct": 5.0,
+                "price_diff": -500000,
+                "pnl_at_stop": 3000,  # (10000000 - 9700000) * 0.01 = 3000
+            },
+            exit_signal={"action": "hold"},
+        )
+        text = build_telegram_text("GMOC", "12:00", "btc_jpy", data)
+        assert "🛡️ 이익보호" in text
+        assert "+¥3,000" in text
+        assert "트레일링 스탑이 이익 보호 중" in text
+
+    def test_sr06_short_profit_stop_above_entry_shows_stop_loss(self):
+        """SR-06: 숏, 이익, stop>entry(숏 기준 불리) → pnl_at_stop<0 → 🛑 손절 + 전망: 진입가 아래."""
+        # 숏: entry=10000000, stop=10100000 → pnl_at_stop=(10000000-10100000)*0.01=-1000
+        data = self._make_with_pos(
+            trend_icon="📉",
+            current_price=9700000,
+            position={
+                "side": "sell",
+                "entry_price": 10000000,
+                "entry_amount": 0.01,
+                "stop_loss_price": 10100000,  # > entry (숏 불리)
+                "trailing_stop_distance": 400000,
+                "unrealized_pnl_jpy": 3000,
+                "unrealized_pnl_pct": 3.0,
+                "price_diff": -300000,
+                "pnl_at_stop": -1000,  # (10000000 - 10100000) * 0.01 = -1000
+            },
+            exit_signal={"action": "hold"},
+        )
+        text = build_telegram_text("GMOC", "12:00", "btc_jpy", data)
+        assert "🛑 손절" in text
+        assert "-¥1,000 손실" in text
+        assert "이익 중이나 스탑은 진입가 아래" in text
+
+    def test_sr07_stop_zero_no_pnl_at_stop_shows_breakeven(self):
+        """SR-07: stop=0, pnl_at_stop 미설정(=0) → 🔒 손익분기 행."""
+        data = self._make_with_pos(
+            position={
+                "side": "buy",
+                "entry_price": 10000000,
+                "entry_amount": 0.004,
+                "stop_loss_price": 0,
+                "trailing_stop_distance": 0,
+                "unrealized_pnl_jpy": 200,
+                "unrealized_pnl_pct": 0.5,
+                "price_diff": 50000,
+                # pnl_at_stop 키 없음 → 기본값 0
+            },
+        )
+        text = build_telegram_text("GMOC", "12:00", "btc_jpy", data)
+        assert "🔒 손익분기" in text
+
+    def test_sr08_tighten_stop_action_overrides_outlook(self):
+        """SR-08: tighten_stop 액션 → 전망: 추세 약화 — 스탑 조임 중 (pnl_at_stop 무시)."""
+        data = self._make_with_pos(
+            position={
+                "side": "buy",
+                "entry_price": 11500000,
+                "entry_amount": 0.004,
+                "stop_loss_price": 11600000,
+                "trailing_stop_distance": 200000,
+                "unrealized_pnl_jpy": 2000,
+                "unrealized_pnl_pct": 4.35,
+                "price_diff": 500000,
+                "pnl_at_stop": 400,  # 이익보호 상태지만
+            },
+            exit_signal={"action": "tighten_stop"},  # tighten이 우선
+        )
+        text = build_telegram_text("GMOC", "12:00", "btc_jpy", data)
+        assert "추세 약화 — 스탑 조임 중" in text
+        # pnl_at_stop>0 이지만 tighten_stop이 우선이므로 이익보호 전망 미표시
+        assert "트레일링 스탑이 이익 보호 중" not in text
 
     # ── 신규: 진입가 대비 차이 표시 ──────────────────────────────
 
@@ -2414,3 +2595,184 @@ class TestBuildTelegramTextRegimeLine:
         data = self._base(regime="unclear", active_strategy=None, has_position=False)
         text = build_telegram_text("GMOC", "16:00", "btc_jpy", data)
         assert "⚙️ 체제: 불명확" in text
+
+
+class TestBuildTelegramTextRegimeGateInfo:
+    """RG-D01~RG-D05: regime_gate_info 기반 체제 라인 표시."""
+
+    def _base_data(self, regime_gate_info=None, regime=None, active_strategy=None, has_position=False):
+        d = {
+            "trend_icon": "📈",
+            "current_price": 11_800_000,
+            "ema_slope_pct": 0.15,
+            "rsi": 55.0,
+            "regime": regime,
+            "active_strategy": active_strategy,
+            "regime_gate_info": regime_gate_info,
+            "jpy_available": 50_000,
+            "collateral": None,
+        }
+        if has_position:
+            d.update({
+                "position": {
+                    "side": "buy",
+                    "entry_price": 11_600_000,
+                    "entry_amount": 0.003,
+                    "stop_loss_price": 11_400_000,
+                    "trailing_stop_distance": 400_000,
+                    "unrealized_pnl_jpy": 600,
+                    "unrealized_pnl_pct": 1.03,
+                    "price_diff": 200_000,
+                },
+                "position_summary": "상승추세·보유 유지",
+                "exit_signal": None,
+            })
+        else:
+            d.update({
+                "position": None,
+                "position_summary": None,
+                "wait_direction": "long",
+                "market_summary": "확신 상승추세",
+                "entry_blockers": [],
+                "conditions_met": 5,
+                "conditions_total": 5,
+            })
+        return d
+
+    def test_rgd01_unclear_active_none_shows_진입차단(self):
+        """RG-D01: regime_gate_info={last_regime='unclear', cnt=2, active=None} → 진입 차단 중."""
+        data = self._base_data(regime_gate_info={
+            "last_regime": "unclear",
+            "consecutive_count": 2,
+            "active_strategy": None,
+        })
+        text = build_telegram_text("GMOC", "08:25", "btc_jpy", data)
+        assert "⚙️ 체제: 불명확(×2) | 진입 차단 중" in text
+
+    def test_rgd02_trending_active_trend_following_shown(self):
+        """RG-D02: regime_gate_info={last_regime='trending', cnt=5, active='trend_following'} → 활성: 추세추종."""
+        data = self._base_data(regime_gate_info={
+            "last_regime": "trending",
+            "consecutive_count": 5,
+            "active_strategy": "trend_following",
+        })
+        text = build_telegram_text("GMOC", "08:25", "btc_jpy", data)
+        assert "⚙️ 체제: 추세장(×5) | 활성: 추세추종" in text
+
+    def test_rgd03_gate_info_none_fallback_to_legacy(self):
+        """RG-D03: regime_gate_info=None → 구 regime/active_strategy 폴백."""
+        data = self._base_data(
+            regime_gate_info=None,
+            regime="trending",
+            active_strategy=None,
+        )
+        text = build_telegram_text("GMOC", "08:25", "btc_jpy", data)
+        # 폴백: _REGIME_LABEL 기반
+        assert "⚙️ 체제: 추세장 | 활성전략: -" in text
+
+    def test_rgd03b_gate_info_none_no_regime_no_line(self):
+        """RG-D03b: regime_gate_info=None + regime=None → 체제 라인 없음."""
+        data = self._base_data(regime_gate_info=None, regime=None, active_strategy=None)
+        text = build_telegram_text("GMOC", "08:25", "btc_jpy", data)
+        assert "⚙️ 체제:" not in text
+
+    def test_rgd04_unclear_with_position_shows_차단(self):
+        """RG-D04: 포지션 보유 중에도 체제 라인에 '진입 차단 중' 표시."""
+        data = self._base_data(
+            regime_gate_info={
+                "last_regime": "unclear",
+                "consecutive_count": 1,
+                "active_strategy": None,
+            },
+            has_position=True,
+        )
+        text = build_telegram_text("GMOC", "08:25", "btc_jpy", data)
+        assert "⚙️ 체제: 불명확(×1) | 진입 차단 중" in text
+
+    def test_rgd05_ranging_active_box_shown(self):
+        """RG-D05: last_regime='ranging', active='box_mean_reversion' → 활성: 박스역추세."""
+        data = self._base_data(regime_gate_info={
+            "last_regime": "ranging",
+            "consecutive_count": 3,
+            "active_strategy": "box_mean_reversion",
+        })
+        text = build_telegram_text("GMOC", "08:25", "btc_jpy", data)
+        assert "⚙️ 체제: 횡보장(×3) | 활성: 박스역추세" in text
+
+    def test_rgd06_last_regime_none_shows_dash(self):
+        """RG-D06: last_regime=None (warm-up) → '-' 표시."""
+        data = self._base_data(regime_gate_info={
+            "last_regime": None,
+            "consecutive_count": 0,
+            "active_strategy": None,
+        })
+        text = build_telegram_text("GMOC", "08:25", "btc_jpy", data)
+        assert "⚙️ 체제: -(×0) | 진입 차단 중" in text
+
+
+class TestBuildBoxTelegramTextRegimeGateInfo:
+    """BOX-RG01~BOX-RG04: build_box_telegram_text regime_gate_info 체제 라인."""
+
+    def _base_box_data(self, regime_gate_info=None):
+        return {
+            "health_line": "🟢 WS✅ 태스크4/4✅ 잔고✅",
+            "current_price": 11_900_000,
+            "box": None,
+            "position_label": "no_box",
+            "position": None,
+            "entry_blockers": ["박스 미형성"],
+            "conditions_met": 0,
+            "conditions_total": 3,
+            "formation_progress": None,
+            "next_scan_jst": None,
+            "next_scan_minutes_str": "",
+            "box_conditions_str": "tol=0.5% / 3+ 터치 필요",
+            "jpy_available": 50_000.0,
+            "coin_available": 0.0,
+            "basis_timeframe": "4h",
+            "candle_open_time_jst": "09:00",
+            "next_candle_minutes_str": "34분 후",
+            "strategy_name": "box_v1",
+            "strategy_id": 3,
+            "near_bound_pct": 1.5,
+            "tolerance_pct": 0.5,
+            "stop_loss_pct": 1.5,
+            "is_margin_trading": True,
+            "regime_gate_info": regime_gate_info,
+        }
+
+    def test_box_rg01_unclear_shows_진입차단(self):
+        """BOX-RG01: unclear×2 → ⚙️ 체제: 불명확(×2) | 진입 차단 중."""
+        data = self._base_box_data(regime_gate_info={
+            "last_regime": "unclear",
+            "consecutive_count": 2,
+            "active_strategy": None,
+        })
+        text = build_box_telegram_text("GMOC", "08:25", "btc_jpy", data)
+        assert "⚙️ 체제: 불명확(×2) | 진입 차단 중" in text
+
+    def test_box_rg02_trending_active_shown(self):
+        """BOX-RG02: trending×5 + active=trend_following → 체제 라인 포함."""
+        data = self._base_box_data(regime_gate_info={
+            "last_regime": "trending",
+            "consecutive_count": 5,
+            "active_strategy": "trend_following",
+        })
+        text = build_box_telegram_text("GMOC", "08:25", "btc_jpy", data)
+        assert "⚙️ 체제: 추세장(×5) | 활성: 추세추종" in text
+
+    def test_box_rg03_no_regime_gate_info_no_line(self):
+        """BOX-RG03: regime_gate_info=None → 체제 라인 없음."""
+        data = self._base_box_data(regime_gate_info=None)
+        text = build_box_telegram_text("GMOC", "08:25", "btc_jpy", data)
+        assert "⚙️ 체제:" not in text
+
+    def test_box_rg04_ranging_active_box_shown(self):
+        """BOX-RG04: ranging×3 + active=box_mean_reversion → 활성: 박스역추세."""
+        data = self._base_box_data(regime_gate_info={
+            "last_regime": "ranging",
+            "consecutive_count": 3,
+            "active_strategy": "box_mean_reversion",
+        })
+        text = build_box_telegram_text("GMOC", "08:25", "btc_jpy", data)
+        assert "⚙️ 체제: 횡보장(×3) | 활성: 박스역추세" in text

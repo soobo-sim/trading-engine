@@ -103,7 +103,7 @@ def test_post_advisory_success(db_factory):
     data = resp.json()
     assert data["action"] == "entry_long"
     assert data["exchange"] == "bitflyer"
-    assert data["pair"] == "BTC_JPY"
+    assert data["pair"] == "btc_jpy"  # normalize_pair: 저장 시 소문자 정규화
     assert data["confidence"] == pytest.approx(0.70)
     assert data["is_expired"] is False
     assert "id" in data
@@ -254,7 +254,7 @@ async def test_get_latest_expired_excluded_by_default(db_factory):
     # 만료된 advisory 직접 삽입
     async with db_factory() as session:
         row = RachelAdvisory(
-            pair="BTC_JPY",
+            pair="btc_jpy",  # normalize_pair 표준: 소문자
             exchange="bitflyer",
             action="hold",
             confidence=0.5,
@@ -279,7 +279,7 @@ async def test_get_latest_include_expired_returns_expired(db_factory):
     """
     async with db_factory() as session:
         row = RachelAdvisory(
-            pair="BTC_JPY",
+            pair="btc_jpy",  # normalize_pair 표준: 소문자
             exchange="bitflyer",
             action="entry_long",
             confidence=0.7,
@@ -325,7 +325,7 @@ async def test_get_latest_exchange_isolation(db_factory):
     # gmofx advisory 직접 삽입
     async with db_factory() as session:
         row = RachelAdvisory(
-            pair="BTC_JPY",
+            pair="btc_jpy",  # normalize_pair 표준: 소문자
             exchange="gmofx",  # 다른 exchange
             action="entry_long",
             confidence=0.7,
@@ -340,3 +340,84 @@ async def test_get_latest_exchange_isolation(db_factory):
     resp = client.get("/api/advisories/BTC_JPY/latest")
 
     assert resp.status_code == 404
+
+
+# ──────────────────────────────────────────────────────────────
+# hold_override_policy 엣지 케이스 — EC-01 ~ EC-04 (BUG-037)
+# ──────────────────────────────────────────────────────────────
+
+
+def test_ec01_post_hold_advisory_with_signal_entry_ok_policy(db_factory):
+    """
+    EC-01: action=hold, hold_override_policy=signal_entry_ok
+    → 201 + 응답에 hold_override_policy="signal_entry_ok" 반영
+    """
+    client = _build_client(db_factory)
+    body = {
+        "pair": "btc_jpy",
+        "action": "hold",
+        "confidence": 0.65,
+        "reasoning": "RSI 65 과매수로 홀드, 시그널 해소 시 진입 허용",
+        "hold_override_policy": "signal_entry_ok",
+        "ttl_hours": 5.0,
+    }
+    resp = client.post("/api/advisories", json=body)
+
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["action"] == "hold"
+    assert data["hold_override_policy"] == "signal_entry_ok"
+
+
+def test_ec02_post_entry_long_advisory_override_policy_forced_none(db_factory):
+    """
+    EC-02: action=entry_long, hold_override_policy=signal_entry_ok 지정
+    → hold 아닌 advisory이므로 DB에 "none" 강제 저장
+    → 응답 hold_override_policy="none"
+    """
+    client = _build_client(db_factory)
+    body = {
+        **_VALID_BODY,
+        "action": "entry_long",
+        "hold_override_policy": "signal_entry_ok",  # 무의미, 강제 none
+    }
+    resp = client.post("/api/advisories", json=body)
+
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["hold_override_policy"] == "none", (
+        "entry_long advisory에서 hold_override_policy는 none으로 강제되어야 함"
+    )
+
+
+def test_ec03_post_advisory_invalid_hold_override_policy(db_factory):
+    """
+    EC-03: hold_override_policy에 허용 외 값
+    → 400 INVALID_HOLD_OVERRIDE
+    """
+    client = _build_client(db_factory)
+    body = {
+        "pair": "btc_jpy",
+        "action": "hold",
+        "confidence": 0.5,
+        "reasoning": "유효하지 않은 hold_override_policy 테스트 (20자 이상)",
+        "hold_override_policy": "always_enter",  # 허용 외
+    }
+    resp = client.post("/api/advisories", json=body)
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"]["blocked_code"] == "INVALID_HOLD_OVERRIDE"
+
+
+def test_ec04_post_advisory_default_hold_override_policy_is_none(db_factory):
+    """
+    EC-04: hold_override_policy 미지정 (기본값)
+    → 응답에 hold_override_policy="none" 포함
+    """
+    client = _build_client(db_factory)
+    resp = client.post("/api/advisories", json=_VALID_BODY)
+
+    assert resp.status_code == 201
+    data = resp.json()
+    assert "hold_override_policy" in data
+    assert data["hold_override_policy"] == "none"

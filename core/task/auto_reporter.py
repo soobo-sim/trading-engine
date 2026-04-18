@@ -213,13 +213,8 @@ class AutoReporter:
                 regime_gate = getattr(trend_mgr, "_regime_gate", None) if trend_mgr else None
                 if regime_gate is not None and regime_gate.active_strategy is not None:
                     if style != regime_gate.active_strategy:
-                        registry = getattr(state, "strategy_registry", None)
-                        mgr = registry.get(style) if registry is not None else None
-                        # 포지션 확인 불가(registry 없음·매니저 미등록·get_position 없음)이면
-                        # 안전 폴백으로 보고 전송 (누락보다 중복이 낫다).
-                        if mgr is None or not hasattr(mgr, "get_position"):
-                            pass  # 확인 불가 → 보고 전송
-                        elif mgr.get_position(pair) is None:
+                        has_pos = await self._has_open_position(style, pair, db)
+                        if not has_pos:
                             logger.debug(
                                 f"[AutoReporter] {pair} {style} 보고 스킵 "
                                 f"(체제 불일치: active={regime_gate.active_strategy})"
@@ -258,6 +253,47 @@ class AutoReporter:
                     _last_report_time["last"] = _time.time()
                 logger.debug(f"자동 보고 전송 완료: {pair}")
 
+    async def _has_open_position(
+        self,
+        style: str,
+        pair: str,
+        db: AsyncSession,
+    ) -> bool:
+        """DB에서 해당 전략의 미청산 포지션 존재 여부를 확인.
+
+        매니저의 인메모리 get_position() 대신 DB 포지션 테이블을 직접 조회하여
+        전략별 포지션을 정확히 구분한다.
+        """
+        state = self._state
+        style_to_model_attr = {
+            "trend_following": "trend_position",
+            "box_mean_reversion": "box_position",
+            "cfd_trend_following": "cfd_position",
+        }
+        model_attr = style_to_model_attr.get(style)
+        if model_attr is None:
+            logger.debug(f"[AutoReporter] _has_open_position: 알 수 없는 style={style!r} → False")
+            return False
+
+        Model = getattr(state.models, model_attr, None)
+        if Model is None:
+            logger.debug(f"[AutoReporter] _has_open_position: models.{model_attr} 없음 → False")
+            return False
+
+        try:
+            pair_col = getattr(Model, state.pair_column)
+            stmt = (
+                select(Model.id)
+                .where(pair_col == pair)
+                .where(Model.realized_pnl_jpy.is_(None))
+                .limit(1)
+            )
+            result = await db.execute(stmt)
+            return result.scalar_one_or_none() is not None
+        except Exception as e:
+            logger.warning(f"[AutoReporter] _has_open_position DB 조회 실패 ({style}, {pair}): {e}")
+            return False
+
     async def _generate_report(
         self,
         style: str,
@@ -288,10 +324,13 @@ class AutoReporter:
                 trend_manager=state.trend_manager, **kwargs
             )
         elif style == "box_mean_reversion":
+            _trend_mgr = getattr(state, "trend_manager", None)
+            _rg = getattr(_trend_mgr, "_regime_gate", None) if _trend_mgr else None
             report = await generate_box_report(
                 health_checker=state.health_checker,
                 box_model=state.models.box,
                 box_position_model=state.models.box_position,
+                regime_gate=_rg,
                 **kwargs,
             )
         elif style == "cfd_trend_following":

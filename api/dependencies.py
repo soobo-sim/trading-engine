@@ -52,8 +52,9 @@ class AppState:
     strategy_registry: StrategyRegistry | None = None
 
     def normalize_pair(self, pair: str) -> str:
-        """GMO Coin: 소문자 pair 반환."""
-        return pair.lower()
+        """pair 정규화 — core.pair.normalize_pair 위임."""
+        from core.pair import normalize_pair as _normalize
+        return _normalize(pair)
 
 
 def get_state(request: Request) -> AppState:

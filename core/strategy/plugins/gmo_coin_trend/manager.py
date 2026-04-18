@@ -2,10 +2,11 @@
 GmoCoinTrendManager — GMO Coin 레버리지 추세추종 매니저.
 
 MarginTrendManager(CdfTrendFollowingManager) 상속.
-GMO Coin 어댑터와 호환되지 않는 2개 메서드만 오버라이드:
+GMO Coin 어댑터와 호환되지 않는 메서드만 오버라이드:
 
   - _open_position: MARKET_BUY = JPY 전달 (어댑터 내부 `jpy / ticker.ask` → BTC 변환)
   - _close_position_impl: close_position_bulk API 사용 (반대매매 사용 금지)
+  - _update_trailing_stop: 인메모리 스탑 갱신 후 changeLosscutPrice 거래소 동기화
 
 나머지 양방향 로직(SL·trailing·position detection·exit_warning·스탑 타이트닝 등)은
 CfdTrendFollowingManager에서 그대로 상속.
@@ -23,6 +24,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
+from core.exchange.errors import ExchangeError
 from core.exchange.types import OrderType, Position
 from core.strategy.plugins.cfd_trend_following.manager import MarginTrendManager as CfdTrendFollowingManager
 
@@ -312,6 +314,35 @@ class GmoCoinTrendManager(CfdTrendFollowingManager):
                 f"[GmocMgr] {product_code}: {side} 청산 완료 reason={reason} "
                 f"order_id={order.order_id} size={close_size}"
             )
+        except ExchangeError as e:
+            if "ERR-422" in str(e):
+                # 거래소에 포지션 없음 → 이미 청산된 것으로 간주
+                logger.warning(
+                    f"[GmocMgr] {product_code}: 거래소 포지션 없음(ERR-422) "
+                    f"→ 인메모리 클리어 reason={reason}"
+                )
+                prev_pos = self._position.get(product_code)
+                prev_db_id = prev_pos.db_record_id if prev_pos else None
+                self._position[product_code] = None
+                if prev_db_id:
+                    try:
+                        exec_price = self._latest_price.get(product_code, 0)
+                        await self._record_close(
+                            db_record_id=prev_db_id,
+                            product_code=product_code,
+                            side=side,
+                            order_id="",
+                            price=exec_price,
+                            size=close_size,
+                            reason=f"{reason}_exchange_already_closed",
+                            entry_price=prev_pos.entry_price if prev_pos else None,
+                        )
+                    except Exception as rec_err:
+                        logger.error(
+                            f"[GmocMgr] {product_code}: ERR-422 후 DB 기록 실패 — {rec_err}"
+                        )
+            else:
+                logger.error(f"[GmocMgr] {product_code}: 청산 오류 — {e}", exc_info=True)
         except Exception as e:
             logger.error(f"[GmocMgr] {product_code}: 청산 오류 — {e}", exc_info=True)
 
@@ -521,3 +552,53 @@ class GmoCoinTrendManager(CfdTrendFollowingManager):
         """
         # GMO Coin은 keep_rate / FX 시장 휴장 체크 불필요 → 통과
         return True
+
+    # ──────────────────────────────────────────
+    # 트레일링 스탑 + 거래소 ロスカットレート 동기화
+    # ──────────────────────────────────────────
+
+    async def _update_trailing_stop(
+        self, pair, pos, current_price, atr, ema_slope_pct, rsi, params
+    ) -> None:
+        """인메모리 트레일링 스탑 갱신 후 거래소 ロスカットレート에 동기화.
+
+        부모(CdfTrendFollowingManager)가 pos.stop_loss_price를 갱신하면,
+        해당 값을 GMO Coin 건옥의 losscutPrice로 즉시 동기화한다.
+        봇 다운 / WS 끊김 시에도 거래소 자체가 강제청산을 실행하는 안전망.
+        """
+        sl_before = pos.stop_loss_price
+        await super()._update_trailing_stop(pair, pos, current_price, atr, ema_slope_pct, rsi, params)
+        sl_after = pos.stop_loss_price
+
+        # 스탑이 실제로 갱신된 경우에만 거래소 동기화
+        if sl_after is not None and sl_after != sl_before:
+            await self._sync_losscut_price(pair, sl_after)
+
+    async def _sync_losscut_price(self, pair: str, new_sl: float) -> None:
+        """현재 보유 중인 모든 건옥의 ロスカットレート를 new_sl로 동기화.
+
+        피라미딩으로 복수 건옥이 있을 수 있으므로 get_positions()로 전체 조회.
+        실패해도 인메모리 스탑 로직에 영향 없음 (WARNING 로그만).
+        """
+        if not hasattr(self._adapter, "get_positions") or not hasattr(self._adapter, "change_losscut_price"):
+            return
+        try:
+            fx_positions = await self._adapter.get_positions(pair)
+            if not fx_positions:
+                return
+            for fx_pos in fx_positions:
+                if fx_pos.position_id is None:
+                    continue
+                ok = await self._adapter.change_losscut_price(fx_pos.position_id, new_sl)
+                if not ok:
+                    logger.warning(
+                        f"[GmocMgr] {pair}: ロスカットレート 동기화 실패 "
+                        f"(position_id={fx_pos.position_id}, sl=¥{new_sl})"
+                    )
+                else:
+                    logger.debug(
+                        f"[GmocMgr] {pair}: ロスカットレート 동기화 완료 "
+                        f"(position_id={fx_pos.position_id}, sl=¥{new_sl})"
+                    )
+        except Exception as e:
+            logger.warning(f"[GmocMgr] {pair}: ロスカットレート 동기화 오류 — {e}")

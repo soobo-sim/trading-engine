@@ -362,7 +362,7 @@ class TestSetupTelegramLogging:
 
     @pytest.mark.asyncio
     async def test_saveus_alert_handler_registered(self):
-        """SAVEUS_CHAT_ID 설정 시 AlertHandler 1개만 등록."""
+        """SAVEUS_CHAT_ID 설정 시 PunisherDigest + AlertHandler 2개 등록."""
         _handlers.clear()
         env = {
             "TELEGRAM_BOT_TOKEN": "tok",
@@ -372,15 +372,19 @@ class TestSetupTelegramLogging:
             await setup_telegram_logging("bitflyer")
 
         try:
-            assert len(_handlers) == 1
+            assert len(_handlers) == 2
             types = {type(h) for h in _handlers}
             assert TelegramAlertHandler in types
+            assert TelegramDigestHandler in types
+            # PunisherDigest 확인
+            digest = next(h for h in _handlers if isinstance(h, TelegramDigestHandler))
+            assert digest._domain == "punisher"
         finally:
             await shutdown_telegram_logging()
 
     @pytest.mark.asyncio
     async def test_all_channels(self):
-        """HeartBeat + SaveUs 모두 설정 시 핸들러 2개(Digest+Alert) 등록."""
+        """HeartBeat + SaveUs 모두 설정 시 핸들러 3개(JudgeDigest + PunisherDigest + Alert) 등록."""
         _handlers.clear()
         env = {
             "TELEGRAM_BOT_TOKEN": "tok",
@@ -391,10 +395,14 @@ class TestSetupTelegramLogging:
             await setup_telegram_logging("gmofx")
 
         try:
-            assert len(_handlers) == 2
-            types = {type(h) for h in _handlers}
-            assert TelegramDigestHandler in types
+            assert len(_handlers) == 3
+            types = [type(h) for h in _handlers]
+            assert types.count(TelegramDigestHandler) == 2  # judge + punisher
             assert TelegramAlertHandler in types
+            # 도메인 분리 확인
+            domains = [getattr(h, "_domain", None) for h in _handlers if isinstance(h, TelegramDigestHandler)]
+            assert "judge" in domains
+            assert "punisher" in domains
         finally:
             await shutdown_telegram_logging()
 
@@ -428,9 +436,15 @@ class TestSetupTelegramLogging:
         with patch.dict("os.environ", env, clear=True):
             await setup_telegram_logging("bitflyer")
 
+        # HEARTBEAT_CHAT_ID만 설정 → JudgeDigest 핸들러 1개
+        assert len(_handlers) == 1
         h = _handlers[0]
+        assert isinstance(h, TelegramDigestHandler)
+        assert h._domain == "judge"
+
+        # judge 도메인 logger의 INFO 레코드 → 수집됨
         record = logging.LogRecord(
-            name="t", level=logging.INFO, pathname="", lineno=0,
+            name="core.decision.rule_based", level=logging.INFO, pathname="", lineno=0,
             msg="残 메시지", args=(), exc_info=None,
         )
         h.emit(record)
@@ -461,7 +475,7 @@ class TestSetupTelegramLogging:
             await setup_telegram_logging("bitflyer")  # 두 번째 호출
 
         try:
-            assert len(_handlers) == 2  # 4가 되면 안 됨
+            assert len(_handlers) == 3  # 6이 되면 안 됨 (JudgeDigest + PunisherDigest + Alert)
         finally:
             await shutdown_telegram_logging()
 
@@ -577,9 +591,10 @@ class TestDefaultValues:
             await setup_telegram_logging("bitflyer")
 
         try:
-            # TelegramInfoHandler가 등록되지 않음을 확인
+            # JudgeDigest 핸들러 1개만 등록
             assert len(_handlers) == 1
             assert isinstance(_handlers[0], TelegramDigestHandler)
+            assert _handlers[0]._domain == "judge"
         finally:
             await shutdown_telegram_logging()
 
@@ -602,4 +617,85 @@ class TestDefaultValues:
             assert digest_handlers[0]._interval == 300
         finally:
             await shutdown_telegram_logging()
+
+
+# ─── 도메인 라우팅 검증 ─────────────────────────────────────────────
+
+class TestDomainRouting:
+    """_get_domain() 및 도메인별 수집 필터 테스트."""
+
+    def _make_record(self, name: str, level: int = logging.INFO) -> logging.LogRecord:
+        return logging.LogRecord(
+            name=name, level=level, pathname="", lineno=0,
+            msg="test", args=(), exc_info=None,
+        )
+
+    def test_judge_prefixes_mapped_correctly(self):
+        """JUDGE_PREFIXES 속한 logger가 'judge'로 분류됨."""
+        from core.logging.telegram_handlers import _get_domain
+        assert _get_domain("core.decision.rule_based") == "judge"
+        assert _get_domain("core.safety.guardrails") == "judge"
+        assert _get_domain("core.execution.orchestrator") == "judge"
+        assert _get_domain("core.monitoring.event_detector") == "judge"
+        assert _get_domain("core.data.hub") == "judge"
+        assert _get_domain("core.strategy.signals") == "judge"
+
+    def test_punisher_prefixes_mapped_correctly(self):
+        """PUNISHER_PREFIXES 속한 logger가 'punisher'로 분류됨."""
+        from core.logging.telegram_handlers import _get_domain
+        assert _get_domain("core.strategy.base_trend") == "punisher"
+        assert _get_domain("core.strategy.plugins.gmo_coin_trend") == "punisher"
+        assert _get_domain("core.execution.regime_gate") == "punisher"
+        assert _get_domain("core.task.auto_reporter") == "punisher"
+        assert _get_domain("adapters.gmo_coin.client") == "punisher"
+        assert _get_domain("main") == "punisher"
+        assert _get_domain("api.routes.strategies") == "punisher"
+
+    def test_unknown_logger_fallback_to_shared(self):
+        """JUDGE/PUNISHER 모두 매칭 안 되면 'shared' fallback."""
+        from core.logging.telegram_handlers import _get_domain
+        assert _get_domain("unknown.module") == "shared"
+        assert _get_domain("uvicorn.access") == "shared"
+
+    def test_judge_digest_filters_punisher_logs(self):
+        """domain='judge' 핸들러는 punisher logger INFO를 무시."""
+        h = TelegramDigestHandler("tok", "chat", domain="judge")
+        record = self._make_record("core.strategy.base_trend")
+        h.emit(record)
+        assert len(h._buffer) == 0
+
+    def test_judge_digest_collects_judge_logs(self):
+        """domain='judge' 핸들러는 judge logger INFO를 수집."""
+        h = TelegramDigestHandler("tok", "chat", domain="judge")
+        record = self._make_record("core.decision.rule_based")
+        h.emit(record)
+        assert len(h._buffer) == 1
+
+    def test_punisher_digest_filters_judge_logs(self):
+        """domain='punisher' 핸들러는 judge logger INFO를 무시."""
+        h = TelegramDigestHandler("tok", "chat", domain="punisher")
+        record = self._make_record("core.decision.rule_based")
+        h.emit(record)
+        assert len(h._buffer) == 0
+
+    def test_punisher_digest_collects_punisher_logs(self):
+        """domain='punisher' 핸들러는 punisher logger INFO를 수집."""
+        h = TelegramDigestHandler("tok", "chat", domain="punisher")
+        record = self._make_record("core.task.auto_reporter")
+        h.emit(record)
+        assert len(h._buffer) == 1
+
+    def test_punisher_digest_collects_shared_logs(self):
+        """domain='punisher' 핸들러는 shared(fallback) logger도 수집."""
+        h = TelegramDigestHandler("tok", "chat", domain="punisher")
+        record = self._make_record("uvicorn.access")
+        h.emit(record)
+        assert len(h._buffer) == 1
+
+    def test_domain_none_collects_all(self):
+        """domain=None(legacy) 시 모든 INFO 수집."""
+        h = TelegramDigestHandler("tok", "chat", domain=None)
+        h.emit(self._make_record("core.decision.rule_based"))
+        h.emit(self._make_record("core.task.auto_reporter"))
+        assert len(h._buffer) == 2
 

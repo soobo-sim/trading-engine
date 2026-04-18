@@ -1169,6 +1169,11 @@ class RachelAdvisory(Base):
     # adjust_risk 전용 (action=adjust_risk 시에만 사용)
     adjustments = Column(JSON, nullable=True)              # {stop_loss_pct, take_profit_ratio, trailing_atr_multiplier, force_exit}
 
+    # hold 시 엔진 자율 진입 허용 정책
+    # "none" = 절대 hold 유지 (기본값)
+    # "signal_entry_ok" = entry_ok/entry_sell 시그널이면 진입 허용 (Rachel이 기술적 사유로 hold 시)
+    hold_override_policy = Column(String(30), nullable=False, server_default="none")
+
     # 시간
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     expires_at = Column(DateTime(timezone=True), nullable=False)  # 이후 v1 폴백

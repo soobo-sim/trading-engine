@@ -224,3 +224,61 @@ class RegimeGate:
     def consecutive_count(self) -> int:
         """현재 regime 연속 횟수."""
         return self._consecutive_count
+
+    @property
+    def last_candle_key(self) -> str | None:
+        """마지막 갱신된 캔들 키 (읽기 전용)."""
+        return self._last_candle_key
+
+    # ── 직렬화 / 복원 ────────────────────────────────────────────
+
+    def to_dict(self) -> dict:
+        """영속화용 상태 직렬화.
+
+        Returns:
+            pair, active_strategy, regime_history, last_switch_at,
+            switch_count, consecutive_count, consecutive_regime,
+            last_candle_key 를 담은 dict.
+        """
+        return {
+            "pair": self._pair,
+            "active_strategy": self._active_strategy,
+            "regime_history": list(self._regime_history),
+            "last_switch_at": self._last_switch_at,
+            "switch_count": self._switch_count,
+            "consecutive_count": self._consecutive_count,
+            "consecutive_regime": self._consecutive_regime,
+            "last_candle_key": self._last_candle_key,
+        }
+
+    def restore(self, state: dict) -> None:
+        """DB에서 읽어온 state dict로 내부 상태를 복원한다.
+
+        빈 dict이면 즉시 return (초기 상태 유지).
+        pair는 생성자에서 고정되므로 복원 대상에서 제외.
+
+        Args:
+            state: to_dict() 동일 구조의 dict. 빈 dict이면 스킵.
+        """
+        if not state:
+            return
+
+        self._active_strategy = state.get("active_strategy")
+        history = state.get("regime_history", [])
+        self._regime_history = list(history)[-_STREAK_REQUIRED:]
+        self._last_switch_at = state.get("last_switch_at")
+        self._switch_count = int(state.get("switch_count") or 0)
+        self._consecutive_count = int(state.get("consecutive_count") or 0)
+        self._consecutive_regime = state.get("consecutive_regime")
+        self._last_candle_key = state.get("last_candle_key")
+
+        active_label = (
+            _STRATEGY_LABEL.get(self._active_strategy, self._active_strategy)
+            if self._active_strategy
+            else "없음"
+        )
+        logger.info(
+            f"{_LOG_PREFIX} {self._pair}: DB에서 상태 복원\n"
+            f"  활성전략: {active_label} | 이력: {self._regime_history}\n"
+            f"  candle_key: {self._last_candle_key}"
+        )

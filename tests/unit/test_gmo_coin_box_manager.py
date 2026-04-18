@@ -13,6 +13,15 @@ GmoCoinBoxManager 단위 테스트.
   BX-09: 부모 _compute_signal None이면 None 반환
   BX-10: _compute_signal 반환에 box_detected, box_upper, box_lower, range_pct 포함
   BX-11: regime="ranging" 항상 반환 (RegimeGate 로그용)
+  BM-P01: DB 미청산 없음 + 어댑터 포지션 있음 → None (trend 포지션 무시)
+  BM-P02: DB 미청산 있음 + 어댑터 포지션 있음 → Position(...)
+  BM-P03: DB 미청산 있음 + 어댑터 포지션 없음 → None
+  BM-P04: DB 조회 예외 → None + WARNING
+  BX-07: RegimeGate 차단 시 entry_ok 진입 스킵
+  BX-08: RegimeGate 차단 없을 시 entry_ok 진입 허용
+  BX-09: 부모 _compute_signal None이면 None 반환
+  BX-10: _compute_signal 반환에 box_detected, box_upper, box_lower, range_pct 포함
+  BX-11: regime="ranging" 항상 반환 (RegimeGate 로그용)
 """
 from __future__ import annotations
 
@@ -303,3 +312,100 @@ class TestBoxManagerRegimeGate:
 
         mgr._on_entry_signal.assert_not_called()
         assert result is False
+
+
+# ──────────────────────────────────────────────────────────────
+# BM-P01~P04: _detect_existing_position DB 게이트 테스트
+# ──────────────────────────────────────────────────────────────
+
+class TestDetectExistingPositionDbGate:
+    """_detect_existing_position — DB 기반 포지션 게이트 오버라이드 테스트."""
+
+    def _make_manager(self):
+        from adapters.database.models import create_box_position_model
+        BoxPos = create_box_position_model("gmoc", pair_column="pair")
+
+        adapter = MagicMock()
+        supervisor = MagicMock()
+        supervisor.is_running = MagicMock(return_value=False)
+        session_factory = AsyncMock()
+        candle_model = MagicMock()
+
+        mgr = GmoCoinBoxManager(
+            adapter=adapter,
+            supervisor=supervisor,
+            session_factory=session_factory,
+            candle_model=candle_model,
+            cfd_position_model=BoxPos,
+            pair_column="pair",
+        )
+        return mgr
+
+    def _make_session_factory(self, db_row_id=None, raise_exc=False):
+        """DB mock 생성. db_row_id가 있으면 미청산 포지션 존재."""
+        mock_result = MagicMock()
+        if raise_exc:
+            mock_result.scalar_one_or_none.side_effect = Exception("DB error")
+        else:
+            mock_result.scalar_one_or_none.return_value = db_row_id
+
+        mock_db = AsyncMock()
+        mock_db.execute.return_value = mock_result
+        mock_db.__aenter__ = AsyncMock(return_value=mock_db)
+        mock_db.__aexit__ = AsyncMock(return_value=False)
+        return MagicMock(return_value=mock_db)
+
+    @pytest.mark.asyncio
+    async def test_bm_p01_no_db_position_ignores_adapter(self):
+        """BM-P01: DB 미청산 없음 + 어댑터 포지션 있음 → None (trend 포지션 무시)."""
+        from core.exchange.types import Position
+        mgr = self._make_manager()
+        mgr._session_factory = self._make_session_factory(db_row_id=None)
+
+        fake_position = Position(pair="btc_jpy", entry_price=10_000_000, entry_amount=0.004)
+        with patch(
+            "core.strategy.plugins.gmo_coin_box.manager.GmoCoinTrendManager._detect_existing_position",
+            new=AsyncMock(return_value=fake_position),
+        ):
+            result = await mgr._detect_existing_position("btc_jpy")
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_bm_p02_db_position_exists_returns_adapter_position(self):
+        """BM-P02: DB 미청산 있음 + 어댑터 포지션 있음 → Position(...)."""
+        from core.exchange.types import Position
+        mgr = self._make_manager()
+        mgr._session_factory = self._make_session_factory(db_row_id=7)
+
+        fake_position = Position(pair="btc_jpy", entry_price=10_000_000, entry_amount=0.004)
+        with patch(
+            "core.strategy.plugins.gmo_coin_box.manager.GmoCoinTrendManager._detect_existing_position",
+            new=AsyncMock(return_value=fake_position),
+        ):
+            result = await mgr._detect_existing_position("btc_jpy")
+
+        assert result is fake_position
+
+    @pytest.mark.asyncio
+    async def test_bm_p03_db_position_exists_but_adapter_empty(self):
+        """BM-P03: DB 미청산 있음 + 어댑터 포지션 없음 → None."""
+        mgr = self._make_manager()
+        mgr._session_factory = self._make_session_factory(db_row_id=7)
+
+        with patch(
+            "core.strategy.plugins.gmo_coin_box.manager.GmoCoinTrendManager._detect_existing_position",
+            new=AsyncMock(return_value=None),
+        ):
+            result = await mgr._detect_existing_position("btc_jpy")
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_bm_p04_db_exception_returns_none(self):
+        """BM-P04: DB 조회 예외 → None + WARNING 로그."""
+        mgr = self._make_manager()
+        mgr._session_factory = self._make_session_factory(raise_exc=True)
+
+        result = await mgr._detect_existing_position("btc_jpy")
+        assert result is None

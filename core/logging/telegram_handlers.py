@@ -1,8 +1,13 @@
 """
-Telegram 로그 핸들러 — 로그 레벨별 채널 분리 전송.
+Telegram 로그 핸들러 — 도메인별 채널 분리 전송.
 
-- TelegramDigestHandler : INFO만 → HeartBeat 채널 (5분 배치)
-- TelegramAlertHandler  : WARNING+ → Save Us 그룹 (즉시, 5초 디바운스)
+- TelegramDomainHandler : logger prefix 기반으로 판단/실행 도메인 채널에 INFO+ 전송
+  - 판단 도메인 (TELEGRAM_HEARTBEAT_CHAT_ID): 시그널 변경, 판단 결과, advisory, Guardrail
+  - 실행 도메인 (TELEGRAM_SAVEUS_CHAT_ID): 주문 실행, 포지션, SL, 잔고, 어댑터
+  - WARNING+: 양쪽 채널에 모두 전송 (이중 안전)
+- TelegramAlertHandler  : WARNING+ → 실행 도메인 그룹 즉시 (5초 디바운스, 레거시 호환)
+
+JUDGE_PREFIXES / PUNISHER_PREFIXES 로 라우팅 규칙 관리.
 
 사용:
     setup_telegram_logging() 을 lifespan 내에서 호출.
@@ -22,6 +27,54 @@ logger = logging.getLogger(__name__)
 TELEGRAM_API = "https://api.telegram.org/bot{token}/sendMessage"
 TELEGRAM_MSG_MAX = 4096
 JST = timezone(timedelta(hours=9))
+
+# ── 도메인 라우팅 규칙 ──────────────────────────────
+# logger.name이 아래 prefix로 시작하면 판단 도메인 채널 전송
+JUDGE_PREFIXES: frozenset[str] = frozenset({
+    "core.data",
+    "core.decision",
+    "core.safety",
+    "core.analysis",
+    "core.strategy.signals",
+    "core.strategy.box_signals",
+    "core.strategy.scoring",
+    "core.execution.orchestrator",
+    "core.execution.approval",
+    "core.monitoring.event_detector",
+})
+
+# logger.name이 아래 prefix로 시작하면 실행 도메인 채널 전송
+PUNISHER_PREFIXES: frozenset[str] = frozenset({
+    "core.strategy.base_trend",
+    "core.strategy.plugins",
+    "core.strategy.registry",
+    "core.strategy.snapshot_collector",
+    "core.strategy.switch_recommender",
+    "core.execution.regime_gate",
+    "core.execution.executor",
+    "core.monitoring.health",
+    "core.monitoring.safety_checks",
+    "core.monitoring.daily_briefing",
+    "core.monitoring.kill_checker",
+    "core.monitoring.maintenance",
+    "core.task",
+    "core.learning",
+    "core.notifications",
+    "adapters",
+    "api",
+    "main",
+})
+
+
+def _get_domain(logger_name: str) -> str:
+    """logger name → 'judge' | 'punisher' | 'shared'."""
+    for prefix in JUDGE_PREFIXES:
+        if logger_name == prefix or logger_name.startswith(prefix + "."):
+            return "judge"
+    for prefix in PUNISHER_PREFIXES:
+        if logger_name == prefix or logger_name.startswith(prefix + "."):
+            return "punisher"
+    return "shared"  # 미분류 → 실행 도메인으로 fallback
 
 
 # ── 유틸 ─────────────────────────────────────────────
@@ -51,7 +104,13 @@ def _format_time(ts: float) -> str:
 # ── INFO 다이제스트 (HeartBeat) ──────────────────────
 
 class TelegramDigestHandler(logging.Handler):
-    """INFO 레벨만 버퍼링 → 5분 배치로 HeartBeat 채널 전송."""
+    """INFO 레벨만 버퍼링 → 배치로 도메인 채널 전송.
+
+    domain 파라미터:
+        None  — 모든 INFO 수집 (레거시 동작)
+        'judge'    — JUDGE_PREFIXES에 속하는 logger만 수집
+        'punisher' — PUNISHER_PREFIXES 또는 미분류 logger만 수집
+    """
 
     def __init__(
         self,
@@ -59,12 +118,14 @@ class TelegramDigestHandler(logging.Handler):
         chat_id: str,
         exchange: str = "??",
         interval_sec: int = 300,
+        domain: str | None = None,
     ):
         super().__init__(level=logging.INFO)
         self._bot_token = bot_token
         self._chat_id = chat_id
         self._exchange = exchange.upper()
         self._interval = interval_sec
+        self._domain = domain  # 'judge' | 'punisher' | None
         self._buffer: list[tuple[float, str]] = []  # (created, message)
         self._task: asyncio.Task | None = None
 
@@ -72,6 +133,13 @@ class TelegramDigestHandler(logging.Handler):
         # INFO만 수집 (DEBUG 제외, WARNING 이상 제외)
         if record.levelno != logging.INFO:
             return
+        # 도메인 필터
+        if self._domain is not None:
+            record_domain = _get_domain(record.name)
+            if self._domain == "judge" and record_domain != "judge":
+                return
+            if self._domain == "punisher" and record_domain == "judge":
+                return
         self._buffer.append((record.created, record.getMessage()))
 
     async def start(self) -> None:
@@ -112,7 +180,7 @@ class TelegramDigestHandler(logging.Handler):
         await _send_telegram(self._bot_token, self._chat_id, text)
 
 
-# ── WARNING+ 즉시 알림 (Save Us) ───────────────────
+# ── WARNING+ 즉시 알림 (실행 도메인 채널) ───────────────────
 
 class TelegramAlertHandler(logging.Handler):
     """WARNING 이상 → Save Us 그룹 즉시 전송 (5초 디바운스)."""
@@ -173,9 +241,15 @@ async def setup_telegram_logging(exchange: str) -> None:
 
     환경변수:
         TELEGRAM_BOT_TOKEN         — 공유 봇 토큰 (필수)
-        TELEGRAM_HEARTBEAT_CHAT_ID — HeartBeat 채널 (INFO 다이제스트, 5분 배치)
-        TELEGRAM_SAVEUS_CHAT_ID    — Save Us 그룹 (WARNING+ 즉시)
-        LOG_DIGEST_INTERVAL_SEC    — HeartBeat 다이제스트 주기 (기본 300)
+        TELEGRAM_HEARTBEAT_CHAT_ID — 판단 도메인 채널 (Judge INFO+, WARNING+ 이중 전송)
+        TELEGRAM_SAVEUS_CHAT_ID    — 실행 도메인 채널 (Punisher INFO+, WARNING+ 즉시)
+        LOG_DIGEST_INTERVAL_SEC    — 다이제스트 주기 (기본 300초)
+
+    라우팅:
+        - logger prefix → JUDGE_PREFIXES  : 판단 도메인 채널
+        - logger prefix → PUNISHER_PREFIXES : 실행 도메인 채널
+        - WARNING+ : 양쪽 채널에 모두 전송 (이중 안전)
+        - 미분류(shared/api) : 실행 도메인 채널로 fallback
     """
     import os
 
@@ -186,31 +260,50 @@ async def setup_telegram_logging(exchange: str) -> None:
     root = logging.getLogger()
     loop = asyncio.get_running_loop()
 
-    # 이미 등록된 핸들러 타입 집합 (중복 등록 방어)
     existing_types = {type(h) for h in _handlers}
 
-    # HeartBeat 채널 (INFO 다이제스트)
-    heartbeat_chat = os.environ.get("TELEGRAM_HEARTBEAT_CHAT_ID", "")
-    if heartbeat_chat and TelegramDigestHandler not in existing_types:
-        digest_interval = int(os.environ.get("LOG_DIGEST_INTERVAL_SEC", "300"))
-        h = TelegramDigestHandler(
-            bot_token, heartbeat_chat,
-            exchange=exchange, interval_sec=digest_interval,
-        )
-        root.addHandler(h)
-        await h.start()
-        _handlers.append(h)
+    judge_chat = os.environ.get("TELEGRAM_HEARTBEAT_CHAT_ID", "")
+    punisher_chat = os.environ.get("TELEGRAM_SAVEUS_CHAT_ID", "")
+    digest_interval = int(os.environ.get("LOG_DIGEST_INTERVAL_SEC", "300"))
 
-    # Save Us 그룹 (WARNING+ 즉시)
-    saveus_chat = os.environ.get("TELEGRAM_SAVEUS_CHAT_ID", "")
-    if saveus_chat:
-        if TelegramAlertHandler not in existing_types:
-            h_alert = TelegramAlertHandler(
-                bot_token, saveus_chat, exchange=exchange,
+    # 판단 도메인 핸들러 (Judge 채널, JUDGE logger만 수집)
+    if judge_chat:
+        judge_registered = any(
+            isinstance(h, TelegramDigestHandler) and getattr(h, "_domain", None) == "judge"
+            for h in _handlers
+        )
+        if not judge_registered:
+            h_judge = TelegramDigestHandler(
+                bot_token, judge_chat,
+                exchange=exchange, interval_sec=digest_interval, domain="judge",
             )
-            h_alert.set_loop(loop)
-            root.addHandler(h_alert)
-            _handlers.append(h_alert)
+            root.addHandler(h_judge)
+            await h_judge.start()
+            _handlers.append(h_judge)
+
+    # 실행 도메인 핸들러 (Punisher 채널, Punisher/shared logger 수집)
+    if punisher_chat:
+        punisher_registered = any(
+            isinstance(h, TelegramDigestHandler) and getattr(h, "_domain", None) == "punisher"
+            for h in _handlers
+        )
+        if not punisher_registered:
+            h_punisher = TelegramDigestHandler(
+                bot_token, punisher_chat,
+                exchange=exchange, interval_sec=digest_interval, domain="punisher",
+            )
+            root.addHandler(h_punisher)
+            await h_punisher.start()
+            _handlers.append(h_punisher)
+
+    # WARNING+ 즉시 알림 — 실행 도메인 채널 (기존 TelegramAlertHandler 재사용)
+    if punisher_chat and TelegramAlertHandler not in existing_types:
+        h_alert = TelegramAlertHandler(
+            bot_token, punisher_chat, exchange=exchange,
+        )
+        h_alert.set_loop(loop)
+        root.addHandler(h_alert)
+        _handlers.append(h_alert)
 
 
 async def shutdown_telegram_logging() -> None:

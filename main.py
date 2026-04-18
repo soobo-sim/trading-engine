@@ -253,7 +253,14 @@ async def lifespan(app: FastAPI):
 
     # GMO Coin 단일 페어 btc_jpy → RegimeGate 1개 공유
     # TODO: 멀티 페어 지원 시 per-pair gate로 확장 필요
+    from core.execution.regime_gate_persistence import load_regime_gate_state
+
     _regime_gate = RegimeGate("btc_jpy")
+    _restored = await load_regime_gate_state(session_factory, _regime_gate)
+    if _restored:
+        logger.info(f"RegimeGate DB 복원 완료 (active={_regime_gate.active_strategy})")
+    else:
+        logger.info("RegimeGate DB 상태 없음 — warm-up 시작")
     trend_manager.set_regime_gate(_regime_gate)
     box_manager.set_regime_gate(_regime_gate)
     logger.debug("RegimeGate 초기화: trend_manager + box_manager 공유 (btc_jpy)")

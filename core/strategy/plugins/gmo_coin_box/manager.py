@@ -30,9 +30,12 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
+from sqlalchemy import select
+
 from core.analysis.box_detector import detect_box
 from core.strategy.box_signals import classify_price_in_box
 from core.strategy.plugins.gmo_coin_trend.manager import GmoCoinTrendManager
+from core.exchange.types import Position
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +57,40 @@ class GmoCoinBoxManager(GmoCoinTrendManager):
 
     def _get_strategy_type(self) -> str:
         return "box_mean_reversion"
+
+    async def _detect_existing_position(self, pair: str) -> Optional[Position]:
+        """box 전략의 기존 포지션 감지 — DB 게이트 추가.
+
+        어댑터 get_positions()는 거래소 레벨에서 전략 구분 불가
+        (trend가 연 BTC_JPY 포지션도 동일하게 반환).
+        DB(gmoc_box_positions)에 미청산 레코드가 있을 때만 어댑터 포지션을 인식.
+        """
+        try:
+            async with self._session_factory() as db:
+                Model = self._position_model
+                pair_col = getattr(Model, self._position_pair_column)
+                stmt = (
+                    select(Model.id)
+                    .where(pair_col == pair)
+                    .where(Model.realized_pnl_jpy.is_(None))
+                    .limit(1)
+                )
+                result = await db.execute(stmt)
+                has_db_position = result.scalar_one_or_none() is not None
+        except Exception as e:
+            logger.warning(
+                f"{_LOG_PREFIX} {pair}: DB 미청산 포지션 조회 실패 → None 반환: {e}"
+            )
+            return None
+
+        if not has_db_position:
+            logger.debug(
+                f"{_LOG_PREFIX} {pair}: DB에 box 미청산 포지션 없음 → 어댑터 포지션 무시"
+            )
+            return None
+
+        # DB에 box 포지션이 있을 때만 어댑터 조회 위임
+        return await super()._detect_existing_position(pair)
 
     # ──────────────────────────────────────────
     # 시그널 계산 (박스역추세)

@@ -85,10 +85,11 @@ def _build_client(factory) -> TestClient:
 
 
 async def _insert_strategy(factory, *, status="proposed", pair="USD_JPY", name="test-strategy"):
+    from core.pair import normalize_pair
     async with factory() as db:
         row = PtStrategy(
             name=name, description="desc",
-            parameters={"pair": pair},
+            parameters={"pair": normalize_pair(pair)},  # normalize: 라젠카 내부 소문자 표준
             rationale="테스트용 전략 최소 20자 이상 rationale",
             status=status,
         )
@@ -108,10 +109,11 @@ async def _insert_trade(
     pnl_pct: float | None = None,
     pnl_jpy: float | None = None,
 ):
+    from core.pair import normalize_pair
     async with factory() as db:
         row = PaperTrade(
             strategy_id=strategy_id,
-            pair=pair,
+            pair=normalize_pair(pair),  # normalize: 라젤카 내부는 소문자 표준
             direction=direction,
             entry_price=Decimal(str(entry_price)),
             entry_time=datetime.now(timezone.utc),
@@ -229,7 +231,7 @@ async def test_pa07_overview_with_trades(db_session_factory):
     assert data["total"] == 1
     item = data["strategies"][0]
     assert item["strategy_id"] == sid
-    assert item["pair"] == "USD_JPY"
+    assert item["pair"] == "usd_jpy"  # normalize_pair: 소문자 표준
     assert item["status"] == "proposed"
     ps = item["paper_summary"]
     assert ps["total_trades"] == 2
@@ -297,4 +299,4 @@ async def test_pa11_pair_filter(db_session_factory):
     assert resp.status_code == 200
     data = resp.json()
     assert data["total"] == 1
-    assert data["trades"][0]["pair"] == "USD_JPY"
+    assert data["trades"][0]["pair"] == "usd_jpy"  # normalize_pair: 소문자 표준

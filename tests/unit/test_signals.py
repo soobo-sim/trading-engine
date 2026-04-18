@@ -6,6 +6,7 @@ from core.strategy.signals import (
     compute_adaptive_trailing_mult,
     compute_ema,
     compute_exit_signal,
+    compute_profit_based_mult,
     compute_rsi_series,
     compute_trend_signal,
     detect_bearish_divergence,
@@ -118,9 +119,9 @@ class TestComputeExitSignal:
 
 class TestAdaptiveTrailingMult:
     def test_initial_phase(self):
-        """강한 추세 → 넓은 배수."""
+        """실돈 추세 → 넘은 배수."""
         result = compute_adaptive_trailing_mult(0.5, 55.0, {})
-        assert result == 2.0
+        assert result == 1.5
 
     def test_mature_low_slope(self):
         """기울기 둔화 → 좁은 배수."""
@@ -132,6 +133,70 @@ class TestAdaptiveTrailingMult:
         result = compute_adaptive_trailing_mult(0.5, 80.0, {})
         assert result == 1.2
 
+# ── Profit-Based Trailing Mult ────────────────────────────────────
+
+class TestProfitBasedMult:
+    _PARAMS = {
+        "trailing_stop_atr_initial": 1.5,
+        "trailing_stop_decay_per_atr": 0.2,
+        "trailing_stop_atr_min": 0.3,
+    }
+
+    def test_pb01_no_profit_returns_initial(self):
+        """이익 없음(현재가=진입가) → initial 배수 반환."""
+        result = compute_profit_based_mult(10000.0, 10000.0, 100.0, self._PARAMS, side="buy")
+        assert result == 1.5
+
+    def test_pb02_small_profit_continuous_decay(self):
+        """이익 ATR×0.8 → max(0.3, 1.5-0.2×0.8) = 1.34."""
+        result = compute_profit_based_mult(10000.0, 10080.0, 100.0, self._PARAMS, side="buy")
+        assert result == pytest.approx(1.34)
+
+    def test_pb03_profit_one_atr(self):
+        """이익 ATR×1.0 → max(0.3, 1.5-0.2×1.0) = 1.3."""
+        result = compute_profit_based_mult(10000.0, 10100.0, 100.0, self._PARAMS, side="buy")
+        assert result == pytest.approx(1.3)
+
+    def test_pb04_profit_two_atr(self):
+        """이익 ATR×2.0 → max(0.3, 1.5-0.2×2.0) = 1.1."""
+        result = compute_profit_based_mult(10000.0, 10200.0, 100.0, self._PARAMS, side="buy")
+        assert result == pytest.approx(1.1)
+
+    def test_pb05_short_profit_two_atr(self):
+        """숏 이익 ATR×2.0 → 1.1."""
+        result = compute_profit_based_mult(10200.0, 10000.0, 100.0, self._PARAMS, side="sell")
+        assert result == pytest.approx(1.1)
+
+    def test_pb06_short_no_profit_returns_initial(self):
+        """숏 손실(가격 상승 중) → initial 반환."""
+        result = compute_profit_based_mult(10000.0, 10050.0, 100.0, self._PARAMS, side="sell")
+        assert result == 1.5
+
+    def test_pb07_zero_atr_returns_initial(self):
+        """ATR=0 → initial 반환."""
+        result = compute_profit_based_mult(10000.0, 10500.0, 0.0, self._PARAMS, side="buy")
+        assert result == 1.5
+
+    def test_pb08_large_profit_hits_floor(self):
+        """이익 ATR×6.0 → max(0.3, 1.5-1.2) = 0.3 (배수 하한)."""
+        result = compute_profit_based_mult(10000.0, 10600.0, 100.0, self._PARAMS, side="buy")
+        assert result == pytest.approx(0.3)
+
+    def test_pb09_profit_four_atr(self):
+        """이익 ATR×4.0 → max(0.3, 1.5-0.8) = 0.7."""
+        result = compute_profit_based_mult(10000.0, 10400.0, 100.0, self._PARAMS, side="buy")
+        assert result == pytest.approx(0.7)
+
+    def test_pb10_custom_decay_and_min(self):
+        """커스텀 decay/min 파라미터 적용."""
+        params = {
+            "trailing_stop_atr_initial": 2.0,
+            "trailing_stop_decay_per_atr": 0.4,
+            "trailing_stop_atr_min": 0.5,
+        }
+        # 이익 ATR×3 → max(0.5, 2.0-0.4×3) = max(0.5, 0.8) = 0.8
+        result = compute_profit_based_mult(10000.0, 10300.0, 100.0, params, side="buy")
+        assert result == pytest.approx(0.8)
 
 # ── Trend Signal ────────────────────────
 

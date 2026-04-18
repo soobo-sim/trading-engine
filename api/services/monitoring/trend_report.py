@@ -108,8 +108,13 @@ def build_telegram_text(prefix: str, time_str: str, pair: str, data: dict) -> st
         lines.append(f" · 진입 {p['entry_amount']}{currency} @ ¥{p['entry_price']:,.0f}")
         stop = p.get("stop_loss_price", 0)
         distance = p.get("trailing_stop_distance", 0)
-        stop_pct = (stop - current_price) / current_price * 100 if stop and current_price > 0 else 0.0
-        lines.append(f" · 손절 ¥{stop:,.0f} ({stop_pct:.2f}%, 거리 ¥{distance:,.0f})")
+        pnl_at_stop = p.get("pnl_at_stop", 0)
+        if pnl_at_stop > 0:
+            lines.append(f" · 🛡️ 이익보호 ¥{stop:,.0f} (확정이익 +¥{pnl_at_stop:,.0f})")
+        elif pnl_at_stop == 0:
+            lines.append(f" · 🔒 손익분기 ¥{stop:,.0f} (현재가 거리 ¥{distance:,.0f})")
+        else:
+            lines.append(f" · 🛑 손절 ¥{stop:,.0f} (청산 시 -¥{abs(pnl_at_stop):,.0f} 손실)")
 
         situation = data.get("position_summary") or "보유 유지"
         lines.append(f"📊 지금: {_format_situation_with_basis(situation, ema_slope_pct, rsi)}")
@@ -121,15 +126,27 @@ def build_telegram_text(prefix: str, time_str: str, pair: str, data: dict) -> st
                 outlook = "즉시 청산 실행 중"
             elif action == "tighten_stop":
                 outlook = "추세 약화 — 스탑 조임 중. 추가 하락 시 자동 청산"
-            elif pnl_pct > 5.0:
-                outlook = "큰 수익 구간 — 트레일링 스탑이 수익 보호 중"
+            elif pnl_at_stop > 0:
+                outlook = f"트레일링 스탑이 이익 보호 중 (최소 +¥{pnl_at_stop:,.0f} 확정)"
+            elif pnl_jpy > 0 and pnl_at_stop <= 0:
+                outlook = "이익 중이나 스탑은 진입가 아래 — 추가 상승 시 이익보호로 전환"
             elif pnl_pct < -1.0:
                 outlook = "손절선 접근 중 — 반등 없으면 자동 청산"
             else:
                 outlook = "추세 이어지면 트레일링 스탑 자동 상향"
             lines.append(f"⚡ 전망: {outlook}")
 
-        if regime or active_strategy:
+        _rg = data.get("regime_gate_info")
+        if _rg is not None:
+            _last = _rg.get("last_regime")
+            _cnt = _rg.get("consecutive_count", 0)
+            _active = _rg.get("active_strategy")
+            _rl = _REGIME_LABEL.get(_last, _last or "-")
+            if _active is not None:
+                lines.append(f"⚙️ 체제: {_rl}(×{_cnt}) | 활성: {_STRATEGY_LABEL.get(_active, _active)}")
+            else:
+                lines.append(f"⚙️ 체제: {_rl}(×{_cnt}) | 진입 차단 중")
+        elif regime or active_strategy:
             regime_label = _REGIME_LABEL.get(regime, regime or "-")
             strategy_label = _STRATEGY_LABEL.get(active_strategy, active_strategy or "-")
             lines.append(f"⚙️ 체제: {regime_label} | 활성전략: {strategy_label}")
@@ -167,7 +184,17 @@ def build_telegram_text(prefix: str, time_str: str, pair: str, data: dict) -> st
         else:
             lines.append(f"✅ {met}/{total} 진입 조건 충족")
 
-        if regime or active_strategy:
+        _rg = data.get("regime_gate_info")
+        if _rg is not None:
+            _last = _rg.get("last_regime")
+            _cnt = _rg.get("consecutive_count", 0)
+            _active = _rg.get("active_strategy")
+            _rl = _REGIME_LABEL.get(_last, _last or "-")
+            if _active is not None:
+                lines.append(f"⚙️ 체제: {_rl}(×{_cnt}) | 활성: {_STRATEGY_LABEL.get(_active, _active)}")
+            else:
+                lines.append(f"⚙️ 체제: {_rl}(×{_cnt}) | 진입 차단 중")
+        elif regime or active_strategy:
             regime_label = _REGIME_LABEL.get(regime, regime or "-")
             strategy_label = _STRATEGY_LABEL.get(active_strategy, active_strategy or "-")
             lines.append(f"⚙️ 체제: {regime_label} | 활성전략: {strategy_label}")
@@ -338,6 +365,12 @@ async def generate_trend_report(
         trailing_distance = abs(current_price - stop_price) if stop_price else 0.0
         price_diff = current_price - position_obj.entry_price  # 부호 있는 가격차
 
+        # 스탑 발동 시 예상 P&L: 롱 (stop-entry)*amount, 숏 (entry-stop)*amount
+        if side == "sell":
+            pnl_at_stop = round((position_obj.entry_price - stop_price) * position_obj.entry_amount, 0)
+        else:
+            pnl_at_stop = round((stop_price - position_obj.entry_price) * position_obj.entry_amount, 0)
+
         position_data = {
             "side": side,
             "entry_price": position_obj.entry_price,
@@ -348,6 +381,7 @@ async def generate_trend_report(
             "stop_loss_price": round(stop_price, 0),
             "trailing_stop_distance": round(trailing_distance, 0),
             "price_diff": round(price_diff, 0),
+            "pnl_at_stop": int(pnl_at_stop),
         }
         position_summary = get_position_summary(exit_signal, rsi, unrealized_pnl_pct)
 
@@ -381,6 +415,14 @@ async def generate_trend_report(
     regime = sig.get("regime")  # "trending" | "ranging" | "unclear"
     _regime_gate = getattr(trend_manager, "_regime_gate", None)
     active_strategy = _regime_gate.active_strategy if _regime_gate is not None else None
+    regime_gate_info = None
+    if _regime_gate is not None:
+        _hist = _regime_gate.regime_history
+        regime_gate_info = {
+            "last_regime": _hist[-1] if _hist else None,
+            "consecutive_count": _regime_gate.consecutive_count,
+            "active_strategy": _regime_gate.active_strategy,
+        }
     report_data = {
         "current_price": current_price,
         "signal": signal,
@@ -407,6 +449,7 @@ async def generate_trend_report(
         "strategy_id": strategy.id,
         "regime": regime,
         "active_strategy": active_strategy,
+        "regime_gate_info": regime_gate_info,
     }
 
     telegram_text = build_telegram_text(prefix.upper(), time_str, pair, report_data)

@@ -262,6 +262,20 @@ def build_box_telegram_text(prefix: str, time_str: str, pair: str, data: dict) -
         else:
             lines.append(f"⏰ 다음 {tf_label}봉: 불명")
 
+    # ── 체제 라인 ──
+    _rg = data.get("regime_gate_info")
+    if _rg is not None:
+        _last = _rg.get("last_regime")
+        _cnt = _rg.get("consecutive_count", 0)
+        _active = _rg.get("active_strategy")
+        _REGIME_LABEL_BOX = {"trending": "추세장", "ranging": "횡보장", "unclear": "불명확"}
+        _STRATEGY_LABEL_BOX = {"trend_following": "추세추종", "box_mean_reversion": "박스역추세"}
+        _rl = _REGIME_LABEL_BOX.get(_last, _last or "-")
+        if _active is not None:
+            lines.append(f"⚙️ 체제: {_rl}(×{_cnt}) | 활성: {_STRATEGY_LABEL_BOX.get(_active, _active)}")
+        else:
+            lines.append(f"⚙️ 체제: {_rl}(×{_cnt}) | 진입 차단 중")
+
     # ── 잔고 라인 (FX/현물 분기) ──
     jpy_part = f"JPY ¥{data['jpy_available']:,.0f}"
     if is_margin:
@@ -331,6 +345,7 @@ async def generate_box_report(
     db: AsyncSession,
     test_alert_level: str | None = None,
     reset_cooldown: bool = False,
+    regime_gate: Any = None,
 ) -> dict:
     """box_mean_reversion 전략의 모니터링 리포트 생성."""
     params = strategy.parameters or {}
@@ -601,6 +616,14 @@ async def generate_box_report(
         "tolerance_pct": float(box_row.tolerance_pct) if box_row else float(params.get("box_tolerance_pct", 1.5)),
         "stop_loss_pct": float(params.get("stop_loss_pct", 1.5)),
         "is_margin_trading": getattr(adapter, "is_margin_trading", False),
+        "regime_gate_info": (
+            {
+                "last_regime": regime_gate.regime_history[-1] if regime_gate.regime_history else None,
+                "consecutive_count": regime_gate.consecutive_count,
+                "active_strategy": regime_gate.active_strategy,
+            }
+            if regime_gate is not None else None
+        ),
     }
 
     telegram_text = build_box_telegram_text(prefix.upper(), time_str, pair, report_data)

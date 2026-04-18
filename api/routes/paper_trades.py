@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from adapters.database.models import PaperTrade
 from api.dependencies import AppState, get_db, get_state
+from core.pair import normalize_pair
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,8 @@ async def list_paper_trades(
     if strategy_id is not None:
         stmt = stmt.where(PaperTrade.strategy_id == strategy_id)
     if pair:
-        stmt = stmt.where(PaperTrade.pair == pair.upper())
+        from core.pair import normalize_pair
+        stmt = stmt.where(PaperTrade.pair == normalize_pair(pair))
     if closed_only:
         stmt = stmt.where(PaperTrade.exit_time.is_not(None))
     stmt = stmt.limit(limit).offset(offset)
@@ -137,7 +139,7 @@ async def get_paper_overview(
     items = []
     for s in strategies:
         params = s.parameters or {}
-        pair = (params.get("pair") or params.get("product_code") or "").upper()
+        pair = normalize_pair(params.get("pair") or params.get("product_code") or "")
 
         # paper_trades 집계 (청산 완료)
         trade_stmt = (

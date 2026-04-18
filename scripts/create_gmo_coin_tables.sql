@@ -391,3 +391,18 @@ CREATE INDEX IF NOT EXISTS idx_gmoc_switch_rec_decision
     ON gmoc_switch_recommendations (decision, created_at);
 CREATE INDEX IF NOT EXISTS idx_gmoc_switch_rec_created
     ON gmoc_switch_recommendations (created_at);
+
+-- ──────────────────────────────────────────────────
+-- 15. gmoc_regime_gate_state  (RegimeGate 재시작 영속화)
+-- ──────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS gmoc_regime_gate_state (
+    pair               VARCHAR(20)  PRIMARY KEY,
+    active_strategy    VARCHAR(50),
+    regime_history     JSONB        NOT NULL DEFAULT '[]',
+    last_switch_at     TIMESTAMPTZ,
+    switch_count       INTEGER      NOT NULL DEFAULT 0,
+    consecutive_count  INTEGER      NOT NULL DEFAULT 0,
+    consecutive_regime VARCHAR(20),
+    last_candle_key    VARCHAR(50),
+    updated_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
