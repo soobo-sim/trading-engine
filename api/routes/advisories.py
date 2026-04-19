@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from adapters.database.models import RachelAdvisory
 from api.dependencies import AppState, get_db, get_state
+from core.judge.decision.advisory_bypass import advisory_bypass
 from core.pair import normalize_pair
 
 logger = logging.getLogger(__name__)
@@ -189,6 +190,71 @@ async def create_advisory(
         f"  리스크: {advisory.risk_notes or '없음'}"
     )
     return _to_response(advisory)
+
+
+# ── Bypass 엔드포인트 ─────────────────────────────────────────
+# ⚠️ /bypass 고정 경로는 반드시 /{pair}/latest 가변 경로보다 앞에 등록할 것
+
+class AdvisoryBypassSetRequest(BaseModel):
+    start: datetime = Field(..., description="bypass 시작 시각 (ISO 8601, 타임존 포함 권장)")
+    end: datetime = Field(..., description="bypass 종료 시각 (ISO 8601, 타임존 포함 권장)")
+
+
+class AdvisoryBypassResponse(BaseModel):
+    active: bool
+    start: datetime | None
+    end: datetime | None
+    message: str
+
+
+@router.get("/bypass", response_model=AdvisoryBypassResponse)
+async def get_advisory_bypass():
+    """현재 advisory bypass 상태 조회."""
+    window = advisory_bypass.get_window()
+    active = advisory_bypass.is_active()
+    return AdvisoryBypassResponse(
+        active=active,
+        start=window.start if window else None,
+        end=window.end if window else None,
+        message="bypass 활성" if active else ("bypass 설정됨 (비활성 시간대)" if window else "bypass 없음"),
+    )
+
+
+@router.post("/bypass", response_model=AdvisoryBypassResponse, status_code=200)
+async def set_advisory_bypass(body: AdvisoryBypassSetRequest):
+    """Advisory 체크 일시 bypass 창 설정.
+
+    bypass 기간 동안 rachel_advisory는 WARNING 없이 조용히 v1 룰 기반 폴백을 사용한다.
+    rate limit 등으로 레이첼이 advisory를 갱신할 수 없을 때 사용.
+
+    예시:
+        POST /api/advisories/bypass
+        { "start": "2026-04-19T20:00:00+09:00", "end": "2026-04-20T09:00:00+09:00" }
+    """
+    try:
+        advisory_bypass.set(body.start, body.end)
+    except ValueError as e:
+        raise HTTPException(400, {"blocked_code": "INVALID_BYPASS_RANGE", "detail": str(e)})
+
+    window = advisory_bypass.get_window()
+    return AdvisoryBypassResponse(
+        active=advisory_bypass.is_active(),
+        start=window.start,
+        end=window.end,
+        message=f"bypass 설정 완료 — {body.start.isoformat()} ~ {body.end.isoformat()}",
+    )
+
+
+@router.delete("/bypass", response_model=AdvisoryBypassResponse, status_code=200)
+async def clear_advisory_bypass():
+    """Advisory bypass 해제 — 즉시 advisory 체크 재개."""
+    advisory_bypass.clear()
+    return AdvisoryBypassResponse(
+        active=False,
+        start=None,
+        end=None,
+        message="bypass 해제 완료",
+    )
 
 
 @router.get("/{pair}/latest", response_model=AdvisoryResponse)

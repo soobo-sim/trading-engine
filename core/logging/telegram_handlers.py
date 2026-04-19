@@ -4,6 +4,7 @@ from core.shared.logging.telegram_handlers import (  # noqa: F401
     setup_telegram_logging,
     shutdown_telegram_logging,
     TelegramDigestHandler,
+    TelegramTransactionHandler,
     TelegramAlertHandler,
     JUDGE_PREFIXES,
     PUNISHER_PREFIXES,

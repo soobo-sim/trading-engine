@@ -21,6 +21,7 @@ from typing import Any
 from sqlalchemy import desc, select
 
 from core.data.dto import Decision, SignalSnapshot
+from core.judge.decision.advisory_bypass import advisory_bypass
 from core.pair import normalize_pair
 
 logger = logging.getLogger("core.judge.decision.rachel_advisory")  # 구 경로 유지
@@ -59,6 +60,16 @@ class RachelAdvisoryDecision:
         3. advisory 있음 → _merge_advisory_with_signal()
         """
         advisory = await self._fetch_advisory(snapshot.pair, snapshot.exchange)
+
+        # ── bypass 창 활성 시 → 조용히 v1 폴백 ──────────────
+        if advisory_bypass.is_active():
+            window = advisory_bypass.get_window()
+            logger.info(
+                f"[RachelAdvisory] {snapshot.pair}: advisory bypass 활성 "
+                f"(~{window.end.isoformat()}) → v1 폴백 (silent)"
+            )
+            decision = await self._fallback.decide(snapshot)
+            return _replace_source(decision, _SOURCE_FALLBACK)
 
         if advisory is None:
             logger.warning(

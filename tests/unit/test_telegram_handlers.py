@@ -20,6 +20,7 @@ import pytest
 from core.logging.telegram_handlers import (
     TelegramAlertHandler,
     TelegramDigestHandler,
+    TelegramTransactionHandler,
     _send_telegram,
     setup_telegram_logging,
     shutdown_telegram_logging,
@@ -345,7 +346,7 @@ class TestSetupTelegramLogging:
 
     @pytest.mark.asyncio
     async def test_heartbeat_channel_registered(self):
-        """HEARTBEAT_CHAT_ID 설정 시 DigestHandler 등록."""
+        """HEARTBEAT_CHAT_ID 설정 시 TransactionHandler 등록."""
         _handlers.clear()
         env = {
             "TELEGRAM_BOT_TOKEN": "tok",
@@ -356,13 +357,14 @@ class TestSetupTelegramLogging:
 
         try:
             assert len(_handlers) == 1
-            assert isinstance(_handlers[0], TelegramDigestHandler)
+            assert isinstance(_handlers[0], TelegramTransactionHandler)
+            assert _handlers[0]._domain == "judge"
         finally:
             await shutdown_telegram_logging()
 
     @pytest.mark.asyncio
     async def test_saveus_alert_handler_registered(self):
-        """SAVEUS_CHAT_ID 설정 시 PunisherDigest + AlertHandler 2개 등록."""
+        """SAVEUS_CHAT_ID 설정 시 PunisherTransaction + AlertHandler 2개 등록."""
         _handlers.clear()
         env = {
             "TELEGRAM_BOT_TOKEN": "tok",
@@ -375,10 +377,10 @@ class TestSetupTelegramLogging:
             assert len(_handlers) == 2
             types = {type(h) for h in _handlers}
             assert TelegramAlertHandler in types
-            assert TelegramDigestHandler in types
-            # PunisherDigest 확인
-            digest = next(h for h in _handlers if isinstance(h, TelegramDigestHandler))
-            assert digest._domain == "punisher"
+            assert TelegramTransactionHandler in types
+            # PunisherTransaction 확인
+            tx = next(h for h in _handlers if isinstance(h, TelegramTransactionHandler))
+            assert tx._domain == "punisher"
         finally:
             await shutdown_telegram_logging()
 
@@ -397,10 +399,10 @@ class TestSetupTelegramLogging:
         try:
             assert len(_handlers) == 3
             types = [type(h) for h in _handlers]
-            assert types.count(TelegramDigestHandler) == 2  # judge + punisher
+            assert types.count(TelegramTransactionHandler) == 2  # judge + punisher
             assert TelegramAlertHandler in types
             # 도메인 분리 확인
-            domains = [getattr(h, "_domain", None) for h in _handlers if isinstance(h, TelegramDigestHandler)]
+            domains = [getattr(h, "_domain", None) for h in _handlers if isinstance(h, TelegramTransactionHandler)]
             assert "judge" in domains
             assert "punisher" in domains
         finally:
@@ -420,7 +422,7 @@ class TestSetupTelegramLogging:
 
         try:
             h = _handlers[0]
-            assert isinstance(h, TelegramDigestHandler)
+            assert isinstance(h, TelegramTransactionHandler)
             assert h._interval == 60
         finally:
             await shutdown_telegram_logging()
@@ -436,29 +438,20 @@ class TestSetupTelegramLogging:
         with patch.dict("os.environ", env, clear=True):
             await setup_telegram_logging("bitflyer")
 
-        # HEARTBEAT_CHAT_ID만 설정 → JudgeDigest 핸들러 1개
+        # HEARTBEAT_CHAT_ID만 설정 → JudgeTransaction 핸들러 1개
         assert len(_handlers) == 1
         h = _handlers[0]
-        assert isinstance(h, TelegramDigestHandler)
+        assert isinstance(h, TelegramTransactionHandler)
         assert h._domain == "judge"
 
-        # judge 도메인 logger의 INFO 레코드 → 수집됨
-        record = logging.LogRecord(
-            name="core.judge.decision.rule_based", level=logging.INFO, pathname="", lineno=0,
-            msg="残 메시지", args=(), exc_info=None,
-        )
-        h.emit(record)
-
-        sent_texts = []
+        # shutdown 시 핸들러 정리 확인
         with patch(
             "core.shared.logging.telegram_handlers._send_telegram",
             new_callable=AsyncMock,
-            side_effect=lambda *a, **k: sent_texts.append(a[2]) or True,
+            return_value=True,
         ):
             await shutdown_telegram_logging()
 
-        assert len(sent_texts) == 1
-        assert "残 메시지" in sent_texts[0]
         assert len(_handlers) == 0
 
     @pytest.mark.asyncio
@@ -591,9 +584,9 @@ class TestDefaultValues:
             await setup_telegram_logging("bitflyer")
 
         try:
-            # JudgeDigest 핸들러 1개만 등록
+            # JudgeTransaction 핸들러 1개만 등록
             assert len(_handlers) == 1
-            assert isinstance(_handlers[0], TelegramDigestHandler)
+            assert isinstance(_handlers[0], TelegramTransactionHandler)
             assert _handlers[0]._domain == "judge"
         finally:
             await shutdown_telegram_logging()
@@ -612,9 +605,9 @@ class TestDefaultValues:
             await setup_telegram_logging("bitflyer")
 
         try:
-            digest_handlers = [h for h in _handlers if isinstance(h, TelegramDigestHandler)]
-            assert len(digest_handlers) == 1
-            assert digest_handlers[0]._interval == 300
+            tx_handlers = [h for h in _handlers if isinstance(h, TelegramTransactionHandler)]
+            assert len(tx_handlers) == 1
+            assert tx_handlers[0]._interval == 300
         finally:
             await shutdown_telegram_logging()
 
