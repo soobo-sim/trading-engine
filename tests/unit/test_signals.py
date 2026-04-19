@@ -114,6 +114,33 @@ class TestComputeExitSignal:
         )
         assert result["action"] == "tighten_stop"
 
+    # EW-SL-01: 기본값 0.05 — slope 0.04 는 [0, 0.05) 범위 → tighten_stop
+    def test_EW_SL_01_default_threshold_tighten_at_0_04(self):
+        result = compute_exit_signal(
+            ema_slope_pct=0.04, rsi=55.0, atr=10.0,
+            current_price=100.0, entry_price=90.0,
+            params={},  # 기본값 사용 (0.05)
+        )
+        assert result["action"] == "tighten_stop", "기본값 0.05: 0 ≤ 0.04 < 0.05 → weakening 발동"
+
+    # EW-SL-02: 기본값 0.05 — slope 0.06 → tighten_stop
+    def test_EW_SL_02_default_threshold_tighten_at_0_06(self):
+        result = compute_exit_signal(
+            ema_slope_pct=0.06, rsi=55.0, atr=10.0,
+            current_price=100.0, entry_price=90.0,
+            params={},  # 기본값 사용 (0.05)
+        )
+        assert result["action"] == "hold", "slope 0.06 >= 0.05 → weakening 아님(범위 0 ≤ pct < th) → hold"
+
+    # EW-SL-03: 명시적 threshold=0.03 — slope 0.04 는 0.04 >= 0.03 → hold (구 임계값에선 미발동)
+    def test_EW_SL_03_explicit_threshold_0_03_hold_at_0_04(self):
+        result = compute_exit_signal(
+            ema_slope_pct=0.04, rsi=55.0, atr=10.0,
+            current_price=100.0, entry_price=90.0,
+            params={"ema_slope_weak_threshold": 0.03},
+        )
+        assert result["action"] == "hold", "threshold=0.03: 0.04 >= 0.03 → weakening 범위 밖 → hold"
+
 
 # ── Adaptive Trailing Mult ──────────────
 

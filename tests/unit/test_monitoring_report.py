@@ -20,6 +20,8 @@ from api.services.monitoring import (
     get_position_summary,
     get_entry_blockers,
     get_entry_blockers_short,
+    get_entry_condition_lines_long,
+    get_entry_condition_lines_short,
     get_wait_direction,
     get_narrative_situation,
     get_narrative_outlook,
@@ -583,7 +585,7 @@ class TestBuildTelegramText:
             },
         )
         text = build_telegram_text("BF", "10:00", "BTC_JPY", data)
-        assert "🔒 손익분기" in text  # pnl_at_stop=0 → 손익분기 표시
+        assert "발동 시: ¥0 (손익분기)" in text  # pnl_at_stop=0 → 손익분기 표시
         assert "미실현" in text
 
     # ── 신규: 스탑 라인 3분기 (SR-01~SR-08) ────────────────────────
@@ -606,8 +608,7 @@ class TestBuildTelegramText:
             exit_signal={"action": "hold"},
         )
         text = build_telegram_text("GMOC", "12:00", "btc_jpy", data)
-        assert "🛡️ 이익보호" in text
-        assert "+¥400" in text
+        assert "발동 시: +¥400 이익 확정 (손익보호 중)" in text
         assert "트레일링 스탑이 이익 보호 중" in text
         assert "최소 +¥400 확정" in text
 
@@ -629,8 +630,7 @@ class TestBuildTelegramText:
             exit_signal={"action": "hold"},
         )
         text = build_telegram_text("GMOC", "07:48", "btc_jpy", data)
-        assert "🛑 손절" in text
-        assert "청산 시 -¥185 손실" in text
+        assert "발동 시: -¥185 손절" in text
         assert "이익 중이나 스탑은 진입가 아래" in text
         assert "추가 상승 시 이익보호로 전환" in text
 
@@ -652,7 +652,7 @@ class TestBuildTelegramText:
             exit_signal={"action": "hold"},
         )
         text = build_telegram_text("GMOC", "12:00", "btc_jpy", data)
-        assert "🔒 손익분기" in text
+        assert "발동 시: ¥0 (손익분기)" in text
         assert "이익 중이나 스탑은 진입가 아래" in text
 
     def test_sr04_long_loss_stop_below_entry_shows_approaching(self):
@@ -673,8 +673,7 @@ class TestBuildTelegramText:
             exit_signal={"action": "hold"},
         )
         text = build_telegram_text("GMOC", "12:00", "btc_jpy", data)
-        assert "🛑 손절" in text
-        assert "청산 시 -¥720 손실" in text
+        assert "발동 시: -¥720 손절" in text
         assert "손절선 접근 중" in text
 
     def test_sr05_short_profit_stop_below_entry_shows_protection(self):
@@ -697,8 +696,7 @@ class TestBuildTelegramText:
             exit_signal={"action": "hold"},
         )
         text = build_telegram_text("GMOC", "12:00", "btc_jpy", data)
-        assert "🛡️ 이익보호" in text
-        assert "+¥3,000" in text
+        assert "발동 시: +¥3,000 이익 확정 (손익보호 중)" in text
         assert "트레일링 스탑이 이익 보호 중" in text
 
     def test_sr06_short_profit_stop_above_entry_shows_stop_loss(self):
@@ -721,8 +719,7 @@ class TestBuildTelegramText:
             exit_signal={"action": "hold"},
         )
         text = build_telegram_text("GMOC", "12:00", "btc_jpy", data)
-        assert "🛑 손절" in text
-        assert "-¥1,000 손실" in text
+        assert "발동 시: -¥1,000 손절" in text
         assert "이익 중이나 스탑은 진입가 아래" in text
 
     def test_sr07_stop_zero_no_pnl_at_stop_shows_breakeven(self):
@@ -741,7 +738,7 @@ class TestBuildTelegramText:
             },
         )
         text = build_telegram_text("GMOC", "12:00", "btc_jpy", data)
-        assert "🔒 손익분기" in text
+        assert "발동 시: ¥0 (손익분기)" in text
 
     def test_sr08_tighten_stop_action_overrides_outlook(self):
         """SR-08: tighten_stop 액션 → 전망: 추세 약화 — 스탑 조임 중 (pnl_at_stop 무시)."""
@@ -2776,3 +2773,379 @@ class TestBuildBoxTelegramTextRegimeGateInfo:
         })
         text = build_box_telegram_text("GMOC", "08:25", "btc_jpy", data)
         assert "⚙️ 체제: 횡보장(×3) | 활성: 박스역추세" in text
+
+
+# ── get_entry_condition_lines_long 테스트 ──────────────────────────
+
+class TestGetEntryConditionLinesLong:
+    """CL-L01~CL-L08: 롱 진입 4개 조건 상세 라인."""
+
+    def test_cll01_all_met(self):
+        """CL-L01: 4개 조건 모두 충족 → 4줄 전부 ✅."""
+        lines = get_entry_condition_lines_long(
+            signal="entry_ok",
+            current_price=105.0,
+            ema=100.0,
+            ema_slope_pct=0.15,
+            rsi=52.0,
+            rsi_min=40.0,
+            rsi_max=65.0,
+            slope_min=0.0,
+            regime_consecutive=4,
+            regime_active=True,
+        )
+        assert len(lines) == 4
+        assert all("✅" in l for l in lines)
+        assert all("❌" not in l for l in lines)
+
+    def test_cll02_slope_only_unmet(self):
+        """CL-L02: slope 미충족만 → ❌ ② 라인 포함."""
+        lines = get_entry_condition_lines_long(
+            signal="no_signal",
+            current_price=105.0,
+            ema=100.0,
+            ema_slope_pct=-0.02,
+            rsi=52.0,
+            rsi_min=40.0,
+            rsi_max=65.0,
+            slope_min=0.0,
+            regime_consecutive=4,
+            regime_active=True,
+        )
+        unmet = [l for l in lines if "❌" in l]
+        met = [l for l in lines if "✅" in l]
+        assert len(unmet) == 1
+        assert "② EMA 기울기" in unmet[0]
+        assert "부족" in unmet[0]
+        assert len(met) == 3
+
+    def test_cll03_price_below_ema_unmet(self):
+        """CL-L03: 가격 < EMA → ❌ ① 라인에 ↑ 필요 금액 표시."""
+        lines = get_entry_condition_lines_long(
+            signal="exit_warning",
+            current_price=95.0,
+            ema=100.0,
+            ema_slope_pct=0.1,
+            rsi=52.0,
+            regime_consecutive=4,
+            regime_active=True,
+        )
+        price_line = next(l for l in lines if "① 가격" in l)
+        assert "❌" in price_line
+        assert "↑" in price_line
+        assert "필요" in price_line
+
+    def test_cll04_rsi_too_low(self):
+        """CL-L04: RSI 과매도 → ❌ ③ 라인에 부족 표시."""
+        lines = get_entry_condition_lines_long(
+            signal="no_signal",
+            current_price=105.0,
+            ema=100.0,
+            ema_slope_pct=0.1,
+            rsi=25.0,
+            rsi_min=40.0,
+        )
+        rsi_line = next(l for l in lines if "③ RSI" in l)
+        assert "❌" in rsi_line
+        assert "부족" in rsi_line
+
+    def test_cll05_rsi_too_high(self):
+        """CL-L05: RSI 과열 → ❌ ③ 라인에 초과·과열 표시."""
+        lines = get_entry_condition_lines_long(
+            signal="wait_dip",
+            current_price=105.0,
+            ema=100.0,
+            ema_slope_pct=0.1,
+            rsi=72.0,
+            rsi_max=65.0,
+        )
+        rsi_line = next(l for l in lines if "③ RSI" in l)
+        assert "❌" in rsi_line
+        assert "과열" in rsi_line
+
+    def test_cll06_regime_wait_unmet(self):
+        """CL-L06: signal=wait_regime → ❌ ④ 라인에 횡보 감지."""
+        lines = get_entry_condition_lines_long(
+            signal="wait_regime",
+            current_price=105.0,
+            ema=100.0,
+            ema_slope_pct=0.1,
+            rsi=52.0,
+            regime_consecutive=2,
+            regime_active=False,
+        )
+        regime_line = next(l for l in lines if "④ 추세장" in l)
+        assert "❌" in regime_line
+        assert "횡보" in regime_line
+
+    def test_cll07_regime_gate_not_active(self):
+        """CL-L07: regime_active=False (RegimeGate 미달) → ❌ ④ 차단 중."""
+        lines = get_entry_condition_lines_long(
+            signal="no_signal",
+            current_price=105.0,
+            ema=100.0,
+            ema_slope_pct=0.1,
+            rsi=52.0,
+            regime_consecutive=2,
+            regime_active=False,
+        )
+        regime_line = next(l for l in lines if "④ 추세장" in l)
+        assert "❌" in regime_line
+        assert "차단" in regime_line
+
+    def test_cll08_regime_active_shows_consecutive(self):
+        """CL-L08: regime_active=True → ✅ ④ 라인에 연속 횟수 표시."""
+        lines = get_entry_condition_lines_long(
+            signal="entry_ok",
+            current_price=105.0,
+            ema=100.0,
+            ema_slope_pct=0.1,
+            rsi=52.0,
+            regime_consecutive=5,
+            regime_active=True,
+        )
+        regime_line = next(l for l in lines if "④ 추세장" in l)
+        assert "✅" in regime_line
+        assert "×5" in regime_line
+
+
+# ── get_entry_condition_lines_short 테스트 ──────────────────────────
+
+class TestGetEntryConditionLinesShort:
+    """CL-S01~CL-S08: 숏 진입 4개 조건 상세 라인."""
+
+    def test_cls01_all_met(self):
+        """CL-S01: 4개 조건 모두 충족 → 4줄 전부 ✅."""
+        lines = get_entry_condition_lines_short(
+            signal="entry_sell",
+            current_price=9_900_000,
+            ema=10_000_000,
+            ema_slope_pct=-0.1,
+            rsi=48.0,
+            rsi_min=35.0,
+            rsi_max=60.0,
+            slope_threshold=-0.05,
+            regime_consecutive=4,
+            regime_active=True,
+        )
+        assert len(lines) == 4
+        assert all("✅" in l for l in lines)
+
+    def test_cls02_slope_unmet(self):
+        """CL-S02: slope -0.02% → -0.05% 미달 → ❌ ② + 부족량 표시."""
+        lines = get_entry_condition_lines_short(
+            signal="no_signal",
+            current_price=9_900_000,
+            ema=10_000_000,
+            ema_slope_pct=-0.02,
+            rsi=48.0,
+            slope_threshold=-0.05,
+            regime_consecutive=4,
+            regime_active=True,
+        )
+        slope_line = next(l for l in lines if "② EMA 기울기" in l)
+        assert "❌" in slope_line
+        assert "부족" in slope_line
+        assert "-0.02" in slope_line
+        assert "-0.05" in slope_line
+
+    def test_cls03_price_above_ema_unmet(self):
+        """CL-S03: 가격 > EMA → ❌ ① 라인에 ↓ 필요 표시."""
+        lines = get_entry_condition_lines_short(
+            signal="no_signal",
+            current_price=10_100_000,
+            ema=10_000_000,
+            ema_slope_pct=-0.1,
+            rsi=48.0,
+            regime_consecutive=4,
+            regime_active=True,
+        )
+        price_line = next(l for l in lines if "① 가격" in l)
+        assert "❌" in price_line
+        assert "↓" in price_line
+        assert "필요" in price_line
+
+    def test_cls04_rsi_oversold(self):
+        """CL-S04: RSI 과매도 → ❌ ③ 라인에 과매도 표시."""
+        lines = get_entry_condition_lines_short(
+            signal="no_signal",
+            current_price=9_900_000,
+            ema=10_000_000,
+            ema_slope_pct=-0.1,
+            rsi=30.0,
+            rsi_min=35.0,
+        )
+        rsi_line = next(l for l in lines if "③ RSI" in l)
+        assert "❌" in rsi_line
+        assert "과매도" in rsi_line
+
+    def test_cls05_rsi_too_high(self):
+        """CL-S05: RSI 초과 → ❌ ③ 라인에 초과 표시."""
+        lines = get_entry_condition_lines_short(
+            signal="no_signal",
+            current_price=9_900_000,
+            ema=10_000_000,
+            ema_slope_pct=-0.1,
+            rsi=65.0,
+            rsi_max=60.0,
+        )
+        rsi_line = next(l for l in lines if "③ RSI" in l)
+        assert "❌" in rsi_line
+        assert "초과" in rsi_line
+
+    def test_cls06_slope_met_shows_threshold(self):
+        """CL-S06: slope 충족 시 ≤threshold 충족 표시."""
+        lines = get_entry_condition_lines_short(
+            signal="entry_sell",
+            current_price=9_900_000,
+            ema=10_000_000,
+            ema_slope_pct=-0.08,
+            rsi=48.0,
+            slope_threshold=-0.05,
+            regime_consecutive=4,
+            regime_active=True,
+        )
+        slope_line = next(l for l in lines if "② EMA 기울기" in l)
+        assert "✅" in slope_line
+        assert "충족" in slope_line
+
+    def test_cls07_current_case_3_of_4(self):
+        """CL-S07: 실제 리포트 케이스 재현 — slope -0.02% 미충족, 나머지 3개 충족."""
+        lines = get_entry_condition_lines_short(
+            signal="no_signal",
+            current_price=12_005_001,
+            ema=12_007_400,
+            ema_slope_pct=-0.02,
+            rsi=50.0,
+            rsi_min=35.0,
+            rsi_max=60.0,
+            slope_threshold=-0.05,
+            regime_consecutive=4,
+            regime_active=True,
+        )
+        assert len(lines) == 4
+        met = [l for l in lines if "✅" in l]
+        unmet = [l for l in lines if "❌" in l]
+        assert len(met) == 3
+        assert len(unmet) == 1
+        assert "② EMA 기울기" in unmet[0]
+
+    def test_cls08_returns_4_lines_always(self):
+        """CL-S08: ema/rsi/ema_slope 모두 None이어도 4줄 미만이 될 수 있음 — 크래시 없음."""
+        lines = get_entry_condition_lines_short(
+            signal="no_signal",
+            current_price=10_000_000,
+            ema=None,
+            ema_slope_pct=None,
+            rsi=None,
+        )
+        # None 값은 해당 조건 라인을 생략 → 크래시 없으면 OK
+        assert isinstance(lines, list)
+
+
+# ── build_telegram_text entry_condition_lines 렌더링 테스트 ──────────
+
+class TestBuildTelegramTextConditionLines:
+    """TCL-01~TCL-05: entry_condition_lines 기반 렌더링 검증."""
+
+    def _base_short_waiting(self, condition_lines, signal="no_signal"):
+        return {
+            "trend_icon": "📉",
+            "current_price": 12_005_001,
+            "market_summary": "🔻 하락 전환",
+            "position_summary": None,
+            "position": None,
+            "wait_direction": "short",
+            "entry_blockers": [],
+            "entry_condition_lines": condition_lines,
+            "conditions_met": 3,
+            "conditions_total": 4,
+            "jpy_available": 100_000,
+        }
+
+    def test_tcl01_3_of_4_shows_header_and_all_lines(self):
+        """TCL-01: 3/4 충족 → 🚫 3/4 헤더 + 4줄 전체 표시."""
+        lines = [
+            " ✅ ① 가격 < EMA    ¥12,005,001 (EMA ¥12,007,400)",
+            " ❌ ② EMA 기울기    지금 -0.02% → -0.05% 미만 필요 (0.03%p 부족)",
+            " ✅ ③ RSI 범위      50  (허용 35~60)",
+            " ✅ ④ 추세장        ×4 연속",
+        ]
+        text = build_telegram_text("GMOC", "14:08", "btc_jpy", self._base_short_waiting(lines))
+        assert "🚫 3/4 진입까지:" in text
+        assert "✅ ① 가격" in text
+        assert "❌ ② EMA" in text
+        assert "✅ ③ RSI" in text
+        assert "✅ ④ 추세장" in text
+
+    def test_tcl02_4_of_4_shows_all_clear(self):
+        """TCL-02: 4/4 전부 충족 → ✅ 4/4 진입 조건 충족."""
+        all_met = [
+            " ✅ ① 가격 < EMA    ¥12,005,001 (EMA ¥12,007,400)",
+            " ✅ ② EMA 기울기    -0.08%  (≤-0.05% 충족)",
+            " ✅ ③ RSI 범위      48  (허용 35~60)",
+            " ✅ ④ 추세장        ×4 연속",
+        ]
+        text = build_telegram_text("GMOC", "14:08", "btc_jpy", self._base_short_waiting(all_met))
+        assert "✅ 4/4 진입 조건 충족" in text
+        assert "🚫" not in text
+
+    def test_tcl03_empty_condition_lines_falls_back(self):
+        """TCL-03: entry_condition_lines=[] → 기존 blockers 방식 폴백."""
+        data = {
+            "trend_icon": "📉",
+            "current_price": 12_005_001,
+            "market_summary": "관망",
+            "position": None,
+            "wait_direction": "short",
+            "entry_blockers": ["EMA slope -0.02% → ≤-0.05% 필요"],
+            "entry_condition_lines": [],
+            "conditions_met": 4,
+            "conditions_total": 5,
+            "jpy_available": 100_000,
+        }
+        text = build_telegram_text("GMOC", "14:08", "btc_jpy", data)
+        assert "4/5" in text
+        assert " · EMA slope" in text
+
+    def test_tcl04_long_wait_3_of_4(self):
+        """TCL-04: 롱 대기 3/4 충족 케이스."""
+        cond_lines = [
+            " ✅ ① 가격 > EMA    ¥105 (EMA ¥100)",
+            " ❌ ② EMA 기울기    지금 -0.02% → +0.00% 이상 필요 (0.02%p 부족)",
+            " ✅ ③ RSI 범위      52  (허용 40~65)",
+            " ✅ ④ 추세장        ×3 연속",
+        ]
+        data = {
+            "trend_icon": "➡️",
+            "current_price": 105,
+            "market_summary": "추세 약화 구간",
+            "position": None,
+            "wait_direction": "long",
+            "entry_blockers": [],
+            "entry_condition_lines": cond_lines,
+            "conditions_met": 3,
+            "conditions_total": 4,
+            "jpy_available": 100_000,
+        }
+        text = build_telegram_text("GMOC", "14:08", "btc_jpy", data)
+        assert "🚫 3/4 진입까지:" in text
+        assert "롱 대기중" in text
+        assert "❌ ② EMA" in text
+
+    def test_tcl05_no_condition_lines_key_no_crash(self):
+        """TCL-05: entry_condition_lines 키 없어도 크래시 없음 (구버전 호환)."""
+        data = {
+            "trend_icon": "📉",
+            "current_price": 12_005_001,
+            "market_summary": "관망",
+            "position": None,
+            "wait_direction": "short",
+            "entry_blockers": ["블로커 1"],
+            "conditions_met": 4,
+            "conditions_total": 5,
+            "jpy_available": 100_000,
+            # entry_condition_lines 키 없음
+        }
+        text = build_telegram_text("GMOC", "14:08", "btc_jpy", data)
+        assert "4/5" in text

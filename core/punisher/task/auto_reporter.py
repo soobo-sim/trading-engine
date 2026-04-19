@@ -372,12 +372,13 @@ def create_auto_reporter(
         return None
 
     bot_token = os.environ.get("AUTO_REPORT_BOT_TOKEN", "")
-    chat_id = os.environ.get("AUTO_REPORT_CHAT_ID", "")
+    # AUTO_REPORT_CHAT_ID 미설정 시 TELEGRAM_SAVEUS_CHAT_ID(실행 도메인 채널)로 폴백
+    chat_id = os.environ.get("AUTO_REPORT_CHAT_ID", "") or os.environ.get("TELEGRAM_SAVEUS_CHAT_ID", "")
     interval_min = int(os.environ.get("AUTO_REPORT_INTERVAL_MIN", "15"))
 
     if not bot_token or not chat_id:
         logger.error(
-            "AutoReporter: AUTO_REPORT_BOT_TOKEN 또는 AUTO_REPORT_CHAT_ID 미설정"
+            "AutoReporter: AUTO_REPORT_BOT_TOKEN 또는 chat_id(AUTO_REPORT_CHAT_ID/TELEGRAM_SAVEUS_CHAT_ID) 미설정"
         )
         return None
 

@@ -56,6 +56,10 @@ class AdvisoryCreateRequest(BaseModel):
         None,
         description="adjust_risk 전용. 키: stop_loss_pct, take_profit_ratio, trailing_atr_multiplier, force_exit",
     )
+    macro_context: dict | None = Field(
+        None,
+        description="AI 판단 추적·학습용 매크로 컨텍스트. 구조: {raw: {fng, news_avg, vix, dxy}, interpretation: str, impact_direction: str, impact_notes: str}",
+    )
 
 
 class AdvisoryResponse(BaseModel):
@@ -69,6 +73,7 @@ class AdvisoryResponse(BaseModel):
     take_profit: float | None
     regime: str | None
     reasoning: str
+    macro_context: dict | None
     risk_notes: str | None
     alice_summary: str | None
     samantha_summary: str | None
@@ -97,6 +102,7 @@ def _to_response(advisory: RachelAdvisory) -> AdvisoryResponse:
         stop_loss=advisory.stop_loss,
         take_profit=advisory.take_profit,
         regime=advisory.regime,
+        macro_context=advisory.macro_context,
         reasoning=advisory.reasoning,
         risk_notes=advisory.risk_notes,
         alice_summary=advisory.alice_summary,
@@ -168,6 +174,7 @@ async def create_advisory(
         size_pct=body.size_pct,
         stop_loss=body.stop_loss,
         take_profit=body.take_profit,
+        macro_context=body.macro_context,
         regime=body.regime,
         reasoning=body.reasoning,
         risk_notes=body.risk_notes,

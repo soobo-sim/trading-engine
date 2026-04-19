@@ -20,6 +20,8 @@ from .display import (
     get_position_summary,
     get_entry_blockers,
     get_entry_blockers_short,
+    get_entry_condition_lines_long,
+    get_entry_condition_lines_short,
     get_wait_direction,
 )
 from .alerts import (
@@ -109,12 +111,28 @@ def build_telegram_text(prefix: str, time_str: str, pair: str, data: dict) -> st
         stop = p.get("stop_loss_price", 0)
         distance = p.get("trailing_stop_distance", 0)
         pnl_at_stop = p.get("pnl_at_stop", 0)
+        breakeven_target = p.get("breakeven_trigger_price")
+        current_price = data["current_price"]
+        side_val = p.get("side", "buy")
+
+        # SL 섹션: 명확한 수치 기반 표시
+        distance_pct = abs(current_price - stop) / current_price * 100 if current_price > 0 and stop else 0
+        lines.append(f"🛑 SL: ¥{stop:,.0f}")
+        lines.append(f"   · 현재가까지 거리: ¥{distance:,.0f} ({distance_pct:.1f}%)")
         if pnl_at_stop > 0:
-            lines.append(f" · 🛡️ 이익보호 ¥{stop:,.0f} (확정이익 +¥{pnl_at_stop:,.0f})")
+            lines.append(f"   · 발동 시: +¥{pnl_at_stop:,.0f} 이익 확정 (손익보호 중)")
         elif pnl_at_stop == 0:
-            lines.append(f" · 🔒 손익분기 ¥{stop:,.0f} (현재가 거리 ¥{distance:,.0f})")
+            lines.append(f"   · 발동 시: ¥0 (손익분기)")
         else:
-            lines.append(f" · 🛑 손절 ¥{stop:,.0f} (청산 시 -¥{abs(pnl_at_stop):,.0f} 손실)")
+            lines.append(f"   · 발동 시: -¥{abs(pnl_at_stop):,.0f} 손절")
+        # 손익분기 전환 기준가 표시
+        if breakeven_target and pnl_at_stop < 0:
+            if side_val == "sell":
+                remaining = current_price - breakeven_target
+            else:
+                remaining = breakeven_target - current_price
+            if remaining > 0:
+                lines.append(f"   · ¥{breakeven_target:,.0f} 도달 시 → 발동해도 손해 없음 (¥{remaining:,.0f} 남음)")
 
         situation = data.get("position_summary") or "보유 유지"
         lines.append(f"📊 지금: {_format_situation_with_basis(situation, ema_slope_pct, rsi)}")
@@ -174,15 +192,26 @@ def build_telegram_text(prefix: str, time_str: str, pair: str, data: dict) -> st
         situation = data.get("market_summary") or "관망"
         lines.append(f"📊 지금: {_format_situation_with_basis(situation, ema_slope_pct, rsi)}")
 
-        met = data.get("conditions_met", 0)
-        total = data.get("conditions_total", 5)
-        blockers = data.get("entry_blockers", [])
-        if blockers:
-            lines.append(f"🚫 {met}/{total} 진입까지:")
-            for b in blockers:
-                lines.append(f" · {b}")
+        condition_lines = data.get("entry_condition_lines", [])
+        if condition_lines:
+            met_count = sum(1 for l in condition_lines if "✅" in l)
+            total_count = len(condition_lines)
+            has_unmet = any("❌" in l for l in condition_lines)
+            if has_unmet:
+                lines.append(f"🚫 {met_count}/{total_count} 진입까지:")
+            else:
+                lines.append(f"✅ {met_count}/{total_count} 진입 조건 충족")
+            lines.extend(condition_lines)
         else:
-            lines.append(f"✅ {met}/{total} 진입 조건 충족")
+            met = data.get("conditions_met", 0)
+            total = data.get("conditions_total", 5)
+            blockers = data.get("entry_blockers", [])
+            if blockers:
+                lines.append(f"🚫 {met}/{total} 진입까지:")
+                for b in blockers:
+                    lines.append(f" · {b}")
+            else:
+                lines.append(f"✅ {met}/{total} 진입 조건 충족")
 
         _rg = data.get("regime_gate_info")
         if _rg is not None:
@@ -383,6 +412,17 @@ async def generate_trend_report(
             "price_diff": round(price_diff, 0),
             "pnl_at_stop": int(pnl_at_stop),
         }
+        # 손익분기 전환 기준가: 이 가격 도달 시 SL이 진입가 이상 → 스탑 발동해도 손해 없음
+        if atr:
+            breakeven_trigger_atr = float(params.get("breakeven_trigger_atr", 1.0))
+            if side == "sell":
+                position_data["breakeven_trigger_price"] = round(
+                    position_obj.entry_price - atr * breakeven_trigger_atr, 0
+                )
+            else:
+                position_data["breakeven_trigger_price"] = round(
+                    position_obj.entry_price + atr * breakeven_trigger_atr, 0
+                )
         position_summary = get_position_summary(exit_signal, rsi, unrealized_pnl_pct)
 
     entry_blockers = get_entry_blockers(
@@ -393,7 +433,6 @@ async def generate_trend_report(
     ) if not position_data else []
 
     entry_conditions_met = len(entry_blockers) == 0 and not position_data
-    # 5 conditions: price>EMA, slope≥min, RSI range, regime, no_position
     conditions_total = 5
     conditions_met = conditions_total - len(entry_blockers) if not position_data else conditions_total
     market_summary = get_market_summary(ema_slope_pct, rsi, signal) if not position_data else None
@@ -411,6 +450,40 @@ async def generate_trend_report(
             conditions_met = max(0, conditions_total - len(entry_blockers))
     else:
         wait_direction = None  # spot (BF 등) — 기존 동작 유지
+
+    # ── 조건 상세 라인 (✅/❌ 전체 4개 조건 표시) ──────────────
+    _rg_info = None
+    try:
+        _rg_ref = getattr(trend_manager, "_regime_gate", None)
+        _rg_info = {
+            "consecutive_count": _rg_ref.consecutive_count if _rg_ref else 0,
+            "active_strategy": _rg_ref.active_strategy if _rg_ref else None,
+        }
+    except Exception:
+        pass
+    _regime_consecutive = (_rg_info or {}).get("consecutive_count", 0)
+    _regime_active = (_rg_info or {}).get("active_strategy") is not None
+    if not position_data:
+        if wait_direction == "short":
+            entry_condition_lines = get_entry_condition_lines_short(
+                signal, current_price, ema, ema_slope_pct, rsi,
+                rsi_min=float(params.get("entry_rsi_min_short", 35.0)),
+                rsi_max=float(params.get("entry_rsi_max_short", 60.0)),
+                slope_threshold=float(params.get("ema_slope_short_threshold", -0.05)),
+                regime_consecutive=_regime_consecutive,
+                regime_active=_regime_active,
+            )
+        else:
+            entry_condition_lines = get_entry_condition_lines_long(
+                signal, current_price, ema, ema_slope_pct, rsi,
+                rsi_min=float(params.get("entry_rsi_min", 40.0)),
+                rsi_max=float(params.get("entry_rsi_max", 65.0)),
+                slope_min=float(params.get("ema_slope_entry_min", 0.0)),
+                regime_consecutive=_regime_consecutive,
+                regime_active=_regime_active,
+            )
+    else:
+        entry_condition_lines = []
     # 7. 텍스트 조립용 데이터
     regime = sig.get("regime")  # "trending" | "ranging" | "unclear"
     _regime_gate = getattr(trend_manager, "_regime_gate", None)
@@ -438,6 +511,7 @@ async def generate_trend_report(
         "position": position_data,
         "exit_signal": exit_signal if position_data else None,
         "entry_blockers": entry_blockers,
+        "entry_condition_lines": entry_condition_lines,
         "wait_direction": wait_direction,
         "conditions_met": conditions_met,
         "conditions_total": conditions_total,

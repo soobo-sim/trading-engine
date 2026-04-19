@@ -1174,6 +1174,10 @@ class RachelAdvisory(Base):
     # "signal_entry_ok" = entry_ok/entry_sell 시그널이면 진입 허용 (Rachel이 기술적 사유로 hold 시)
     hold_override_policy = Column(String(30), nullable=False, server_default="none")
 
+    # 매크로 컨텍스트 (AI 판단 추적·학습용)
+    # {raw: {fng, news_avg, vix, dxy}, interpretation: str, impact_direction: str, impact_notes: str}
+    macro_context = Column(JSON, nullable=True, default=None)
+
     # 시간
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     expires_at = Column(DateTime(timezone=True), nullable=False)  # 이후 v1 폴백

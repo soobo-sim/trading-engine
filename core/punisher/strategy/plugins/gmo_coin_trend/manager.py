@@ -593,8 +593,25 @@ class GmoCoinTrendManager(CfdTrendFollowingManager):
                 if not ok:
                     logger.warning(
                         f"[GmocMgr] {pair}: ロスカットレート 동기화 실패 "
-                        f"(position_id={fx_pos.position_id}, sl=¥{new_sl})"
+                        f"(position_id={fx_pos.position_id}, sl=¥{new_sl:.0f}) — "
+                        "in-memory stop이 보호 중"
                     )
+                    try:
+                        import os
+                        from core.shared.logging.telegram_handlers import _send_telegram
+                        bot_token = os.getenv("AUTO_REPORT_BOT_TOKEN", "")
+                        chat_id = os.getenv("AUTO_REPORT_CHAT_ID", "")
+                        asyncio.ensure_future(
+                            _send_telegram(
+                                bot_token,
+                                chat_id,
+                                f"⚠️ [GmocMgr] {pair} 로스컷 동기화 실패\n"
+                                f"position_id={fx_pos.position_id}\n"
+                                f"SL=¥{new_sl:,.0f} — 인메모리 SL 보호 중",
+                            )
+                        )
+                    except Exception:
+                        pass
                 else:
                     logger.debug(
                         f"[GmocMgr] {pair}: ロスカットレート 동기화 완료 "

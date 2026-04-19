@@ -56,7 +56,7 @@ def compute_exit_signal(
     rsi_overbought_th = params.get("rsi_overbought", 75)
     rsi_extreme_th = params.get("rsi_extreme", 80)
     rsi_breakdown_th = params.get("rsi_breakdown", 40)
-    slope_weak_th = params.get("ema_slope_weak_threshold", 0.03)
+    slope_weak_th = params.get("ema_slope_weak_threshold", 0.05)
     profit_atr_mult = params.get("partial_exit_profit_atr", 2.0)
     tighten_atr = params.get("tighten_stop_atr", 1.0)
 

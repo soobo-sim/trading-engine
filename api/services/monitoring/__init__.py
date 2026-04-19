@@ -15,6 +15,8 @@ from .display import (
     get_position_summary,
     get_entry_blockers,
     get_entry_blockers_short,
+    get_entry_condition_lines_long,
+    get_entry_condition_lines_short,
     get_wait_direction,
     get_narrative_situation,
     get_narrative_outlook,
@@ -68,6 +70,8 @@ __all__ = [
     "get_position_summary",
     "get_entry_blockers",
     "get_entry_blockers_short",
+    "get_entry_condition_lines_long",
+    "get_entry_condition_lines_short",
     "get_wait_direction",
     # alerts
     "ALERT_COOLDOWN_SEC",

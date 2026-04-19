@@ -162,6 +162,7 @@ class BaseTrendManager(CandleLoopMixin, JudgeMixin, ExecutionMixin, ABC):
         self._latest_price.pop(pair, None)
         self._ema_slope_history.pop(pair, None)
         self._ema_slope_last_key.pop(pair, None)
+
         self._close_fail_count.pop(pair, None)
         self._close_fail_until.pop(pair, None)
         logger.debug(f"{self._log_prefix} {pair}: 추세추종 태스크 종료")

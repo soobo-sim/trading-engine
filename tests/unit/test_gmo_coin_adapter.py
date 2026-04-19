@@ -854,7 +854,7 @@ async def test_change_losscut_price_success(adapter: GmoCoinAdapter) -> None:
 
 @pytest.mark.asyncio
 async def test_change_losscut_price_failure(adapter: GmoCoinAdapter) -> None:
-    """status != 0 → False (예외 없음, 로그 경고)."""
+    """status != 0 (ERR-9000 등 일반 오류) → False (예외 없음, 로그 경고)."""
     resp = _mock_response({
         "status": 1,
         "messages": [{"message_code": "ERR-9000", "message_string": "Some error"}],
@@ -864,6 +864,20 @@ async def test_change_losscut_price_failure(adapter: GmoCoinAdapter) -> None:
 
     result = await adapter.change_losscut_price(position_id=123456, price=8000000.0)
     assert result is False
+
+
+@pytest.mark.asyncio
+async def test_change_losscut_price_err578(adapter: GmoCoinAdapter) -> None:
+    """ERR-578 (trailing race condition) → False, 예외 없음."""
+    resp = _mock_response({
+        "status": 1,
+        "messages": [{"message_code": "ERR-578", "message_string": "Specify losscutprice greater than 14929028."}],
+    })
+    adapter._client = AsyncMock(spec=httpx.AsyncClient)
+    adapter._client.post = AsyncMock(return_value=resp)
+
+    result = await adapter.change_losscut_price(position_id=283501561, price=12098106.0)
+    assert result is False  # False 반환, 예외 없음
 
 
 @pytest.mark.asyncio

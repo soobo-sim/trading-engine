@@ -663,3 +663,215 @@ class TestUnknownPnl:
         assert summary["wins"] == 1
         assert summary["losses"] == 0
         assert summary["win_rate"] == 100.0
+
+
+# ──────────────────────────────────────────────────────────────
+# Macro Brief API 테스트
+# ──────────────────────────────────────────────────────────────
+
+
+class TestMacroBrief:
+    """macro-brief API 테스트 — DataHub 모킹으로 컨텍스트 조합 검증."""
+
+    @pytest_asyncio.fixture
+    async def setup_with_state(self, setup):
+        """기존 setup에 state 참조 추가."""
+        client, factory = setup
+        
+        # state는 setup fixture 안에서 생성되지만 yield되지 않으므로,
+        # 직접 AppState를 재구성하거나, dependency override를 사용해야 함
+        # 여기서는 간단하게 새로운 state를 만들어서 반환
+        from core.punisher.monitoring.health import HealthChecker
+        from core.strategy.gmo_coin_trend import GmoCoinTrendManager
+        from core.punisher.task.supervisor import TaskSupervisor
+        from tests.fake_exchange import FakeExchangeAdapter
+        
+        # 기존 setup에서 사용한 것과 동일한 컴포넌트들을 가져옴
+        # (실제로는 이미 setup에서 만들어진 것들을 재사용하는 것이 좋지만,
+        # fixture 구조상 접근 불가하므로 여기서는 mock hub만 교체)
+        
+        yield client, factory
+    
+    @pytest.mark.asyncio
+    async def test_mb01_all_data_present(self, setup):
+        """
+        MB-01: 모든 데이터 존재
+        Given: FNG, 뉴스, 이벤트, VIX/DXY 모두 있음
+        When:  GET /api/analysis/macro-brief
+        Then:  200, context_summary에 모든 항목 포함
+        """
+        from datetime import datetime, timedelta, timezone
+        from unittest.mock import AsyncMock, patch
+        from core.shared.data.dto import SentimentDTO, NewsDTO, EconomicEventDTO, MacroSnapshotDTO
+
+        client, _ = setup
+
+        # DataHub 메서드를 patch
+        now = datetime.now(timezone.utc)
+        
+        async def mock_get_sentiment():
+            return SentimentDTO(
+                source="fear_and_greed",
+                score=27,
+                classification="Fear",
+                timestamp=now,
+            )
+        
+        async def mock_get_news_summary(pair):
+            return (
+                NewsDTO(
+                    title="BTC crashes 10%",
+                    source="cryptonews",
+                    published_at=now,
+                    category="market",
+                    sentiment_score=-0.8,
+                ),
+                NewsDTO(
+                    title="Market panic spreads",
+                    source="reuters",
+                    published_at=now,
+                    category="market",
+                    sentiment_score=-0.6,
+                ),
+            )
+        
+        event_time = now + timedelta(hours=3)
+        async def mock_get_upcoming_events():
+            return (
+                EconomicEventDTO(
+                    name="FOMC",
+                    datetime_jst=event_time + timedelta(hours=9),  # JST = UTC+9
+                    importance="High",
+                    currency="USD",
+                ),
+            )
+        
+        async def mock_get_macro_snapshot():
+            return MacroSnapshotDTO(
+                vix=22.5,
+                dxy=104.2,
+                us_10y=4.3,
+                fetched_at=now,
+            )
+        
+        # DataHub 메서드들을 patch
+        with patch("core.shared.data.hub.DataHub.get_sentiment", mock_get_sentiment), \
+             patch("core.shared.data.hub.DataHub.get_news_summary", mock_get_news_summary), \
+             patch("core.shared.data.hub.DataHub.get_upcoming_events", mock_get_upcoming_events), \
+             patch("core.shared.data.hub.DataHub.get_macro_snapshot", mock_get_macro_snapshot):
+            
+            resp = await client.get("/api/analysis/macro-brief?pair=btc_jpy")
+        
+        assert resp.status_code == 200
+        
+        data = resp.json()
+        assert data["fng"]["score"] == 27
+        assert data["fng"]["label"] == "Fear"
+        assert data["news"]["count"] == 2
+        assert data["news"]["avg_sentiment"] < 0
+        assert len(data["events"]["high_within_6h"]) == 1
+        assert data["macro"]["vix"] == 22.5
+        assert data["macro"]["dxy"] == 104.2
+        
+        # context_summary 검증
+        summary = data["context_summary"]
+        assert "FNG 27(Fear)" in summary
+        assert "뉴스 부정적" in summary
+        assert "고영향 이벤트 1개(6시간 내)" in summary
+        assert "VIX 22.5" in summary
+        assert "DXY 104.2" in summary
+
+    @pytest.mark.asyncio
+    async def test_mb02_partial_data_none_graceful(self, setup):
+        """
+        MB-02: 일부 데이터 None — graceful 처리
+        Given: FNG만 있고 나머지 None
+        When:  GET /api/analysis/macro-brief
+        Then:  200, 해당 항목만 context_summary에 포함
+        """
+        from datetime import datetime, timezone
+        from unittest.mock import patch
+        from core.shared.data.dto import SentimentDTO
+
+        client, _ = setup
+        now = datetime.now(timezone.utc)
+        
+        async def mock_get_sentiment():
+            return SentimentDTO(
+                source="fear_and_greed",
+                score=50,
+                classification="Neutral",
+                timestamp=now,
+            )
+        
+        async def mock_get_news_summary(pair):
+            return ()
+        
+        async def mock_get_upcoming_events():
+            return ()
+        
+        async def mock_get_macro_snapshot():
+            return None
+        
+        with patch("core.shared.data.hub.DataHub.get_sentiment", mock_get_sentiment), \
+             patch("core.shared.data.hub.DataHub.get_news_summary", mock_get_news_summary), \
+             patch("core.shared.data.hub.DataHub.get_upcoming_events", mock_get_upcoming_events), \
+             patch("core.shared.data.hub.DataHub.get_macro_snapshot", mock_get_macro_snapshot):
+            
+            resp = await client.get("/api/analysis/macro-brief?pair=btc_jpy")
+        
+        assert resp.status_code == 200
+        
+        data = resp.json()
+        assert data["fng"]["score"] == 50
+        assert data["news"] is None or data["news"]["count"] == 0
+        assert data["events"]["high_within_6h"] == []
+        assert data["macro"] is None
+        
+        summary = data["context_summary"]
+        assert "FNG 50(Neutral)" in summary
+        # 나머지는 포함 안 됨
+        assert "뉴스" not in summary
+        assert "이벤트" not in summary
+        assert "VIX" not in summary
+
+    @pytest.mark.asyncio
+    async def test_mb03_all_none_returns_no_data(self, setup):
+        """
+        MB-03: 모든 데이터 None
+        Given: 모든 소스 None
+        When:  GET /api/analysis/macro-brief
+        Then:  200, context_summary="데이터 없음"
+        """
+        from unittest.mock import patch
+
+        client, _ = setup
+        
+        async def mock_get_sentiment():
+            return None
+        
+        async def mock_get_news_summary(pair):
+            return ()
+        
+        async def mock_get_upcoming_events():
+            return ()
+        
+        async def mock_get_macro_snapshot():
+            return None
+        
+        with patch("core.shared.data.hub.DataHub.get_sentiment", mock_get_sentiment), \
+             patch("core.shared.data.hub.DataHub.get_news_summary", mock_get_news_summary), \
+             patch("core.shared.data.hub.DataHub.get_upcoming_events", mock_get_upcoming_events), \
+             patch("core.shared.data.hub.DataHub.get_macro_snapshot", mock_get_macro_snapshot):
+            
+            resp = await client.get("/api/analysis/macro-brief?pair=btc_jpy")
+        
+        assert resp.status_code == 200
+        
+        data = resp.json()
+        assert data["fng"] is None
+        assert data["news"] is None or data["news"]["count"] == 0
+        assert data["macro"] is None
+        
+        summary = data["context_summary"]
+        assert summary == "데이터 없음"

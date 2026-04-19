@@ -184,7 +184,9 @@ async def lifespan(app: FastAPI):
     setup_logging(exchange)
 
     # Telegram 로그 핸들러 초기화 (DEBUG→사만다, INFO→레이첼, WARNING+→Save Us)
-    from core.logging.telegram_handlers import setup_telegram_logging, shutdown_telegram_logging
+    from core.logging.telegram_handlers import (
+        setup_telegram_logging, shutdown_telegram_logging, seed_telegram_regime_state,
+    )
     await setup_telegram_logging(exchange)
 
     cfg = _EXCHANGE_CONFIG[exchange]
@@ -259,6 +261,11 @@ async def lifespan(app: FastAPI):
     _restored = await load_regime_gate_state(session_factory, _regime_gate)
     if _restored:
         logger.info(f"RegimeGate DB 복원 완료 (active={_regime_gate.active_strategy})")
+        _gate_state = _regime_gate.to_dict()
+        seed_telegram_regime_state(
+            _gate_state.get("consecutive_regime"),
+            _gate_state.get("consecutive_count", 0),
+        )
     else:
         logger.info("RegimeGate DB 상태 없음 — warm-up 시작")
     trend_manager.set_regime_gate(_regime_gate)

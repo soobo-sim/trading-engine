@@ -656,7 +656,16 @@ class GmoCoinAdapter:
             )
             data = response.json()
             if data.get("status") != 0:
-                logger.warning(f"[GMO Coin] ロスカットレート 변경 실패: {data}")
+                err_codes = [m.get("message_code") for m in data.get("messages", [])]
+                if "ERR-578" in err_codes:
+                    # ERR-578: 현재가보다 낮은 로스컷 시도 (trailing ratchet race condition)
+                    # in-memory stop_loss_monitor가 실제 보호 담당 → INFO 레벨로 기록
+                    logger.info(
+                        f"[GMO Coin] ロスカットレート ERR-578 — "
+                        f"sl=¥{price:.0f} 이 현재가 이하 (trailing race condition, 다음 사이클 재시도): {data}"
+                    )
+                else:
+                    logger.warning(f"[GMO Coin] ロスカットレート 변경 실패: {data}")
                 return False
             return True
         except httpx.HTTPError as e:

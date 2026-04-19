@@ -158,6 +158,9 @@ class TelegramTransactionHandler(logging.Handler):
             'advisory_reasoning': None,
             'fng_score': None,
             'fng_label': None,
+            # 시그널 상세 (candle_loop 로그에서 파싱)
+            'ema_slope_pct': None,
+            'rsi': None,
             # 포지션 상태
             'has_position': False,
             'position_side': None,
@@ -177,21 +180,15 @@ class TelegramTransactionHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         """로그 메시지 파싱 → 상태 업데이트 + 즉시 전송 판단."""
-        # INFO만 수집 (DEBUG 제외, WARNING 이상 제외)
-        if record.levelno != logging.INFO:
+        # WARNING 이상 무시
+        if record.levelno > logging.INFO:
             return
-        
-        # 도메인 필터
-        if self._domain is not None:
-            record_domain = _get_domain(record.name)
-            if self._domain == "judge" and record_domain != "judge":
-                return
-            if self._domain == "punisher" and record_domain == "judge":
-                return
-        
+
         msg = record.getMessage()
-        
-        # 파싱 (best-effort, 실패 시 조용히 넘어감)
+
+        # 파싱은 레벨/도메인 무관하게 항상 수행 (DEBUG 포함)
+        # candle_loop는 hold 상태에서 DEBUG로 찍히지만 price/ema 등은 여기서 파싱해야 함
+        # 즉시 전송 판단은 _parse_and_update 내부에서 domain 체크로 처리
         try:
             self._parse_and_update(msg)
         except Exception:
@@ -260,15 +257,32 @@ class TelegramTransactionHandler(logging.Handler):
         if '기존 포지션 감지' in msg:
             self._state['has_position'] = True
         
-        # signal
-        m = re.search(r'signal=(\w+)', msg)
+        # signal + ema_slope_pct + rsi + ema + price (candle_loop 상세 로그)
+        m = re.search(r'signal=(\w+) ema_slope_pct=([-\d.]+|N/A) rsi=([\d.]+|N/A) ema=([\d.]+|N/A) price=([\d.]+)', msg)
         if m:
             new_signal = m.group(1)
+            if m.group(2) != 'N/A':
+                self._state['ema_slope_pct'] = float(m.group(2))
+            if m.group(3) != 'N/A':
+                self._state['rsi'] = float(m.group(3))
+            if m.group(4) != 'N/A':
+                self._state['ema_price'] = float(m.group(4))
+            self._state['current_price'] = float(m.group(5))
             if self._state['signal'] != new_signal:
                 self._state['prev_signal'] = self._state['signal']
                 self._state['signal'] = new_signal
                 if self._domain == "judge" and self._loop and self._state['prev_signal'] is not None:
                     self._loop.create_task(self._send_signal_change())
+        else:
+            # 기존 signal= 파싱 폴백 (상세 포맷 없는 로그)
+            m = re.search(r'signal=(\w+)', msg)
+            if m:
+                new_signal = m.group(1)
+                if self._state['signal'] != new_signal:
+                    self._state['prev_signal'] = self._state['signal']
+                    self._state['signal'] = new_signal
+                    if self._domain == "judge" and self._loop and self._state['prev_signal'] is not None:
+                        self._loop.create_task(self._send_signal_change())
         
         # regime (4H 체제 판정)
         m = re.search(r'regime=(\w+).*BB폭 ([\d.]+)%.*가격범위 ([\d.]+)%.*?(\w+) 연속 (\d+)회', msg)
@@ -378,15 +392,15 @@ class TelegramTransactionHandler(logging.Handler):
             'exit': '청산 지시',
         }.get(reason, reason)
         
-        entry = self._state.get('entry_price')
-        current = self._state.get('current_price')
-        stop = self._state.get('stop_price')
+        entry = self._state.get('entry_price') or 0
+        current = self._state.get('current_price') or 0
+        stop = self._state.get('stop_price') or 0
         size = self._state.get('position_size', 0)
         
         # 손익 계산
         pnl_jpy = 0
         pnl_pct = 0
-        if entry and current and size:
+        if entry > 0 and current > 0 and size > 0:
             if evt['side'] == 'buy':
                 pnl_jpy = (current - entry) * size
             else:
@@ -422,6 +436,12 @@ class TelegramTransactionHandler(logging.Handler):
         prev = evt['prev']
         curr = evt['curr']
         diff = curr - prev
+
+        # 스탑이 실제로 변경되지 않으면 발송 생략 (prev==curr 시 오해 방지)
+        if diff == 0:
+            self._state['stop_tighten_event'] = None
+            return
+
         pct = diff / prev * 100
         
         # 손익 상태
@@ -494,7 +514,7 @@ class TelegramTransactionHandler(logging.Handler):
                 conclusion = "진입 조건 미충족"
         
         text = (
-            f"🧠 [{self._exchange}·BTC] {_format_time(time.time())}  ★ 신호 변경  (판단 사이클)\n"
+            f"🔮 [{self._exchange}·BTC] {_format_time(time.time())}  ★ 신호 변경  (판단 사이클)\n"
             f"──────────────────────────\n"
             f"이전: {prev_kr}  →  현재: {curr_kr}\n"
             f"레이첼: {adv_summary}\n"
@@ -520,14 +540,14 @@ class TelegramTransactionHandler(logging.Handler):
         
         curr_kr = regime_kr.get(curr, curr)
         
-        # 진입 허용/차단
-        gate_status = "진입 허용" if curr == 'trending' and consecutive >= 3 else "진입 차단 중"
+        # 체제 허용/차단 (체제 이벤트 전용 — 실제 entry signal은 별도 판단)
+        gate_status = "체제 허용 (신호 대기)" if curr == 'trending' and consecutive >= 3 else "진입 차단 중"
         
         if changed and prev:
             prev_kr = regime_kr.get(prev, prev)
             conclusion = f"{curr_kr} 전환 감지 → {gate_status}"
             text = (
-                f"🧠 [{self._exchange}·BTC] {_format_time(time.time())}  ★ 체제 전환  (판단 사이클 · 4H 체제 갱신)\n"
+                f"🔮 [{self._exchange}·BTC] {_format_time(time.time())}  ★ 체제 전환  (판단 사이클 · 4H 체제 갱신)\n"
                 f"──────────────────────────\n"
                 f"{prev_kr} → {curr_kr} 전환\n"
                 f"  BB폭 {bb:.1f}%  /  가격범위 {range_pct:.1f}%\n"
@@ -537,7 +557,7 @@ class TelegramTransactionHandler(logging.Handler):
         else:
             conclusion = f"{curr_kr} 유지 → {gate_status}"
             text = (
-                f"🧠 [{self._exchange}·BTC] {_format_time(time.time())}  (판단 사이클 · 4H 체제 갱신)\n"
+                f"🔮 [{self._exchange}·BTC] {_format_time(time.time())}  (판단 사이클 · 4H 체제 갱신)\n"
                 f"──────────────────────────\n"
                 f"체제: {curr_kr} · {consecutive}회 연속\n"
                 f"  BB폭 {bb:.1f}%  /  가격범위 {range_pct:.1f}%\n"
@@ -562,7 +582,7 @@ class TelegramTransactionHandler(logging.Handler):
         }.get(action, action)
         
         text = (
-            f"🧠 [{self._exchange}·BTC] {_format_time(time.time())}  (판단 사이클 · 레이첼 advisory)\n"
+            f"🔮 [{self._exchange}·BTC] {_format_time(time.time())}  (판단 사이클 · 레이첼 advisory)\n"
             f"──────────────────────────\n"
             f"레이첼 의견: {action_kr} (확신도 {conf:.0f}%, 만료까지 {remaining_h:.1f}H)\n"
             f"  사유: {reasoning}"
@@ -576,7 +596,7 @@ class TelegramTransactionHandler(logging.Handler):
         label = self._state.get('fng_label')
         
         text = (
-            f"🧠 [{self._exchange}·BTC] {_format_time(time.time())}  (판단 사이클 · FNG 갱신)\n"
+            f"🔮 [{self._exchange}·BTC] {_format_time(time.time())}  (판단 사이클 · FNG 갱신)\n"
             f"──────────────────────────\n"
             f"시장 심리: {score} ({label})"
         )
@@ -584,10 +604,9 @@ class TelegramTransactionHandler(logging.Handler):
         await _send_telegram(self._bot_token, self._chat_id, text)
 
     async def _send_periodic_summary(self) -> None:
-        """5분 정기 요약 전송 (판단 도메인 전용)."""
-        if self._domain != "judge":
-            return
-        
+        """5분 정기 요약 전송. 판단 도메인(judge) HeartBeat 채널에만 전송."""
+        # _flush_loop는 judge 핸들러에서만 시작되므로 여기는 항상 judge
+
         # 체제
         regime = self._state.get('regime_status')
         consecutive = self._state.get('regime_consecutive', 0)
@@ -596,9 +615,27 @@ class TelegramTransactionHandler(logging.Handler):
             'ranging': '박스권',
             'unclear': '불명확',
         }.get(regime, regime or '미확정')
-        
-        gate_status = "진입 허용" if regime == 'trending' and consecutive >= 3 else "진입 차단 중"
-        
+
+        # 방향 표시 (trending일 때: 현재가 vs EMA로 상향↑/하향↓ 판단)
+        if regime == 'trending':
+            _cur = self._state.get('current_price')
+            _ema = self._state.get('ema_price')
+            if _cur and _ema:
+                regime_kr += " ↑" if _cur > _ema else " ↓"
+
+        # gate_status: RegimeGate + 실제 signal 상태를 모두 반영
+        # (RegimeGate만 보고 "진입 허용"을 표시하면 신호 없어도 진입 가능처럼 오해)
+        _signal_now = self._state.get('signal')
+        regime_gate_ok = regime == 'trending' and consecutive >= 3
+        if not regime_gate_ok:
+            gate_status = "진입 차단 중"
+        elif _signal_now == 'entry_ok':
+            gate_status = "신호 발생 (롱)"
+        elif _signal_now == 'entry_sell':
+            gate_status = "신호 발생 (숏)"
+        else:
+            gate_status = "체제OK · 신호 대기"
+
         # 레이첼
         adv = self._state.get('advisory_action')
         if adv:
@@ -607,28 +644,92 @@ class TelegramTransactionHandler(logging.Handler):
             adv_summary = f"{adv} (확신도 {conf:.0f}%, 만료까지 {remaining_h:.1f}H)"
         else:
             adv_summary = "4H advisory 없음 → 규칙 기반 판단"
-        
-        # 신호
-        signal = self._state.get('signal')
-        signal_kr = {
-            'entry_ok': '롱 진입 가능',
-            'hold': '관망',
-            'entry_sell': '숏 진입 가능',
-        }.get(signal, signal or '미확정')
-        
+
+        # 승인 모드
+        import os as _os
+        _approval_mode = _os.environ.get("APPROVAL_MODE", "").lower()
+        _max_size = _os.environ.get("AUTO_APPROVAL_MAX_SIZE", "0.40")
+        _min_conf = _os.environ.get("AUTO_APPROVAL_MIN_CONFIDENCE", "0.65")
+        if _approval_mode == "auto":
+            _min_conf_pct = int(float(_min_conf) * 100)
+            _max_size_pct = int(float(_max_size) * 100)
+            approval_line = f"승인: 🤖 자동 (신뢰도≥{_min_conf_pct}%, 사이즈≤{_max_size_pct}%)"
+        elif _approval_mode in ("manual", "true", "1"):
+            approval_line = "승인: 👆 수동 (1클릭 승인 대기)"
+        else:
+            approval_line = "승인: ⚡ 직통 (승인 게이트 없음)"
+
+        # 진입 조건 4개 (state 값 기반)
         current = self._state.get('current_price')
         ema = self._state.get('ema_price')
-        signal_detail = ""
-        if current and ema:
-            if current > ema:
-                signal_detail = f"현재가 ¥{current:,.0f} > EMA ¥{ema:,.0f}"
+        ema_slope = self._state.get('ema_slope_pct')
+        rsi = self._state.get('rsi')
+
+        # 방향 결정: 현재가 < EMA → 숏 대기, 아니면 롱 대기
+        is_short_setup = (current is not None and ema is not None and current < ema)
+        direction_label = "숏" if is_short_setup else "롱"
+
+        condition_lines = []
+        if current is not None and ema is not None:
+            if is_short_setup:
+                # 숏 4조건
+                c1 = "✅"
+                condition_lines.append(f" {c1} ① 가격 < EMA    ¥{current:,.0f} (EMA ¥{ema:,.0f})")
+
+                SHORT_SLOPE_TH = -0.05
+                if ema_slope is not None:
+                    c2 = "✅" if ema_slope < SHORT_SLOPE_TH else "❌"
+                    if ema_slope >= SHORT_SLOPE_TH:
+                        gap = abs(ema_slope - SHORT_SLOPE_TH)
+                        condition_lines.append(f" {c2} ② EMA 기울기    지금 {ema_slope:+.2f}% → {SHORT_SLOPE_TH:.2f}% 미만 필요 ({gap:.2f}%p 부족)")
+                    else:
+                        condition_lines.append(f" {c2} ② EMA 기울기    {ema_slope:+.2f}% (충족)")
+                else:
+                    condition_lines.append(" ❓ ② EMA 기울기    데이터 없음")
+
+                SHORT_RSI_MIN, SHORT_RSI_MAX = 35.0, 60.0
+                if rsi is not None:
+                    c3 = "✅" if SHORT_RSI_MIN <= rsi <= SHORT_RSI_MAX else "❌"
+                    condition_lines.append(f" {c3} ③ RSI 범위      {rsi:.0f}  (허용 {SHORT_RSI_MIN:.0f}~{SHORT_RSI_MAX:.0f})")
+                else:
+                    condition_lines.append(" ❓ ③ RSI 범위      데이터 없음")
             else:
-                signal_detail = f"현재가 ¥{current:,.0f} < EMA ¥{ema:,.0f}"
-        
+                # 롱 4조건
+                c1 = "✅" if current > ema else "❌"
+                condition_lines.append(f" {c1} ① 가격 > EMA    ¥{current:,.0f} (EMA ¥{ema:,.0f})")
+
+                LONG_SLOPE_TH = 0.0
+                if ema_slope is not None:
+                    c2 = "✅" if ema_slope >= LONG_SLOPE_TH else "❌"
+                    if ema_slope < LONG_SLOPE_TH:
+                        condition_lines.append(f" {c2} ② EMA 기울기    지금 {ema_slope:+.2f}% → {LONG_SLOPE_TH:.2f}% 이상 필요")
+                    else:
+                        condition_lines.append(f" {c2} ② EMA 기울기    {ema_slope:+.2f}% (충족)")
+                else:
+                    condition_lines.append(" ❓ ② EMA 기울기    데이터 없음")
+
+                LONG_RSI_MIN, LONG_RSI_MAX = 40.0, 65.0
+                if rsi is not None:
+                    c3 = "✅" if LONG_RSI_MIN <= rsi <= LONG_RSI_MAX else "❌"
+                    condition_lines.append(f" {c3} ③ RSI 범위      {rsi:.0f}  (허용 {LONG_RSI_MIN:.0f}~{LONG_RSI_MAX:.0f})")
+                else:
+                    condition_lines.append(" ❓ ③ RSI 범위      데이터 없음")
+
+            c4 = "✅" if regime == 'trending' and consecutive >= 3 else "❌"
+            condition_lines.append(f" {c4} ④ 추세장        ×{consecutive} 연속")
+
+        met_count = sum(1 for l in condition_lines if "✅" in l)
+        total_count = len(condition_lines)
+        has_unmet = any("❌" in l for l in condition_lines)
+        signal = self._state.get('signal')
+
         # 결론
         has_pos = self._state.get('has_position')
         if has_pos:
-            conclusion = "포지션 보유 중 — 청산 조건 감시"
+            if not has_unmet and condition_lines:
+                conclusion = "진입 조건 모두 충족 · 포지션 보유 중 — 추가 진입 유보"
+            else:
+                conclusion = "포지션 보유 중 — 청산 조건 감시"
         else:
             if signal == 'entry_ok':
                 conclusion = "롱 진입 기회"
@@ -636,62 +737,45 @@ class TelegramTransactionHandler(logging.Handler):
                 conclusion = "숏 진입 기회"
             else:
                 conclusion = "진입 조건 미충족"
-        
-        # 포지션 요약
-        if has_pos:
-            entry = self._state.get('entry_price')
-            stop = self._state.get('stop_price')
-            size = self._state.get('position_size', 0)
-            side = self._state.get('position_side')
-            
-            unrealized_jpy = 0
-            unrealized_pct = 0
-            stop_pnl = 0
-            
-            if entry and current and size:
-                if side == 'long':
-                    unrealized_jpy = (current - entry) * size
-                    stop_pnl = (stop - entry) * size if stop else 0
-                else:
-                    unrealized_jpy = (entry - current) * size
-                    stop_pnl = (entry - stop) * size if stop else 0
-                unrealized_pct = unrealized_jpy / (entry * size) * 100
-            
-            realized_pnl = self._state.get('realized_pnl_today', 0)
-            
-            position_summary = (
-                f"포지션: {side or '??'} {size} BTC  (진입가 ¥{entry:,.0f})\n"
-                f"  미실현: ¥{unrealized_jpy:+,.0f}  ({unrealized_pct:+.2f}%)\n"
-                f"  스탑 도달 시: ¥{stop_pnl:+,.0f}  (스탑 ¥{stop:,.0f})\n"
-                f"  오늘 확정이익: ¥{realized_pnl:+,.0f}"
-            )
+
+        # 시그널 상세 블록 (조건 4개 ✅/❌ 수치 포함)
+        if condition_lines:
+            sig_block = f"시그널 ({direction_label} {met_count}/{total_count}):\n" + "\n".join(condition_lines)
+        elif total_count > 0:
+            sig_block = f"시그널: {direction_label} 조건 {met_count}/{total_count} 충족"
         else:
-            realized_pnl = self._state.get('realized_pnl_today', 0)
-            position_summary = f"포지션: 없음  /  오늘 확정이익: ¥{realized_pnl:+,.0f}"
-        
+            sig_block = "시그널: 데이터 없음"
+
+        # 체제 지표 상세 (BB폭 / 가격범위)
+        bb = self._state.get('regime_bb_width')
+        rng = self._state.get('regime_range_pct')
+        regime_detail = f"\n  BB폭 {bb:.1f}% / 범위 {rng:.1f}%" if bb is not None and rng is not None else ""
+
         text = (
-            f"🧠 [{self._exchange}·BTC] {_format_time(time.time())}  (판단 사이클 · 5분 요약)\n"
+            f"🔮 [{self._exchange}·BTC] {_format_time(time.time())}  (판단 사이클 · 5분 요약)\n"
             f"──────────────────────────\n"
-            f"체제: {regime_kr} · {consecutive}회 연속 ({gate_status})\n"
+            f"체제: {regime_kr} · {consecutive}회 연속 ({gate_status}){regime_detail}\n"
             f"레이첼: {adv_summary}\n"
-            f"신호: {signal_kr} — {signal_detail}\n"
-            f"결론: {conclusion}\n"
+            f"{approval_line}\n"
             f"──────────────────────────\n"
-            f"{position_summary}"
+            f"{sig_block}\n"
+            f"결론: {conclusion}"
         )
-        
+
         await _send_telegram(self._bot_token, self._chat_id, text)
         self._last_periodic_send = time.time()
 
     async def start(self) -> None:
-        """비동기 태스크 시작."""
+        """비동기 태스크 시작. 판단 도메인(judge)만 정기 요약 루프를 가진다."""
         if self._task and not self._task.done():
             return
         self._loop = asyncio.get_running_loop()
-        self._task = asyncio.create_task(self._flush_loop(), name="log_transaction")
+        # 실행 도메인(punisher)은 이벤트 기반 즉시 전송만 — 정기 루프 불필요
+        if self._domain == "judge":
+            self._task = asyncio.create_task(self._flush_loop(), name="log_transaction_judge")
 
     async def stop(self) -> None:
-        """비동기 태스크 정지 + 최종 전송."""
+        """비동기 태스크 정지."""
         if self._task and not self._task.done():
             self._task.cancel()
             try:
@@ -700,11 +784,10 @@ class TelegramTransactionHandler(logging.Handler):
                 pass
 
     async def _flush_loop(self) -> None:
-        """5분 주기 정기 요약 전송 (판단 도메인 전용)."""
+        """5분 주기 정기 요약 전송 (판단 도메인 전용 — judge 핸들러만 시작됨)."""
         while True:
             await asyncio.sleep(self._interval)
-            if self._domain == "judge":
-                await self._send_periodic_summary()
+            await self._send_periodic_summary()
 
 
 # ── INFO 다이제스트 (HeartBeat, Deprecated) ──────────────────────
@@ -841,6 +924,24 @@ class TelegramAlertHandler(logging.Handler):
 # ── 세팅 헬퍼 ───────────────────────────────────────
 
 _handlers: list[TelegramTransactionHandler | TelegramDigestHandler | TelegramAlertHandler] = []
+
+
+def seed_telegram_regime_state(regime: str | None, consecutive: int) -> None:
+    """서비스 재시작 후 RegimeGate DB 복원 상태를 핸들러 _state에 즉시 반영.
+
+    정기 요약 전송 전에 호출하면 '미확정 · 0회' 표시를 방지할 수 있다.
+    setup_telegram_logging() 호출 후, RegimeGate 복원 직후에 호출할 것.
+
+    Args:
+        regime: 'trending' | 'ranging' | 'unclear' | None
+        consecutive: 연속 횟수 (DB의 consecutive_count)
+    """
+    if not regime:
+        return
+    for h in _handlers:
+        if isinstance(h, TelegramTransactionHandler):
+            h._state['regime_status'] = regime
+            h._state['regime_consecutive'] = consecutive
 
 
 async def setup_telegram_logging(exchange: str) -> None:

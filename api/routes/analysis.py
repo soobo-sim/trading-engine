@@ -6,12 +6,14 @@ GET /api/analysis/trade-stats    — 기간별 거래 통계 (승률, 기대값)
 GET /api/analysis/regime         — 시장 체제 판단 (횡보/추세)
 GET /api/analysis/trend-signal   — 추세추종 진입/청산 시그널 종합 판단
 GET /api/analysis/box-detect     — 박스권 독립 감지 (전략 무관)
+GET /api/analysis/macro-brief    — 매크로 브리프 (FNG, 뉴스, 이벤트, VIX/DXY)
 
 모든 엔드포인트는 읽기 전용. 트레이딩 로직에 영향 없음.
 """
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,6 +23,19 @@ from core.judge.analysis.box_detector import detect_box
 
 router = APIRouter(prefix="/api/analysis", tags=["Analysis (Rachel)"])
 
+
+# ── Schemas ───────────────────────────────────────────────────
+
+class MacroBriefResponse(BaseModel):
+    """매크로 브리프 — Rachel이 한 번에 매크로 컨텍스트를 받을 수 있도록 통합 제공."""
+    fng: dict | None
+    news: dict | None
+    events: dict
+    macro: dict | None
+    context_summary: str
+
+
+# ── 엔드포인트 ────────────────────────────────────────────────
 
 @router.get("/box-history", summary="박스 이력 + 포지션 성과 집계")
 async def get_box_history(
@@ -32,6 +47,129 @@ async def get_box_history(
     """박스 이력 + 각 박스 포지션 성과 + 추세추종 포지션 별도 집계."""
     pair = state.normalize_pair(pair)
     return await svc.get_box_history(pair, days, state, db)
+
+
+@router.get("/macro-brief", summary="매크로 브리프")
+async def get_macro_brief(
+    pair: str = Query("btc_jpy", description="페어 (예: btc_jpy)"),
+    state: AppState = Depends(get_state),
+):
+    """Rachel이 한 번에 매크로 컨텍스트를 받을 수 있도록 통합 제공.
+    
+    FNG, 뉴스, 경제 이벤트, VIX/DXY 등을 취합해서 반환.
+    """
+    pair = state.normalize_pair(pair)
+    
+    # DataHub는 trend_manager를 통해 접근
+    data_hub = state.trend_manager._data_hub
+    
+    # 1. FNG (센티먼트)
+    sentiment_dto = await data_hub.get_sentiment()
+    fng = None
+    if sentiment_dto:
+        fng = {
+            "score": sentiment_dto.score,
+            "label": sentiment_dto.classification,
+        }
+    
+    # 2. 뉴스 요약
+    news_dtos = await data_hub.get_news_summary(pair)
+    news = None
+    if news_dtos:
+        # avg_sentiment 계산
+        sentiments = [n.sentiment_score for n in news_dtos if n.sentiment_score is not None]
+        avg_sentiment = sum(sentiments) / len(sentiments) if sentiments else None
+        
+        # top 3 titles
+        top_titles = [n.title for n in news_dtos[:3]]
+        
+        news = {
+            "avg_sentiment": round(avg_sentiment, 2) if avg_sentiment is not None else None,
+            "count": len(news_dtos),
+            "top_titles": top_titles,
+        }
+    
+    # 3. 경제 이벤트
+    events_dtos = await data_hub.get_upcoming_events()
+    from datetime import datetime, timezone, timedelta
+    now = datetime.now(timezone.utc)
+    
+    high_within_6h = []
+    high_within_24h = []
+    
+    for ev in events_dtos:
+        if ev.importance == "High":
+            # datetime_jst를 UTC로 변환 (JST = UTC+9)
+            event_time_utc = ev.datetime_jst.replace(tzinfo=timezone.utc) - timedelta(hours=9)
+            hours_until = (event_time_utc - now).total_seconds() / 3600
+            
+            if 0 <= hours_until <= 6:
+                high_within_6h.append(ev.name)
+            elif 0 <= hours_until <= 24:
+                high_within_24h.append(ev.name)
+    
+    events = {
+        "high_within_6h": high_within_6h,
+        "high_within_24h": high_within_24h,
+    }
+    
+    # 4. 매크로 (VIX, DXY, US 10Y)
+    macro_dto = await data_hub.get_macro_snapshot()
+    macro = None
+    if macro_dto:
+        macro = {}
+        if macro_dto.vix is not None:
+            macro["vix"] = round(macro_dto.vix, 1)
+        if macro_dto.dxy is not None:
+            macro["dxy"] = round(macro_dto.dxy, 1)
+        if macro_dto.us_10y is not None:
+            macro["us_10y"] = round(macro_dto.us_10y, 2)
+        
+        # macro가 비어있으면 None으로
+        if not macro:
+            macro = None
+    
+    # 5. context_summary 생성 (팩트 요약)
+    parts = []
+    
+    # FNG
+    if fng:
+        parts.append(f"FNG {fng['score']}({fng['label']})")
+    
+    # 뉴스
+    if news and news["avg_sentiment"] is not None:
+        avg = news["avg_sentiment"]
+        if avg > 0.1:
+            direction = "긍정적"
+        elif avg < -0.1:
+            direction = "부정적"
+        else:
+            direction = "중립적"
+        parts.append(f"뉴스 {direction} {news['count']}건")
+    
+    # 고영향 이벤트
+    if high_within_6h:
+        parts.append(f"고영향 이벤트 {len(high_within_6h)}개(6시간 내)")
+    
+    # VIX, DXY
+    if macro:
+        macro_parts = []
+        if "vix" in macro:
+            macro_parts.append(f"VIX {macro['vix']}")
+        if "dxy" in macro:
+            macro_parts.append(f"DXY {macro['dxy']}")
+        if macro_parts:
+            parts.append(", ".join(macro_parts))
+    
+    context_summary = ", ".join(parts) if parts else "데이터 없음"
+    
+    return MacroBriefResponse(
+        fng=fng,
+        news=news,
+        events=events,
+        macro=macro,
+        context_summary=context_summary,
+    )
 
 
 @router.get("/trade-stats", summary="기간별 거래 통계")

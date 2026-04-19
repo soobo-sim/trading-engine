@@ -24,6 +24,7 @@ from core.logging.telegram_handlers import (
     _send_telegram,
     setup_telegram_logging,
     shutdown_telegram_logging,
+    seed_telegram_regime_state,
     _handlers,
 )
 
@@ -691,4 +692,299 @@ class TestDomainRouting:
         h.emit(self._make_record("core.judge.decision.rule_based"))
         h.emit(self._make_record("core.punisher.task.auto_reporter"))
         assert len(h._buffer) == 2
+
+
+# ─── 정기 요약 도메인 귀속 검증 ─────────────────────────────────────
+
+class TestPeriodicSummaryDomain:
+    """5분 정기 요약이 판단 도메인(HeartBeat) 전용임을 검증."""
+
+    @pytest.mark.asyncio
+    async def test_judge_handler_starts_flush_loop_task(self):
+        """domain='judge' 핸들러는 start() 시 _flush_loop 태스크를 생성한다."""
+        h = TelegramTransactionHandler("tok", "chat", exchange="GMO", domain="judge")
+        await h.start()
+        try:
+            assert h._task is not None
+            assert not h._task.done()
+        finally:
+            if h._task:
+                h._task.cancel()
+                try:
+                    await h._task
+                except asyncio.CancelledError:
+                    pass
+
+    @pytest.mark.asyncio
+    async def test_punisher_handler_does_not_start_flush_loop(self):
+        """domain='punisher' 핸들러는 start() 후 _task가 None — 정기 요약 루프 없음."""
+        h = TelegramTransactionHandler("tok", "chat", exchange="GMO", domain="punisher")
+        await h.start()
+        assert h._task is None
+
+    @pytest.mark.asyncio
+    async def test_periodic_summary_sends_to_judge_channel(self):
+        """_send_periodic_summary() 호출 시 judge 채널(bot_token/chat_id)로 전송."""
+        h = TelegramTransactionHandler("tok", "hb_chat", exchange="GMO", domain="judge")
+
+        sent_calls: list[tuple] = []
+        with patch(
+            "core.shared.logging.telegram_handlers._send_telegram",
+            new_callable=AsyncMock,
+            side_effect=lambda token, chat, text: sent_calls.append((token, chat, text)) or True,
+        ):
+            await h._send_periodic_summary()
+
+        assert len(sent_calls) == 1
+        _, chat_id, text = sent_calls[0]
+        assert chat_id == "hb_chat"
+        assert "🔮" in text
+        assert "판단 사이클" in text
+
+    @pytest.mark.asyncio
+    async def test_setup_judge_handler_has_task_punisher_has_none(self):
+        """setup_telegram_logging 후 judge 핸들러만 _task 가짐."""
+        from core.logging.telegram_handlers import _handlers
+        _handlers.clear()
+        env = {
+            "TELEGRAM_BOT_TOKEN": "tok",
+            "TELEGRAM_HEARTBEAT_CHAT_ID": "hb",
+            "TELEGRAM_SAVEUS_CHAT_ID": "su",
+        }
+        with patch.dict("os.environ", env, clear=True):
+            await setup_telegram_logging("GMO")
+
+        try:
+            tx_handlers = [h for h in _handlers if isinstance(h, TelegramTransactionHandler)]
+            judge_h = next(h for h in tx_handlers if h._domain == "judge")
+            punisher_h = next(h for h in tx_handlers if h._domain == "punisher")
+
+            # judge: 정기 루프 태스크 있음
+            assert judge_h._task is not None
+            assert not judge_h._task.done()
+            # punisher: 정기 루프 태스크 없음
+            assert punisher_h._task is None
+        finally:
+            await shutdown_telegram_logging()
+
+
+# ─── seed_telegram_regime_state ─────────────────────────────────────────────
+
+class TestSeedTelegramRegimeState:
+    """SRS-01~SRS-04: 재시작 후 RegimeGate DB 복원 상태 주입."""
+
+    def _make_handler(self, domain: str) -> TelegramTransactionHandler:
+        return TelegramTransactionHandler("tok", "chat", exchange="TEST", domain=domain)
+
+    def test_srs01_seeds_both_handlers(self):
+        """SRS-01: judge + punisher 핸들러 모두 regime_status/consecutive 업데이트."""
+        _handlers.clear()
+        h_judge = self._make_handler("judge")
+        h_punisher = self._make_handler("punisher")
+        _handlers.extend([h_judge, h_punisher])
+
+        seed_telegram_regime_state("trending", 4)
+
+        assert h_judge._state['regime_status'] == "trending"
+        assert h_judge._state['regime_consecutive'] == 4
+        assert h_punisher._state['regime_status'] == "trending"
+        assert h_punisher._state['regime_consecutive'] == 4
+        _handlers.clear()
+
+    def test_srs02_none_regime_is_noop(self):
+        """SRS-02: regime=None이면 기존 _state 변경 없음."""
+        _handlers.clear()
+        h = self._make_handler("judge")
+        h._state['regime_status'] = "trending"
+        h._state['regime_consecutive'] = 3
+        _handlers.append(h)
+
+        seed_telegram_regime_state(None, 0)
+
+        assert h._state['regime_status'] == "trending"  # 변경 없음
+        assert h._state['regime_consecutive'] == 3
+        _handlers.clear()
+
+    def test_srs03_empty_handlers_no_error(self):
+        """SRS-03: 핸들러 없으면 예외 없이 종료."""
+        _handlers.clear()
+        seed_telegram_regime_state("trending", 4)  # 예외 없이 통과
+
+    def test_srs04_periodic_summary_uses_seeded_values(self):
+        """SRS-04: seed 후 _send_periodic_summary가 seeded 값 사용 확인."""
+        _handlers.clear()
+        h = self._make_handler("judge")
+        _handlers.append(h)
+
+        seed_telegram_regime_state("trending", 4)
+
+        # 5분 요약 텍스트를 직접 생성하여 값 확인 (send는 mock)
+        import asyncio
+        import unittest.mock as mock
+
+        async def _check():
+            with mock.patch("core.shared.logging.telegram_handlers._send_telegram", new_callable=mock.AsyncMock) as m:
+                h._loop = asyncio.get_running_loop()
+                await h._send_periodic_summary()
+                text = m.call_args[0][2]
+                assert "추세 진행" in text
+                assert "4회 연속" in text
+
+        asyncio.run(_check())
+        _handlers.clear()
+
+
+# ─── 결론 텍스트: 포지션 보유 + 진입 조건 충족 여부 ────────────────────────────
+
+class TestConclusionWithPosition:
+    """CON-01~03: 포지션 보유 시 결론 텍스트 분기 확인."""
+
+    def _make_handler_with_state(self, has_pos: bool, all_met: bool) -> "TelegramTransactionHandler":
+        h = TelegramTransactionHandler("tok", "chat", exchange="GMO", domain="judge")
+        # 추세 진행 중 (체제 조건 충족)
+        h._state.update({
+            'regime_status': 'trending',
+            'regime_consecutive': 5,
+            'has_position': has_pos,
+            'signal': 'entry_sell',
+        })
+        if all_met:
+            # 숏 4조건 모두 충족
+            h._state.update({
+                'current_price': 11_900_000,
+                'ema_price': 12_000_000,
+                'ema_slope_pct': -0.10,
+                'rsi': 49.0,
+            })
+        else:
+            # 기울기 미충족 (❌ 포함)
+            h._state.update({
+                'current_price': 11_900_000,
+                'ema_price': 12_000_000,
+                'ema_slope_pct': 0.05,   # SHORT_SLOPE_TH = -0.05 → ❌
+                'rsi': 49.0,
+            })
+        return h
+
+    @pytest.mark.asyncio
+    async def test_con01_all_met_with_position_shows_reserve(self):
+        """CON-01: 진입 조건 4/4 충족 + 포지션 보유 → '추가 진입 유보' 표시."""
+        h = self._make_handler_with_state(has_pos=True, all_met=True)
+        with patch("core.shared.logging.telegram_handlers._send_telegram", new_callable=AsyncMock) as m:
+            h._loop = asyncio.get_event_loop()
+            await h._send_periodic_summary()
+            text = m.call_args[0][2]
+            assert "추가 진입 유보" in text
+            assert "진입 조건 모두 충족" in text
+
+    @pytest.mark.asyncio
+    async def test_con02_unmet_with_position_shows_monitoring(self):
+        """CON-02: 진입 조건 미충족 + 포지션 보유 → '청산 조건 감시' 표시."""
+        h = self._make_handler_with_state(has_pos=True, all_met=False)
+        with patch("core.shared.logging.telegram_handlers._send_telegram", new_callable=AsyncMock) as m:
+            h._loop = asyncio.get_event_loop()
+            await h._send_periodic_summary()
+            text = m.call_args[0][2]
+            assert "청산 조건 감시" in text
+            assert "추가 진입 유보" not in text
+
+    @pytest.mark.asyncio
+    async def test_con03_no_position_all_met_shows_entry(self):
+        """CON-03: 포지션 없음 + 숏 조건 충족 → '숏 진입 기회' 표시."""
+        h = self._make_handler_with_state(has_pos=False, all_met=True)
+        with patch("core.shared.logging.telegram_handlers._send_telegram", new_callable=AsyncMock) as m:
+            h._loop = asyncio.get_event_loop()
+            await h._send_periodic_summary()
+            text = m.call_args[0][2]
+            assert "숏 진입 기회" in text
+
+
+# ─── _send_stop_tighten ──────────────────────────────────────────────────────
+
+class TestSendStopTighten:
+    """ST-01~ST-02: 스탑 타이트닝 텔레그램 발송 조건."""
+
+    def _make_handler(self) -> TelegramTransactionHandler:
+        return TelegramTransactionHandler("tok", "chat", exchange="GMO", domain="punisher")
+
+    @pytest.mark.asyncio
+    async def test_st01_sends_when_stop_rises(self):
+        """ST-01: prev < curr이면 '스탑 상향' 메시지 발송."""
+        h = self._make_handler()
+        h._state['stop_tighten_event'] = {'prev': 12_000_000.0, 'curr': 12_100_000.0}
+        with patch("core.shared.logging.telegram_handlers._send_telegram", new_callable=AsyncMock) as m:
+            await h._send_stop_tighten()
+            assert m.called
+            text = m.call_args[0][2]
+            assert "스탑 상향" in text
+            assert "¥12,000,000" in text
+            assert "¥12,100,000" in text
+
+    @pytest.mark.asyncio
+    async def test_st02_skips_when_stop_unchanged(self):
+        """ST-02: prev == curr(diff=0)이면 발송 생략 — 오해 방지."""
+        h = self._make_handler()
+        h._state['stop_tighten_event'] = {'prev': 12_074_695.0, 'curr': 12_074_695.0}
+        with patch("core.shared.logging.telegram_handlers._send_telegram", new_callable=AsyncMock) as m:
+            await h._send_stop_tighten()
+            assert not m.called
+            assert h._state['stop_tighten_event'] is None
+
+
+# ─── gate_status 3단계 표현 ──────────────────────────────────────────────────
+
+class TestGateStatusThreeLevel:
+    """GS-01~GS-04: 체제+시그널 상태에 따른 gate_status 3단계 표현 확인."""
+
+    def _make_handler(self, regime: str, consecutive: int, signal: str | None) -> "TelegramTransactionHandler":
+        h = TelegramTransactionHandler("tok", "chat", exchange="GMO", domain="judge")
+        h._state.update({
+            'regime_status': regime,
+            'regime_consecutive': consecutive,
+            'signal': signal,
+            'current_price': 12_000_000.0,
+            'ema_price': 12_100_000.0,
+            'ema_slope_pct': -0.01,
+            'rsi': 50.0,
+        })
+        return h
+
+    @pytest.mark.asyncio
+    async def test_gs01_no_signal_shows_wait(self):
+        """GS-01: trending ×6, signal=hold → '체제OK · 신호 대기' 표시."""
+        h = self._make_handler('trending', 6, 'hold')
+        with patch("core.shared.logging.telegram_handlers._send_telegram", new_callable=AsyncMock) as m:
+            await h._send_periodic_summary()
+            text = m.call_args[0][2]
+        assert "체제OK · 신호 대기" in text
+        assert "진입 허용" not in text
+
+    @pytest.mark.asyncio
+    async def test_gs02_entry_ok_shows_long_signal(self):
+        """GS-02: trending ×3, signal=entry_ok → '신호 발생 (롱)' 표시."""
+        h = self._make_handler('trending', 3, 'entry_ok')
+        with patch("core.shared.logging.telegram_handlers._send_telegram", new_callable=AsyncMock) as m:
+            await h._send_periodic_summary()
+            text = m.call_args[0][2]
+        assert "신호 발생 (롱)" in text
+
+    @pytest.mark.asyncio
+    async def test_gs03_entry_sell_shows_short_signal(self):
+        """GS-03: trending ×4, signal=entry_sell → '신호 발생 (숏)' 표시."""
+        h = self._make_handler('trending', 4, 'entry_sell')
+        with patch("core.shared.logging.telegram_handlers._send_telegram", new_callable=AsyncMock) as m:
+            await h._send_periodic_summary()
+            text = m.call_args[0][2]
+        assert "신호 발생 (숏)" in text
+
+    @pytest.mark.asyncio
+    async def test_gs04_insufficient_consecutive_shows_blocked(self):
+        """GS-04: trending ×2 (warm-up 미완료) → '진입 차단 중' 표시."""
+        h = self._make_handler('trending', 2, 'entry_ok')
+        with patch("core.shared.logging.telegram_handlers._send_telegram", new_callable=AsyncMock) as m:
+            await h._send_periodic_summary()
+            text = m.call_args[0][2]
+        assert "진입 차단 중" in text
+        assert "신호 발생" not in text
+
 

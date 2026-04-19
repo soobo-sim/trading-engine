@@ -20,6 +20,7 @@ import time
 from typing import TYPE_CHECKING, Dict
 
 from core.strategy.signals import detect_bearish_divergences
+from core.shared.signals import compute_exit_signal
 
 logger = logging.getLogger("core.strategy.base_trend")
 
@@ -143,6 +144,21 @@ class CandleLoopMixin:
             if signal_data is None:
                 continue
 
+            # exit_signal realtime price 보정 (profit_target 정확도)
+            if pos is not None:
+                realtime = self._latest_price.get(pair)
+                if realtime is not None and realtime != signal_data.get("current_price"):
+                    signal_data["exit_signal"] = compute_exit_signal(
+                        ema_slope_pct=signal_data.get("ema_slope_pct"),
+                        rsi=signal_data.get("rsi"),
+                        atr=signal_data.get("atr"),
+                        current_price=realtime,
+                        entry_price=entry_price,
+                        params=params,
+                        side=pos.extra.get("side", "buy"),
+                    )
+                    signal_data["current_price"] = realtime
+
             signal = signal_data["signal"]
             current_price = signal_data["current_price"]
             atr = signal_data.get("atr")
@@ -156,10 +172,14 @@ class CandleLoopMixin:
             # ── JUDGE 사이클: 시그널 후처리 ──
             signal = self._on_signal_computed(pair, signal, signal_data, pos)
 
+            # ── 포지션 보유 중 entry signal 무시 ──
+            if pos is not None and signal in ("entry_ok", "entry_sell", "wait_dip", "wait_regime"):
+                signal = "hold"
+
             # 실시간 가격으로 exit_warning 보정
             realtime_price = self._latest_price.get(pair)
             if realtime_price is not None and ema is not None:
-                signal = self._check_exit_warning(pair, signal, realtime_price, ema, pos)
+                signal = self._check_exit_warning(pair, signal, realtime_price, ema, pos, atr=atr)
 
             # 시그널 로그: hold=DEBUG, 시그널 변경=INFO, 동일 반복=DEBUG
             signal_changed = signal != self._last_signal.get(pair, "")
@@ -172,9 +192,13 @@ class CandleLoopMixin:
                 _pos_label = f" {_side} 보유중"
             else:
                 _pos_label = ""
+            _slope_str = f"{ema_slope_pct:.4f}" if ema_slope_pct is not None else "N/A"
+            _rsi_str = f"{rsi:.1f}" if rsi is not None else "N/A"
+            _ema_str = f"{ema:.0f}" if ema is not None else "N/A"
             _sig_log(
                 f"{self._log_prefix} {pair}: {self._describe_signal(signal, pos)} "
-                f"(¥{current_price:,.0f}{_pos_label})"
+                f"signal={signal} ema_slope_pct={_slope_str} rsi={_rsi_str} ema={_ema_str} "
+                f"price={current_price:.0f}{_pos_label}"
             )
 
             # ══════════════════════════════════════
@@ -188,6 +212,12 @@ class CandleLoopMixin:
 
             # ── EMA 기울기 이력 + 다이버전스 + RegimeGate ──
             if latest_candle_key != self._ema_slope_last_key.get(pair):
+                # 새 4H 캔들 완성: candle change time 기록 (개선 A cooling period)
+                if not hasattr(self, "_last_candle_change_time"):
+                    self._last_candle_change_time = {}
+                from datetime import datetime, timezone as _tz
+                self._last_candle_change_time[pair] = datetime.now(_tz.utc)
+
                 # 새 4H 캔들 완성: 프리뷰 진입 검증
                 cur_pos = self._position.get(pair)
                 if cur_pos is not None and cur_pos.extra.get("preview_entry"):
@@ -233,10 +263,27 @@ class CandleLoopMixin:
                     and not pos.stop_tightened
                     and atr is not None
                 ):
-                    logger.info(
-                        f"{self._log_prefix} {pair}: EMA 기울기 3캔들 연속 하락 → 스탑 타이트닝"
-                    )
-                    await self._apply_stop_tightening(pair, current_price, atr, params)
+                    # 개선 B: 진입 후 grace period 체크
+                    grace_sec = float(params.get("entry_grace_period_sec", 900))
+                    opened_at = pos.extra.get("opened_at")
+                    if opened_at is not None:
+                        from datetime import datetime, timezone as _tz2
+                        elapsed_since_entry = (datetime.now(_tz2.utc) - opened_at).total_seconds()
+                        if elapsed_since_entry < grace_sec:
+                            logger.debug(
+                                f"{self._log_prefix} {pair}: 진입 후 grace period 중 "
+                                f"({elapsed_since_entry:.0f}s/{grace_sec:.0f}s) — 기울기 하락 tighten_stop 억제"
+                            )
+                        else:
+                            logger.info(
+                                f"{self._log_prefix} {pair}: EMA 기울기 3캔들 연속 하락 → 스탑 타이트닝"
+                            )
+                            await self._apply_stop_tightening(pair, current_price, atr, params)
+                    else:
+                        logger.info(
+                            f"{self._log_prefix} {pair}: EMA 기울기 3캔들 연속 하락 → 스탑 타이트닝"
+                        )
+                        await self._apply_stop_tightening(pair, current_price, atr, params)
 
                 # ── JUDGE: 다이버전스 감지 → 스탑 타이트닝 ──
                 if (
@@ -250,10 +297,27 @@ class CandleLoopMixin:
                     if div_candles and rsi_series:
                         div = detect_bearish_divergences(div_candles, rsi_series, params)
                         if div["both"] or div["rsi_divergence"] or div["volume_divergence"]:
-                            logger.info(
-                                f"{self._log_prefix} {pair}: 다이버전스 감지 → 스탑 타이트닝"
-                            )
-                            await self._apply_stop_tightening(pair, current_price, atr, params)
+                            # 개선 B: 진입 후 grace period 체크
+                            grace_sec = float(params.get("entry_grace_period_sec", 900))
+                            opened_at = pos.extra.get("opened_at")
+                            if opened_at is not None:
+                                from datetime import datetime, timezone as _tz3
+                                elapsed_since_entry = (datetime.now(_tz3.utc) - opened_at).total_seconds()
+                                if elapsed_since_entry < grace_sec:
+                                    logger.debug(
+                                        f"{self._log_prefix} {pair}: 진입 후 grace period 중 "
+                                        f"({elapsed_since_entry:.0f}s/{grace_sec:.0f}s) — 다이버전스 tighten_stop 억제"
+                                    )
+                                else:
+                                    logger.info(
+                                        f"{self._log_prefix} {pair}: 다이버전스 감지 → 스탑 타이트닝"
+                                    )
+                                    await self._apply_stop_tightening(pair, current_price, atr, params)
+                            else:
+                                logger.info(
+                                    f"{self._log_prefix} {pair}: 다이버전스 감지 → 스탑 타이트닝"
+                                )
+                                await self._apply_stop_tightening(pair, current_price, atr, params)
 
             # ══════════════════════════════════════
             # JUDGE 사이클: 오케스트레이터 판단

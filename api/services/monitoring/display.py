@@ -264,6 +264,118 @@ def get_entry_blockers_short(
     return blockers
 
 
+def get_entry_condition_lines_long(
+    signal: str,
+    current_price: float,
+    ema: Optional[float],
+    ema_slope_pct: Optional[float],
+    rsi: Optional[float],
+    rsi_min: float = 40.0,
+    rsi_max: float = 65.0,
+    slope_min: float = 0.0,
+    regime_consecutive: int = 0,
+    regime_active: bool = True,
+) -> List[str]:
+    """롱 진입 4개 조건 전체 상태 라인 (✅/❌). 전체 충족 여부와 무관하게 항상 4줄 반환."""
+    lines = []
+
+    # ① 가격 > EMA
+    if ema is not None:
+        if current_price > ema:
+            lines.append(f" ✅ ① 가격 > EMA    ¥{current_price:,.0f} (EMA ¥{ema:,.0f})")
+        else:
+            gap_jpy = ema - current_price
+            lines.append(f" ❌ ① 가격 > EMA    지금 ¥{current_price:,.0f} < EMA ¥{ema:,.0f} (↑ ¥{gap_jpy:,.0f} 필요)")
+
+    # ② EMA 기울기 ≥ slope_min
+    if ema_slope_pct is not None:
+        if ema_slope_pct >= slope_min:
+            lines.append(f" ✅ ② EMA 기울기    {ema_slope_pct:+.2f}%  (≥{slope_min:+.2f}% 충족)")
+        else:
+            diff = abs(slope_min - ema_slope_pct)
+            lines.append(
+                f" ❌ ② EMA 기울기    지금 {ema_slope_pct:+.2f}% → {slope_min:+.2f}% 이상 필요 ({diff:.2f}%p 부족)"
+            )
+
+    # ③ RSI 범위
+    if rsi is not None:
+        if rsi_min <= rsi <= rsi_max:
+            lines.append(f" ✅ ③ RSI 범위      {rsi:.0f}  (허용 {rsi_min:.0f}~{rsi_max:.0f})")
+        elif rsi < rsi_min:
+            diff = rsi_min - rsi
+            lines.append(f" ❌ ③ RSI 범위      지금 {rsi:.0f} → {rsi_min:.0f} 이상 필요 ({diff:.0f} 부족)")
+        else:
+            diff = rsi - rsi_max
+            lines.append(f" ❌ ③ RSI 범위      지금 {rsi:.0f} → {rsi_max:.0f} 이하 필요 ({diff:.0f} 초과, 과열)")
+
+    # ④ 추세장 (regime)
+    regime_met = regime_active and signal != "wait_regime"
+    if regime_met:
+        lines.append(f" ✅ ④ 추세장        ×{regime_consecutive} 연속")
+    elif signal == "wait_regime":
+        lines.append(" ❌ ④ 추세장        횡보 감지 (BB폭 협소) → 추세 형성 대기")
+    else:
+        lines.append(f" ❌ ④ 추세장        RegimeGate 차단 중 (×{regime_consecutive} / 3 미달)")
+
+    return lines
+
+
+def get_entry_condition_lines_short(
+    signal: str,
+    current_price: float,
+    ema: Optional[float],
+    ema_slope_pct: Optional[float],
+    rsi: Optional[float],
+    rsi_min: float = 35.0,
+    rsi_max: float = 60.0,
+    slope_threshold: float = -0.05,
+    regime_consecutive: int = 0,
+    regime_active: bool = True,
+) -> List[str]:
+    """숏 진입 4개 조건 전체 상태 라인 (✅/❌). 전체 충족 여부와 무관하게 항상 4줄 반환."""
+    lines = []
+
+    # ① 가격 < EMA
+    if ema is not None:
+        if current_price < ema:
+            lines.append(f" ✅ ① 가격 < EMA    ¥{current_price:,.0f} (EMA ¥{ema:,.0f})")
+        else:
+            gap_jpy = current_price - ema
+            lines.append(f" ❌ ① 가격 < EMA    지금 ¥{current_price:,.0f} > EMA ¥{ema:,.0f} (↓ ¥{gap_jpy:,.0f} 필요)")
+
+    # ② EMA 기울기 < slope_threshold (e.g., < -0.05%)
+    if ema_slope_pct is not None:
+        if ema_slope_pct < slope_threshold:
+            lines.append(f" ✅ ② EMA 기울기    {ema_slope_pct:+.2f}%  (≤{slope_threshold:+.2f}% 충족)")
+        else:
+            diff = abs(ema_slope_pct - slope_threshold)
+            lines.append(
+                f" ❌ ② EMA 기울기    지금 {ema_slope_pct:+.2f}% → {slope_threshold:+.2f}% 미만 필요 ({diff:.2f}%p 부족)"
+            )
+
+    # ③ RSI 범위
+    if rsi is not None:
+        if rsi_min <= rsi <= rsi_max:
+            lines.append(f" ✅ ③ RSI 범위      {rsi:.0f}  (허용 {rsi_min:.0f}~{rsi_max:.0f})")
+        elif rsi < rsi_min:
+            diff = rsi_min - rsi
+            lines.append(f" ❌ ③ RSI 범위      지금 {rsi:.0f} → {rsi_min:.0f} 이상 필요 (과매도, {diff:.0f} 부족)")
+        else:
+            diff = rsi - rsi_max
+            lines.append(f" ❌ ③ RSI 범위      지금 {rsi:.0f} → {rsi_max:.0f} 이하 필요 ({diff:.0f} 초과)")
+
+    # ④ 추세장 (regime)
+    regime_met = regime_active and signal != "wait_regime"
+    if regime_met:
+        lines.append(f" ✅ ④ 추세장        ×{regime_consecutive} 연속")
+    elif signal == "wait_regime":
+        lines.append(" ❌ ④ 추세장        횡보 감지 (BB폭 협소) → 추세 형성 대기")
+    else:
+        lines.append(f" ❌ ④ 추세장        RegimeGate 차단 중 (×{regime_consecutive} / 3 미달)")
+
+    return lines
+
+
 def get_box_narrative_outlook(
     has_position: bool,
     position_label: str,

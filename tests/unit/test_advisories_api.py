@@ -421,3 +421,89 @@ def test_ec04_post_advisory_default_hold_override_policy_is_none(db_factory):
     data = resp.json()
     assert "hold_override_policy" in data
     assert data["hold_override_policy"] == "none"
+
+
+# ──────────────────────────────────────────────────────────────
+# Macro Context 필드 테스트
+# ──────────────────────────────────────────────────────────────
+
+
+def test_mc01_advisory_macro_context_none_allowed(db_factory):
+    """
+    MC-01: macro_context None 허용 (기존 호환성)
+    Given: macro_context 필드 없음
+    When:  POST /api/advisories
+    Then:  201, macro_context=None
+    """
+    client = _build_client(db_factory)
+    body = {**_VALID_BODY}  # macro_context 없음
+    resp = client.post("/api/advisories", json=body)
+
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["macro_context"] is None
+
+
+def test_mc02_advisory_macro_context_save_and_retrieve(db_factory):
+    """
+    MC-02: macro_context 저장 및 조회
+    Given: macro_context 포함한 advisory 저장
+    When:  POST → GET latest
+    Then:  macro_context 그대로 반환
+    """
+    client = _build_client(db_factory)
+    
+    macro_ctx = {
+        "raw": {
+            "fng": 27,
+            "news_avg": -0.12,
+            "vix": 22.5,
+            "dxy": 104.2,
+        },
+        "interpretation": "공포 심리 속 기술적 강세 — 역발상 롱 판단",
+        "impact_direction": "강화",
+        "impact_notes": "FOMC 16시간 후, size 보수적",
+    }
+    
+    body = {
+        **_VALID_BODY,
+        "macro_context": macro_ctx,
+    }
+    
+    post_resp = client.post("/api/advisories", json=body)
+    assert post_resp.status_code == 201
+    post_data = post_resp.json()
+    assert post_data["macro_context"] == macro_ctx
+    
+    # 조회 확인
+    get_resp = client.get("/api/advisories/BTC_JPY/latest")
+    assert get_resp.status_code == 200
+    get_data = get_resp.json()
+    assert get_data["macro_context"] == macro_ctx
+    assert get_data["macro_context"]["raw"]["fng"] == 27
+    assert get_data["macro_context"]["interpretation"] == "공포 심리 속 기술적 강세 — 역발상 롱 판단"
+
+
+def test_mc03_advisory_macro_context_partial_structure(db_factory):
+    """
+    MC-03: macro_context 일부 필드만 있어도 허용
+    Given: raw만 있고 interpretation 없는 macro_context
+    When:  POST /api/advisories
+    Then:  201, 저장/조회 성공
+    """
+    client = _build_client(db_factory)
+    
+    macro_ctx = {
+        "raw": {"fng": 50},
+        # interpretation, impact_direction 등은 없음
+    }
+    
+    body = {
+        **_VALID_BODY,
+        "macro_context": macro_ctx,
+    }
+    
+    resp = client.post("/api/advisories", json=body)
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["macro_context"]["raw"]["fng"] == 50

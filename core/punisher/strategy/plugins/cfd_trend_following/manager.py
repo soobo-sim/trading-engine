@@ -178,23 +178,50 @@ class MarginTrendManager(BaseTrendManager):
                     return False
         return True
 
-    def _check_exit_warning(self, pair, signal, realtime_price, ema, pos):
-        """양방향 exit_warning. 포지션 없으면 스킵."""
+    def _check_exit_warning(self, pair, signal, realtime_price, ema, pos, atr=None):
+        """양방향 exit_warning + ATR 쿠션 + 4H 캔들 교체 cooling period."""
         if pos is None:
             return signal
+
+        # ── 4H 캔들 교체 cooling period ──
+        cooling_sec = float(getattr(self, "_params", {}).get(pair, {}).get("candle_change_cooling_sec", 300))
+        last_change = getattr(self, "_last_candle_change_time", {}).get(pair)
+        if last_change is not None:
+            from datetime import datetime, timezone
+            elapsed = (datetime.now(timezone.utc) - last_change).total_seconds()
+            if elapsed < cooling_sec:
+                if signal == "exit_warning":
+                    logger.debug(
+                        f"[MarginMgr] {pair}: 4H 캔들 교체 cooling 중 ({elapsed:.0f}s/{cooling_sec:.0f}s) "
+                        "— exit_warning 억제"
+                    )
+                    return "no_signal"
+                return signal
+
+        # ── ATR 쿠션 ──
         side = pos.extra.get("side", "buy")
-        if side == "buy" and realtime_price < ema:
-            if signal != "exit_warning":
-                logger.info(
-                    f"[MarginMgr] {pair}: 롱 실시간가 ¥{realtime_price} < EMA ¥{ema:.4f} → 추세 이탈 감지"
-                )
-            return "exit_warning"
-        elif side == "sell" and realtime_price > ema:
-            if signal != "exit_warning":
-                logger.info(
-                    f"[MarginMgr] {pair}: 숏 실시간가 ¥{realtime_price} > EMA ¥{ema:.4f} → 추세 이탈 감지"
-                )
-            return "exit_warning"
+        cushion = float(getattr(self, "_params", {}).get(pair, {}).get("exit_ema_atr_cushion", 0.1))
+        atr_cushion = (atr * cushion) if (atr is not None and cushion > 0) else 0.0
+
+        if side == "buy":
+            if realtime_price < ema - atr_cushion:
+                if signal != "exit_warning":
+                    logger.info(
+                        f"[MarginMgr] {pair}: 롱 실시간가 ¥{realtime_price} < EMA ¥{ema:.4f} - cushion → 추세 이탈 감지"
+                    )
+                return "exit_warning"
+            else:
+                return "no_signal" if signal == "exit_warning" else signal
+        elif side == "sell":
+            if realtime_price > ema + atr_cushion:
+                if signal != "exit_warning":
+                    logger.info(
+                        f"[MarginMgr] {pair}: 숏 실시간가 ¥{realtime_price} > EMA ¥{ema:.4f} + cushion → 추세 이탈 감지"
+                    )
+                return "exit_warning"
+            else:
+                return "no_signal" if signal == "exit_warning" else signal
+
         return signal
 
     def _is_stop_triggered(self, pos, price, stop_loss_price):
