@@ -29,6 +29,7 @@ router = APIRouter(prefix="/api/analysis", tags=["Analysis (Rachel)"])
 class MacroBriefResponse(BaseModel):
     """매크로 브리프 — Rachel이 한 번에 매크로 컨텍스트를 받을 수 있도록 통합 제공."""
     fng: dict | None
+    fng_history: list[dict] | None  # FNG 최근 이력 (최신순, 최대 5개)
     news: dict | None
     events: dict
     macro: dict | None
@@ -63,7 +64,7 @@ async def get_macro_brief(
     # DataHub는 trend_manager를 통해 접근
     data_hub = state.trend_manager._data_hub
     
-    # 1. FNG (센티먼트)
+    # 1. FNG (센티먼트) — 현재값 + 이력
     sentiment_dto = await data_hub.get_sentiment()
     fng = None
     if sentiment_dto:
@@ -71,6 +72,19 @@ async def get_macro_brief(
             "score": sentiment_dto.score,
             "label": sentiment_dto.classification,
         }
+
+    # FNG 이력 (최신순 최대 5개) — 추이 판단용
+    fng_history_dtos = await data_hub.get_sentiment_history(limit=5)
+    fng_history: list[dict] | None = None
+    if fng_history_dtos:
+        fng_history = [
+            {
+                "score": d.score,
+                "label": d.classification,
+                "fetched_at": d.timestamp.isoformat(),
+            }
+            for d in fng_history_dtos
+        ]
     
     # 2. 뉴스 요약
     news_dtos = await data_hub.get_news_summary(pair)
@@ -131,10 +145,21 @@ async def get_macro_brief(
     
     # 5. context_summary 생성 (팩트 요약)
     parts = []
-    
-    # FNG
+
+    # FNG + 추이 (최신→과거 순이므로 첫 번째가 최신, 마지막이 과거)
     if fng:
-        parts.append(f"FNG {fng['score']}({fng['label']})")
+        trend_suffix = ""
+        if fng_history and len(fng_history) >= 2:
+            latest_score = fng_history[0]["score"]
+            oldest_score = fng_history[-1]["score"]
+            diff = latest_score - oldest_score
+            if diff <= -3:
+                trend_suffix = " ↓하락"
+            elif diff >= 3:
+                trend_suffix = " ↑회복"
+            else:
+                trend_suffix = " →보합"
+        parts.append(f"FNG {fng['score']}({fng['label']}){trend_suffix}")
     
     # 뉴스
     if news and news["avg_sentiment"] is not None:
@@ -165,6 +190,7 @@ async def get_macro_brief(
     
     return MacroBriefResponse(
         fng=fng,
+        fng_history=fng_history,
         news=news,
         events=events,
         macro=macro,

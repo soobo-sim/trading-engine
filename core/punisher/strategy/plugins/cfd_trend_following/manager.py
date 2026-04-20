@@ -94,10 +94,70 @@ class MarginTrendManager(BaseTrendManager):
             logger.warning(f"[MarginMgr] {product_code}: 포지션 복원 실패 — {e}")
         return None
 
+    async def _try_restore_position(self, product_code: str) -> None:
+        """pos is None인데 DB에 open 레코드가 있으면 _detect_existing_position 재시도.
+
+        메인터넌스(ERR-5201) 중 재시작 등으로 포지션 감지 실패 시
+        30분 주기 동기화 사이클마다 자동 복원을 시도한다. (Option B)
+        """
+        try:
+            Model = self._position_model
+            pair_col = getattr(Model, self._position_pair_column)
+            async with self._session_factory() as db:
+                result = await db.execute(
+                    select(Model)
+                    .where(pair_col == product_code, Model.status == "open")
+                    .limit(1)
+                )
+                rec = result.scalars().first()
+            if rec is None:
+                return  # DB에도 open 없음 → 재시도 불필요
+        except Exception as e:
+            logger.debug(f"[MarginMgr] {product_code}: DB open 레코드 조회 실패 — {e}")
+            return
+
+        logger.warning(
+            f"[MarginMgr] {product_code}: 인메모리 포지션 없음 + DB open 레코드 존재 → 복원 재시도"
+        )
+        try:
+            pos = await self._detect_existing_position(product_code)
+            if pos is None:
+                logger.warning(
+                    f"[MarginMgr] {product_code}: 포지션 복원 재시도 실패 (거래소 API 불가) — 다음 주기에 재시도"
+                )
+                return
+            self._position[product_code] = pos
+            pos.db_record_id = await self._recover_db_position_id(product_code)
+            sl_str = f"¥{pos.stop_loss_price:,.0f}" if pos.stop_loss_price else "없음"
+            logger.warning(
+                f"[MarginMgr] {product_code}: 포지션 자동 복원 완료 — "
+                f"entry=¥{pos.entry_price:,.0f} size={pos.entry_amount:.6f} SL={sl_str}"
+            )
+            try:
+                import os
+                from core.shared.logging.telegram_handlers import _send_telegram
+                bot_token = os.getenv("AUTO_REPORT_BOT_TOKEN", "")
+                chat_id = os.getenv("AUTO_REPORT_CHAT_ID", "")
+                msg = (
+                    f"✅ [MarginMgr] {product_code} 포지션 자동 복원\n"
+                    f"entry=¥{pos.entry_price:,.0f} size={pos.entry_amount:.6f}\n"
+                    f"SL={sl_str}"
+                )
+                asyncio.ensure_future(_send_telegram(bot_token, chat_id, msg))
+            except Exception:
+                pass
+        except Exception as e:
+            logger.warning(f"[MarginMgr] {product_code}: 포지션 복원 재시도 오류 — {e}")
+
     async def _sync_position_state(self, product_code: str) -> None:
-        """getpositions vs 인메모리 비교 → 괴리 시 갱신."""
+        """getpositions vs 인메모리 비교 → 괴리 시 갱신.
+
+        pos is None 상태에서 DB open 레코드가 있으면 _try_restore_position으로
+        재감지를 시도한다. (BUG-039 Option B)
+        """
         pos = self._position.get(product_code)
         if pos is None:
+            await self._try_restore_position(product_code)
             return
         try:
             if not hasattr(self._adapter, "get_positions"):

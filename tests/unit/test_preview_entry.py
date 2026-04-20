@@ -72,6 +72,9 @@ def _advisory(
         take_profit=None,
         regime="trending",
         reasoning="EMA 상향 + RSI 52",
+        alice_summary=None,
+        samantha_summary=None,
+        risk_notes=None,
         expires_at=_NOW + timedelta(hours=expires_offset_hours),
     )
 

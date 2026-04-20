@@ -141,87 +141,110 @@ class DailyBriefing:
 
     async def _build_briefing_text(self) -> str:
         """브리핑 텍스트 조합."""
-        from datetime import datetime as _dt
         now_jst = datetime.now(_JST).strftime("%Y-%m-%d %H:%M JST")
 
         sections = [f"📊 일간 브리핑 ({now_jst})"]
 
-        # 전일 트레이드 요약
-        trade_summary = await self._fetch_yesterday_summary()
-        sections.append(trade_summary)
-
-        # 현재 잔고/포지션
+        # 현재 잔고 (JPY + 보유 코인만)
         balance_section = await self._fetch_balance_summary()
         if balance_section:
             sections.append(balance_section)
 
+        # 전일 거래 내역 (GMO Coin API 직접 조회)
+        execution_section = await self._fetch_execution_summary()
+        sections.append(execution_section)
+
         return "\n\n".join(sections)
 
-    async def _fetch_yesterday_summary(self) -> str:
-        """전일 완료 트레이드 요약."""
+    async def _fetch_execution_summary(self) -> str:
+        """전일 거래 내역 — GMO Coin latestExecutions API 직접 조회."""
+        if self._adapter is None:
+            return "📋 거래 내역: 어댑터 없음"
+
         now_jst = datetime.now(_JST)
-        yesterday_start_jst = (now_jst - timedelta(days=1)).replace(
+        yesterday_start = (now_jst - timedelta(days=1)).replace(
             hour=0, minute=0, second=0, microsecond=0
         )
-        yesterday_end_jst = yesterday_start_jst + timedelta(days=1)
-        # UTC 변환
-        yesterday_start_utc = yesterday_start_jst.astimezone(timezone.utc)
-        yesterday_end_utc = yesterday_end_jst.astimezone(timezone.utc)
+        yesterday_end = yesterday_start + timedelta(days=1)
 
         try:
-            from sqlalchemy import select, and_
-            model = self._trade_model
-
-            # 해당 모델이 created_at 컬럼을 가지고 있다고 가정
-            date_column = getattr(model, "created_at", None)
-            if date_column is None:
-                return "전일 트레이드: 조회 불가"
-
-            async with self._session_factory() as session:
-                stmt = (
-                    select(model)
-                    .where(and_(
-                        date_column >= yesterday_start_utc,
-                        date_column < yesterday_end_utc,
-                    ))
-                )
-                result = await session.execute(stmt)
-                trades = result.scalars().all()
-
-            if not trades:
-                return "전일 트레이드: 없음"
-
-            total = len(trades)
-            # 손익 계산 — realized_pnl_jpy 컬럼이 있으면 합산
-            wins = losses = 0
-            total_pnl = 0.0
-            for t in trades:
-                pnl = getattr(t, "realized_pnl_jpy", None)
-                if pnl is not None:
-                    total_pnl += float(pnl)
-                    if pnl >= 0:
-                        wins += 1
-                    else:
-                        losses += 1
-
-            return (
-                f"📈 전일 트레이드\n"
-                f"  총 {total}건 (승: {wins}, 패: {losses})\n"
-                f"  실현 손익: ¥{total_pnl:+,.0f}"
-            )
+            # pairs 목록에서 symbol 변환 (btc_jpy → BTC_JPY)
+            symbols = [p.upper().replace("/", "_") for p in self._pairs]
+            all_executions: list[dict] = []
+            for symbol in symbols:
+                execs = await self._adapter.get_latest_executions(symbol, count=100)
+                all_executions.extend(execs)
         except Exception as e:
-            logger.warning(f"[DailyBriefing] 전일 트레이드 조회 실패 — {e}")
-            return "전일 트레이드: 조회 실패"
+            logger.warning(f"[DailyBriefing] 거래 내역 조회 실패 — {e}")
+            return "📋 거래 내역: 조회 실패"
+
+        # 전일 필터 (timestamp: UTC ISO 형식)
+        yesterday_executions = []
+        for ex in all_executions:
+            ts_str = ex.get("timestamp", "")
+            try:
+                ts_utc = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                ts_jst = ts_utc.astimezone(_JST)
+                if yesterday_start <= ts_jst < yesterday_end:
+                    yesterday_executions.append((ts_jst, ex))
+            except Exception:
+                continue
+
+        if not yesterday_executions:
+            return "📋 전일 거래 내역: 없음"
+
+        # 시간순 정렬
+        yesterday_executions.sort(key=lambda x: x[0])
+
+        _settle_map = {"OPEN": "신규", "CLOSE": "결제"}
+        _side_map = {"BUY": "매수", "SELL": "매도"}
+
+        lines = ["📋 전일 거래 내역"]
+        total_pnl = 0.0
+        for ts_jst, ex in yesterday_executions:
+            settle = _settle_map.get(ex.get("settleType", ""), ex.get("settleType", ""))
+            side = _side_map.get(ex.get("side", ""), ex.get("side", ""))
+            size = ex.get("size", "0")
+            price = ex.get("price", "0")
+            loss_gain = ex.get("lossGain", "0")
+            try:
+                price_f = float(price)
+                pnl_f = float(loss_gain)
+                total_pnl += pnl_f
+                pnl_str = f"손익 {pnl_f:+,.0f}円" if ex.get("settleType") == "CLOSE" else ""
+                line = (
+                    f"  {ts_jst.strftime('%m/%d %H:%M')} "
+                    f"{settle} {side} "
+                    f"{size}BTC @ ¥{price_f:,.0f}"
+                )
+                if pnl_str:
+                    line += f"  {pnl_str}"
+                lines.append(line)
+            except (ValueError, TypeError):
+                continue
+
+        # 합계
+        close_count = sum(1 for _, ex in yesterday_executions if ex.get("settleType") == "CLOSE")
+        open_count = sum(1 for _, ex in yesterday_executions if ex.get("settleType") == "OPEN")
+        lines.append(f"  ─────────────────────")
+        lines.append(f"  신규 {open_count}건 / 결제 {close_count}건  합계 손익: {total_pnl:+,.0f}円")
+
+        return "\n".join(lines)
 
     async def _fetch_balance_summary(self) -> str:
-        """현재 잔고 요약."""
+        """현재 잔고 요약 — JPY + 보유 중인 코인만 표시."""
         if self._adapter is None:
             return ""
         try:
             balance = await self._adapter.get_balance()
             lines = ["💰 현재 잔고"]
             for currency, cb in balance.currencies.items():
-                lines.append(f"  {currency.upper()}: {cb.amount:,.0f} (가용: {cb.available:,.0f})")
+                cur_upper = currency.upper()
+                amount = cb.amount
+                available = cb.available
+                # JPY는 항상 표시, 코인은 보유 중인 것만
+                if cur_upper == "JPY" or amount > 0:
+                    lines.append(f"  {cur_upper}: {amount:,.4g} (가용: {available:,.4g})")
             return "\n".join(lines)
         except Exception as e:
             logger.debug(f"[DailyBriefing] 잔고 조회 실패 — {e}")

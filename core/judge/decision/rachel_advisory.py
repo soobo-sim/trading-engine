@@ -152,12 +152,23 @@ class RachelAdvisoryDecision:
         pos_label = "포지션 있음" if has_position else "포지션 없음"
         pyramid_count_log = snapshot.position.extra.get("pyramid_count", 0) if snapshot.position else 0
         style = snapshot.params.get("trading_style", "?")
+        _alice_str = (getattr(advisory, 'alice_summary', None) or '').strip()[:100]
+        _samantha_str = (getattr(advisory, 'samantha_summary', None) or '').strip()[:100]
+        _risk_str = (getattr(advisory, 'risk_notes', None) or '').strip()[:100]
+        _extra_lines = ""
+        if _alice_str:
+            _extra_lines += f"\n  앨리스: {_alice_str}"
+        if _samantha_str:
+            _extra_lines += f"\n  사만다: {_samantha_str}"
+        if _risk_str:
+            _extra_lines += f"\n  리스크: {_risk_str}"
         logger.info(
             f"[RachelAdvisory:{style}] {snapshot.pair}: advisory 읽음 — "
-            f"action={advisory.action} confidence={advisory.confidence:.2f} "
+            f"id={advisory.id} action={advisory.action} confidence={advisory.confidence:.2f} "
             f"size_pct={advisory.size_pct} 잔여={remaining_h:.1f}H "
             f"signal={snapshot.signal} {pos_label} pyramid={pyramid_count_log}\n"
-            f"  근거: {advisory.reasoning[:100]}"
+            f"  근거: {advisory.reasoning[:200]}"
+            f"{_extra_lines}"
         )
 
         advisory_action = advisory.action  # "entry_long"|"entry_short"|"hold"|"exit"

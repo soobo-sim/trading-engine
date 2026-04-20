@@ -13,6 +13,11 @@ RegimeGate 단위 테스트.
   RG-09: regime_history 최대 크기 유지
   RG-10: 전환 시 WARNING 로그 + ⭐⭐⭐⭐ 포함
   RG-11: streak 미달 시 INFO 로그
+  RB-01: [U, T, T] → restore_required=2 충족 → 조기 복원
+  RB-02: [T, U, T] → restore_required=2 미달 → 차단 유지
+  RB-03: [T, T, U, T, T] → active 차단 후 조기 복원 확인
+  RB-04: restore_required 기본값 확인
+  RB-05: restore_required=3 설정 시 [U, T, T] 복원 안 됨
 """
 import logging
 import pytest
@@ -90,13 +95,14 @@ class TestUnclear:
         assert gate.active_strategy is None
 
     def test_unclear_first_no_change(self):
-        """이전 캔들이 unclear이고 마지막이 trending이면 active 변경 없음."""
+        """[U, T, T]: unclear 선행 + T×2 → restore_required=2 충족 → 복원."""
         gate = RegimeGate("btc_jpy")
         gate.update_regime("unclear")
         gate.update_regime("trending")
         result = gate.update_regime("trending")
-        # 3캔들 중 unclear 포함 + 마지막은 trending → streak 미달
-        assert result is None
+        # restore_required=2 기본값 → [U, T, T] 꼬리 T×2 → 조기 복원
+        assert result == "trend_following"
+        assert gate.active_strategy == "trend_following"
 
     def test_unclear_during_active_trend(self):
         """이미 active=trend_following인데 unclear 캔들 오면 None으로."""
@@ -256,6 +262,61 @@ class TestConsecutiveCount:
         with caplog.at_level(logging.INFO, logger="core.punisher.execution.regime_gate"):
             gate.update_regime("trending")
         assert any("연속 5회" in r.message for r in caplog.records)
+
+
+class TestRestoreRequired:
+    """RB-01~05: restore_required — unclear 후 조기 복원 (Option B)"""
+
+    def test_rb01_u_t_t_restores_with_default(self):
+        """RB-01: [U, T, T] → restore_required=2 기본값 → 조기 복원."""
+        gate = RegimeGate("btc_jpy")
+        gate.update_regime("unclear")
+        gate.update_regime("trending")
+        result = gate.update_regime("trending")
+        assert result == "trend_following"
+        assert gate.active_strategy == "trend_following"
+
+    def test_rb02_t_u_t_still_blocked(self):
+        """RB-02: [T, U, T] → 꼬리 연속 1개 → restore_required=2 미달 → 차단 유지."""
+        gate = RegimeGate("btc_jpy")
+        gate.update_regime("trending")
+        gate.update_regime("unclear")
+        result = gate.update_regime("trending")
+        assert result is None
+        assert gate.active_strategy is None
+
+    def test_rb03_t_t_u_then_t_t_restores(self):
+        """RB-03: T×3 확정 후 U → 차단, T×2 → 조기 복원."""
+        gate = RegimeGate("btc_jpy")
+        for _ in range(3):
+            gate.update_regime("trending")
+        assert gate.active_strategy == "trend_following"
+
+        gate.update_regime("unclear")
+        assert gate.active_strategy is None  # 즉시 차단
+
+        gate.update_regime("trending")
+        assert gate.active_strategy is None  # T×1 → 아직 차단
+
+        result = gate.update_regime("trending")
+        assert result == "trend_following"  # T×2 → 복원
+        assert gate.active_strategy == "trend_following"
+
+    def test_rb04_default_restore_required_is_2(self):
+        """RB-04: restore_required 기본값은 2."""
+        gate = RegimeGate("btc_jpy")
+        # 내부 값 확인
+        assert gate._restore_required == 2
+
+    def test_rb05_restore_required_3_blocks_u_t_t(self):
+        """RB-05: restore_required=3 설정 시 [U, T, T] 복원 안 됨 (streak=3과 동일)."""
+        gate = RegimeGate("btc_jpy", restore_required=3)
+        gate.update_regime("unclear")
+        gate.update_regime("trending")
+        result = gate.update_regime("trending")
+        # 꼬리 T×2 < restore_required=3 → 복원 안 됨
+        assert result is None
+        assert gate.active_strategy is None
 
     def test_unclear_resets_consecutive_count(self):
         gate = RegimeGate("btc_jpy")

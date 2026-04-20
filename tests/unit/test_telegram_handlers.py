@@ -988,3 +988,228 @@ class TestGateStatusThreeLevel:
         assert "신호 발생" not in text
 
 
+# ─── 승인 줄 동적 표시 ───────────────────────────────────────────────────────
+
+class TestApprovalLineSignal:
+    """AAP-01~AAP-02: entry_ok 신호 있을 때 자동/수동 승인 줄 동적 표시."""
+
+    def _make_handler(self, confidence: float, size_pct: float) -> "TelegramTransactionHandler":
+        h = TelegramTransactionHandler("tok", "chat", exchange="GMO", domain="judge")
+        h._state.update({
+            'regime_status': 'trending',
+            'regime_consecutive': 4,
+            'signal': 'entry_ok',
+            'signal_confidence': confidence,
+            'signal_size_pct': size_pct,
+            'current_price': 12_100_000.0,
+            'ema_price': 12_000_000.0,
+            'ema_slope_pct': 0.10,
+            'rsi': 52.0,
+        })
+        return h
+
+    @pytest.mark.asyncio
+    async def test_aap01_auto_approve_when_conditions_met(self):
+        """AAP-01: entry_ok + confidence=0.70, size=0.50 (auto mode, 조건 충족) → '자동 승인 예정' ✅."""
+        h = self._make_handler(confidence=0.70, size_pct=0.50)
+        env = {
+            "APPROVAL_MODE": "auto",
+            "AUTO_APPROVAL_MIN_CONFIDENCE": "0.65",
+            "AUTO_APPROVAL_MAX_SIZE": "0.60",
+        }
+        with patch.dict("os.environ", env, clear=True):
+            with patch("core.shared.logging.telegram_handlers._send_telegram", new_callable=AsyncMock) as m:
+                await h._send_periodic_summary()
+                text = m.call_args[0][2]
+        assert "자동 승인 예정" in text
+        assert "70%" in text
+        assert "50%" in text
+        assert "✅" in text
+        assert "수동 승인 필요" not in text
+
+    @pytest.mark.asyncio
+    async def test_aap02_manual_approve_when_size_exceeds(self):
+        """AAP-02: entry_ok + confidence=0.70, size=0.80 (auto mode, 사이즈 초과) → '수동 승인 필요'."""
+        h = self._make_handler(confidence=0.70, size_pct=0.80)
+        env = {
+            "APPROVAL_MODE": "auto",
+            "AUTO_APPROVAL_MIN_CONFIDENCE": "0.65",
+            "AUTO_APPROVAL_MAX_SIZE": "0.60",
+        }
+        with patch.dict("os.environ", env, clear=True):
+            with patch("core.shared.logging.telegram_handlers._send_telegram", new_callable=AsyncMock) as m:
+                await h._send_periodic_summary()
+                text = m.call_args[0][2]
+        assert "수동 승인 필요" in text
+        assert "사이즈 80% > 60%" in text
+        assert "자동 승인 예정" not in text
+
+
+# ─── advisory 변경 감지 (매분 중복 발송 방지) ────────────────────────────────
+
+class TestAdvisoryChangeDetection:
+    """ADV-01~ADV-04: advisory 변경 감지 — advisory ID 변경 시 즉시 전송."""
+
+    def _log_msg(
+        self,
+        action: str,
+        confidence: float = 0.3,
+        remaining_h: float = 4.5,
+        reasoning: str | None = None,
+        adv_id: int = 1,
+        alice: str | None = None,
+        samantha: str | None = None,
+        risk_notes: str | None = None,
+    ) -> str:
+        base = (
+            f"[RachelAdvisory:trend_following] BTC_JPY: advisory 읽음 — "
+            f"id={adv_id} action={action} confidence={confidence:.2f} size_pct=None 잔여={remaining_h:.1f}H "
+            f"signal=hold 포지션 없음 pyramid=0"
+        )
+        if reasoning:
+            base += f"\n  근거: {reasoning}"
+        if alice is not None:
+            base += f"\n  앨리스: {alice}"
+        if samantha is not None:
+            base += f"\n  사만다: {samantha}"
+        if risk_notes is not None:
+            base += f"\n  리스크: {risk_notes}"
+        return base
+
+    def _make_handler(self) -> "TelegramTransactionHandler":
+        loop = asyncio.new_event_loop()
+        h = TelegramTransactionHandler("tok", "chat", exchange="GMO_COIN", domain="judge")
+        h._loop = loop
+        return h
+
+    def test_adv01_first_advisory_sends(self):
+        """ADV-01: 초기 상태(None)에서 첫 advisory 수신 → create_task 호출 (즉시 전송 트리거)."""
+        h = TelegramTransactionHandler("tok", "chat", exchange="GMO_COIN", domain="judge")
+        mock_loop = MagicMock()
+        mock_loop.create_task.side_effect = lambda coro: coro.close()
+        h._loop = mock_loop
+        assert h._state.get('advisory_id') is None
+
+        h._parse_and_update(self._log_msg("hold", adv_id=1))
+
+        mock_loop.create_task.assert_called_once()
+        assert h._state['advisory_action'] == 'hold'
+        assert h._state['advisory_id'] == '1'
+        assert h._state['advisory_confidence'] == pytest.approx(0.3)
+
+    @pytest.mark.asyncio
+    async def test_adv02_same_id_no_duplicate_send(self):
+        """ADV-02: 동일 advisory id가 매분 연속으로 오면 create_task 미호출 (중복 전송 방지)."""
+        h = TelegramTransactionHandler("tok", "chat", exchange="GMO_COIN", domain="judge")
+        mock_loop = MagicMock()
+        mock_loop.create_task.side_effect = lambda coro: coro.close()
+        h._loop = mock_loop
+
+        # 1차: id=1 → 변경 감지 (None→1), create_task 호출됨
+        h._parse_and_update(self._log_msg("hold", confidence=0.3, adv_id=1))
+        assert mock_loop.create_task.call_count == 1
+
+        # 2차: 동일 id=1 재읽힘 (매분 재실행) → create_task 호출 안 됨
+        h._parse_and_update(self._log_msg("hold", confidence=0.3, remaining_h=4.4, adv_id=1))
+        assert mock_loop.create_task.call_count == 1  # 여전히 1번
+
+    @pytest.mark.asyncio
+    async def test_adv03_new_advisory_id_sends(self):
+        """ADV-03: 새 advisory id가 오면 같은 action이어도 create_task 호출됨 (4H 갱신 시나리오)."""
+        h = TelegramTransactionHandler("tok", "chat", exchange="GMO_COIN", domain="judge")
+        mock_loop = MagicMock()
+        mock_loop.create_task.side_effect = lambda coro: coro.close()
+        h._loop = mock_loop
+
+        # 1차 advisory id=1 (hold)
+        h._parse_and_update(self._log_msg("hold", adv_id=1))
+        count_after_first = mock_loop.create_task.call_count
+
+        # 4H 후 새 advisory id=2 등록 — action이 동일 hold이어도 전송
+        h._parse_and_update(self._log_msg("hold", confidence=0.4, adv_id=2))
+        assert mock_loop.create_task.call_count == count_after_first + 1
+        assert h._state['advisory_id'] == '2'
+
+    @pytest.mark.asyncio
+    async def test_adv03b_new_id_with_agent_opinions(self):
+        """ADV-03b: 새 advisory에 앨리스/사만다/리스크 필드 있으면 상태에 저장됨."""
+        h = TelegramTransactionHandler("tok", "chat", exchange="GMO_COIN", domain="judge")
+        mock_loop = MagicMock()
+        mock_loop.create_task.side_effect = lambda coro: coro.close()
+        h._loop = mock_loop
+
+        h._parse_and_update(self._log_msg(
+            "hold", adv_id=10,
+            reasoning="RSI 과매도, 하방 추세 지속",
+            alice="단기 반등 가능성 있음",
+            samantha="리스크 높음, 포지션 자제 권고",
+            risk_notes="취약한 수요, 변동성 확대 주의",
+        ))
+
+        assert h._state['advisory_alice'] == '단기 반등 가능성 있음'
+        assert h._state['advisory_samantha'] == '리스크 높음, 포지션 자제 권고'
+        assert h._state['advisory_risk_notes'] == '취약한 수요, 변동성 확대 주의'
+        assert h._state['advisory_reasoning'] == 'RSI 과매도, 하방 추세 지속'
+
+    @pytest.mark.asyncio
+    async def test_adv04_non_judge_domain_no_send(self):
+        """ADV-04: domain=punisher 핸들러는 advisory 변경 시에도 create_task 미호출."""
+        h = TelegramTransactionHandler("tok", "chat", exchange="GMO_COIN", domain="punisher")
+        mock_loop = MagicMock()
+        mock_loop.create_task.side_effect = lambda coro: coro.close()
+        h._loop = mock_loop
+
+        h._parse_and_update(self._log_msg("entry_long", adv_id=5))
+        mock_loop.create_task.assert_not_called()
+        assert h._state['advisory_action'] == 'entry_long'  # state는 갱신됨
+        assert h._state['advisory_id'] == '5'
+
+    def test_adv05_empty_alice_does_not_bleed_into_samantha(self):
+        """ADV-05: 앨리스 내용 없고 사만다만 있을 때 alice가 '사만다:'를 캡처하지 않음.
+
+        재현 패턴:
+            로그에 '앨리스: \\n  사만다: 리스크: ...' 형태로 기록되면
+            \\s* 정규식이 \\n까지 소비해 사만다 내용을 alice로 잡아버리는 버그.
+        """
+        h = TelegramTransactionHandler("tok", "chat", exchange="GMO_COIN", domain="judge")
+        # alice=None → _log_msg에서 앨리스 줄 자체 생략
+        msg = self._log_msg(
+            "hold", adv_id=20,
+            reasoning="RSI 과매도, 하방 추세 지속",
+            alice=None,
+            samantha="falling knife 리스크",
+            risk_notes="RSI 30 극단 과매도",
+        )
+        # 파싱 후 alice는 None, samantha는 정상 내용이어야 함
+        h._parse_and_update(msg)
+        assert h._state.get('advisory_alice') is None, (
+            f"alice가 None이어야 하는데 '{h._state.get('advisory_alice')}'로 파싱됨 — "
+            "\\s* 정규식이 \\n을 넘어 다음 줄을 잡는 버그"
+        )
+        assert h._state.get('advisory_samantha') == 'falling knife 리스크'
+
+    def test_adv06_empty_alice_line_in_log_does_not_bleed(self):
+        """ADV-06: 로그에 '앨리스: ' 빈 줄이 포함된 경우에도 사만다 내용을 alice로 잡지 않음.
+
+        alice_summary='' 로 빈 줄이 기록됐을 때를 시뮬레이션.
+        이 경우 '앨리스: \\n  사만다: X' 형태 — [ \\t]* 정규식은 \\n을 소비하지 않아야 함.
+        """
+        import re as _re
+        base = (
+            "[RachelAdvisory:trend_following] BTC_JPY: advisory 읽음 — "
+            "id=21 action=hold confidence=0.30 size_pct=None 잔여=4.0H "
+            "signal=hold 포지션 없음 pyramid=0\n"
+            "  근거: RSI 과매도\n"
+            "  앨리스: \n"
+            "  사만다: falling knife\n"
+            "  리스크: 변동성"
+        )
+        h = TelegramTransactionHandler("tok", "chat", exchange="GMO_COIN", domain="judge")
+        h._parse_and_update(base)
+        # alice는 빈 줄이므로 None이어야 함
+        assert h._state.get('advisory_alice') is None, (
+            f"alice가 None이어야 하는데 '{h._state.get('advisory_alice')}'로 파싱됨"
+        )
+        assert h._state.get('advisory_samantha') == 'falling knife'
+        assert h._state.get('advisory_risk_notes') == '변동성'
+

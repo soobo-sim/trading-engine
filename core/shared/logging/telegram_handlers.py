@@ -152,10 +152,14 @@ class TelegramTransactionHandler(logging.Handler):
             'regime_consecutive': 0,
             'regime_bb_width': None,
             'regime_range_pct': None,
+            'advisory_id': None,
             'advisory_action': None,
             'advisory_confidence': None,
             'advisory_remaining_h': None,
             'advisory_reasoning': None,
+            'advisory_alice': None,
+            'advisory_samantha': None,
+            'advisory_risk_notes': None,
             'fng_score': None,
             'fng_label': None,
             # 시그널 상세 (candle_loop 로그에서 파싱)
@@ -170,6 +174,9 @@ class TelegramTransactionHandler(logging.Handler):
             'current_price': None,
             'ema_price': None,
             'realized_pnl_today': 0.0,
+            # 승인 게이트용 — 오케스트레이터 로그에서 파싱
+            'signal_confidence': None,
+            'signal_size_pct': None,
             # 진입/청산 이벤트 (즉시 전송 후 None으로 클리어)
             'entry_event': None,
             'close_event': None,
@@ -271,6 +278,9 @@ class TelegramTransactionHandler(logging.Handler):
             if self._state['signal'] != new_signal:
                 self._state['prev_signal'] = self._state['signal']
                 self._state['signal'] = new_signal
+                if new_signal not in ('entry_ok', 'entry_sell'):
+                    self._state['signal_confidence'] = None
+                    self._state['signal_size_pct'] = None
                 if self._domain == "judge" and self._loop and self._state['prev_signal'] is not None:
                     self._loop.create_task(self._send_signal_change())
         else:
@@ -281,8 +291,17 @@ class TelegramTransactionHandler(logging.Handler):
                 if self._state['signal'] != new_signal:
                     self._state['prev_signal'] = self._state['signal']
                     self._state['signal'] = new_signal
+                    if new_signal not in ('entry_ok', 'entry_sell'):
+                        self._state['signal_confidence'] = None
+                        self._state['signal_size_pct'] = None
                     if self._domain == "judge" and self._loop and self._state['prev_signal'] is not None:
                         self._loop.create_task(self._send_signal_change())
+
+        # 오케스트레이터 확신도/사이즈 파싱 (entry 신호 발생 시 자동/수동 승인 판별용)
+        m = re.search(r'확신도=([\d.]+)\s+사이즈=([\d.]+)', msg)
+        if m:
+            self._state['signal_confidence'] = float(m.group(1))
+            self._state['signal_size_pct'] = float(m.group(2))
         
         # regime (4H 체제 판정)
         m = re.search(r'regime=(\w+).*BB폭 ([\d.]+)%.*가격범위 ([\d.]+)%.*?(\w+) 연속 (\d+)회', msg)
@@ -303,23 +322,44 @@ class TelegramTransactionHandler(logging.Handler):
                 self._loop.create_task(self._send_regime_update(regime_changed))
         
         # advisory
-        m = re.search(r'action=(\w+) confidence=([\d.]+).*잔여=([\d.]+)H', msg)
+        m = re.search(r'id=(\d+) action=(\w+) confidence=([\d.]+).*잔여=([\d.]+)H', msg)
         if m:
-            action = m.group(1)
-            confidence = float(m.group(2))
-            remaining_h = float(m.group(3))
-            
-            # reasoning 추출
-            reasoning_match = re.search(r'사유:\s*([^\n]+)', msg)
-            reasoning = reasoning_match.group(1) if reasoning_match else None
-            
+            adv_id = m.group(1)
+            action = m.group(2)
+            confidence = float(m.group(3))
+            remaining_h = float(m.group(4))
+
+            # 다중 필드 파싱 (로그 포맷: '근거: ...' '앨리스: ...' '사만다: ...' '리스크: ...')
+            # 주의: \s* 대신 [ \t]* 사용 — \s는 \n을 포함해 다음 줄을 잡아버릴 수 있음
+            reasoning_match = re.search(r'근거:[ \t]*([^\n]+)', msg)
+            alice_match = re.search(r'앨리스:[ \t]*([^\n]+)', msg)
+            samantha_match = re.search(r'사만다:[ \t]*([^\n]+)', msg)
+            risk_match = re.search(r'리스크:[ \t]*([^\n]+)', msg)
+
+            reasoning = reasoning_match.group(1).strip() if reasoning_match else None
+            alice = (alice_match.group(1).strip() or None) if alice_match else None
+            samantha = (samantha_match.group(1).strip() or None) if samantha_match else None
+            risk_notes = (risk_match.group(1).strip() or None) if risk_match else None
+
+            # 트리거: advisory ID가 바뀌면 새 advisory 등록 → 즉시 전송
+            # (같은 action이어도 4H 갱신 시 새 id로 전송)
+            prev_id = self._state.get('advisory_id')
+            advisory_new = prev_id != adv_id
+
+            self._state['advisory_id'] = adv_id
             self._state['advisory_action'] = action
             self._state['advisory_confidence'] = confidence
             self._state['advisory_remaining_h'] = remaining_h
             if reasoning:
                 self._state['advisory_reasoning'] = reasoning
-            
-            if self._domain == "judge" and self._loop:
+            if alice is not None:
+                self._state['advisory_alice'] = alice
+            if samantha is not None:
+                self._state['advisory_samantha'] = samantha
+            if risk_notes is not None:
+                self._state['advisory_risk_notes'] = risk_notes
+
+            if advisory_new and self._domain == "judge" and self._loop:
                 self._loop.create_task(self._send_advisory_update())
         
         # advisory 없음 (v1 폴백)
@@ -571,8 +611,18 @@ class TelegramTransactionHandler(logging.Handler):
         action = self._state.get('advisory_action')
         conf = self._state.get('advisory_confidence', 0) * 100
         remaining_h = self._state.get('advisory_remaining_h')
-        reasoning = self._state.get('advisory_reasoning', '(사유 없음)')
-        
+        reasoning = self._state.get('advisory_reasoning') or '(사유 없음)'
+        alice = self._state.get('advisory_alice')
+        samantha = self._state.get('advisory_samantha')
+        risk_notes = self._state.get('advisory_risk_notes')
+
+        action_emoji = {
+            'hold': '⏸',
+            'entry_long': '🟢',
+            'entry_short': '🔴',
+            'add_position': '➕',
+            'exit': '🚪',
+        }.get(action, '❓')
         action_kr = {
             'hold': '보류',
             'entry_long': '롱 진입',
@@ -580,15 +630,34 @@ class TelegramTransactionHandler(logging.Handler):
             'add_position': '피라미딩',
             'exit': '청산',
         }.get(action, action)
-        
-        text = (
-            f"🔮 [{self._exchange}·BTC] {_format_time(time.time())}  (판단 사이클 · 레이첼 advisory)\n"
-            f"──────────────────────────\n"
-            f"레이첼 의견: {action_kr} (확신도 {conf:.0f}%, 만료까지 {remaining_h:.1f}H)\n"
-            f"  사유: {reasoning}"
-        )
-        
-        await _send_telegram(self._bot_token, self._chat_id, text)
+
+        lines = [
+            f"🔮 [{self._exchange}·BTC] {_format_time(time.time())}  (레이첼 advisory 갱신)",
+            f"──────────────────────────",
+            f"결론: {action_emoji} {action_kr}  |  확신도: {conf:.0f}%  |  만료: {remaining_h:.1f}H 후",
+            f"※ 확신도 = 레이첼(LLM) 자체 평가 수치 (룰베이스 아님)",
+        ]
+
+        # 에이전트 의견 블록 (alice/samantha 있을 때만)
+        if alice or samantha:
+            lines.append("")
+            lines.append("👥 에이전트 의견")
+            if alice:
+                lines.append(f"• 앨리스: {alice}")
+            if samantha:
+                lines.append(f"• 사만다: {samantha}")
+
+        # 레이첼 판단 (에이전트 의견을 어떻게 반영했는지)
+        lines.append("")
+        lines.append("🔍 레이첼 판단")
+        lines.append(reasoning)
+
+        # 리스크 노트
+        if risk_notes:
+            lines.append("")
+            lines.append(f"⚠️ 리스크: {risk_notes}")
+
+        await _send_telegram(self._bot_token, self._chat_id, "\n".join(lines))
 
     async def _send_fng_update(self) -> None:
         """FNG 갱신 즉시 전송."""
@@ -648,12 +717,31 @@ class TelegramTransactionHandler(logging.Handler):
         # 승인 모드
         import os as _os
         _approval_mode = _os.environ.get("APPROVAL_MODE", "").lower()
-        _max_size = _os.environ.get("AUTO_APPROVAL_MAX_SIZE", "0.40")
-        _min_conf = _os.environ.get("AUTO_APPROVAL_MIN_CONFIDENCE", "0.65")
+        _max_size = float(_os.environ.get("AUTO_APPROVAL_MAX_SIZE", "0.40"))
+        _min_conf = float(_os.environ.get("AUTO_APPROVAL_MIN_CONFIDENCE", "0.65"))
         if _approval_mode == "auto":
-            _min_conf_pct = int(float(_min_conf) * 100)
-            _max_size_pct = int(float(_max_size) * 100)
-            approval_line = f"승인: 🤖 자동 (신뢰도≥{_min_conf_pct}%, 사이즈≤{_max_size_pct}%)"
+            _min_conf_pct = int(_min_conf * 100)
+            _max_size_pct = int(_max_size * 100)
+            # 신호 있을 때: 실제 confidence/size 기반으로 자동/수동 승인 여부 동적 표시
+            _sig_now = self._state.get('signal')
+            _sig_conf = self._state.get('signal_confidence')
+            _sig_size = self._state.get('signal_size_pct')
+            if _sig_now in ('entry_ok', 'entry_sell') and _sig_conf is not None and _sig_size is not None:
+                _conf_ok = _sig_conf >= _min_conf
+                _size_ok = _sig_size <= _max_size
+                if _conf_ok and _size_ok:
+                    _conf_disp = int(_sig_conf * 100)
+                    _size_disp = int(_sig_size * 100)
+                    approval_line = f"승인: 🤖 자동 승인 예정 (신뢰도 {_conf_disp}% ✅, 사이즈 {_size_disp}% ✅)"
+                else:
+                    _reasons: list[str] = []
+                    if not _conf_ok:
+                        _reasons.append(f"신뢰도 {int(_sig_conf * 100)}% < {_min_conf_pct}%")
+                    if not _size_ok:
+                        _reasons.append(f"사이즈 {int(_sig_size * 100)}% > {_max_size_pct}%")
+                    approval_line = f"승인: 👆 수동 승인 필요 ({', '.join(_reasons)})"
+            else:
+                approval_line = f"승인: 🤖 자동 (신뢰도≥{_min_conf_pct}%, 사이즈≤{_max_size_pct}%)"
         elif _approval_mode in ("manual", "true", "1"):
             approval_line = "승인: 👆 수동 (1클릭 승인 대기)"
         else:

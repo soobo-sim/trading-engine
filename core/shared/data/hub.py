@@ -82,6 +82,10 @@ class IDataHub(Protocol):
         """센티먼트 지수. v1에서는 None."""
         ...
 
+    async def get_sentiment_history(self, limit: int = 5) -> tuple[SentimentDTO, ...]:
+        """FNG 최근 이력 (최신순). v1에서는 빈 tuple."""
+        ...
+
     async def get_upcoming_events(self) -> tuple[EconomicEventDTO, ...]:
         """향후 24시간 경제 이벤트. v1에서는 빈 tuple."""
         ...
@@ -119,6 +123,7 @@ class DataHub:
         self._events_cache: Optional[tuple[tuple[EconomicEventDTO, ...], datetime]] = None
         self._news_cache: dict[str, tuple[tuple[NewsDTO, ...], datetime]] = {}
         self._sentiment_cache: Optional[tuple[SentimentDTO, datetime]] = None
+        self._sentiment_history_cache: Optional[tuple[tuple[SentimentDTO, ...], datetime]] = None
 
     async def get_candles(
         self,
@@ -336,6 +341,45 @@ class DataHub:
             f"({classification}) — 다음 갱신 ~1시간 후"
         )
         return dto
+
+    async def get_sentiment_history(self, limit: int = 5) -> tuple[SentimentDTO, ...]:
+        """FNG 최근 이력 (최신순, limit 건). trading-data DB에서 조회."""
+        if self._trading_data_url is None:
+            return ()
+
+        now = datetime.now(tz=timezone.utc)
+        if self._sentiment_history_cache is not None:
+            cached, fetched_at = self._sentiment_history_cache
+            if (now - fetched_at).total_seconds() < _SENTIMENT_CACHE_TTL:
+                # 캐시된 것이 limit보다 많으면 슬라이스 반환
+                return cached[:limit]
+
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(
+                    f"{self._trading_data_url}/api/sentiment/latest",
+                    params={"source": "alternative_me_fng", "limit": 10},
+                )
+                resp.raise_for_status()
+                scores = resp.json().get("scores", [])
+
+            dtos: tuple[SentimentDTO, ...] = tuple(
+                SentimentDTO(
+                    source="alternative_me_fng",
+                    score=int(entry["score"]),
+                    classification=entry["classification"],
+                    timestamp=datetime.fromisoformat(
+                        entry["fetched_at"].replace("Z", "+00:00")
+                    ),
+                )
+                for entry in scores
+                if entry.get("fetched_at")
+            )
+            self._sentiment_history_cache = (dtos, now)
+            return dtos[:limit]
+        except Exception as e:
+            logger.warning(f"[DataHub] FNG 이력 조회 실패 (graceful): {e}")
+            return self._sentiment_history_cache[0][:limit] if self._sentiment_history_cache else ()
 
     async def get_upcoming_events(self) -> tuple[EconomicEventDTO, ...]:
         if self._trading_data_url is None:

@@ -8,6 +8,7 @@ RegimeGate — 4H 체제 기반 전략 진입 게이트.
 """
 from __future__ import annotations
 
+import itertools
 import logging
 from datetime import datetime, timezone
 
@@ -15,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 _LOG_PREFIX = "⚙️ [RegimeGate]"
 _DEFAULT_STREAK_REQUIRED = 3  # 전환에 필요한 연속 캔들 수
+_DEFAULT_RESTORE_REQUIRED = 2  # unclear 후 복원에 필요한 연속 캔들 수 (< streak_required)
 
 # regime → 허용 전략 매핑
 _REGIME_TO_STRATEGY: dict[str, str] = {
@@ -36,10 +38,16 @@ class RegimeGate:
     warm-up 중에는 active_strategy=None → 양쪽 모두 진입 차단.
     """
 
-    def __init__(self, pair: str, streak_required: int = _DEFAULT_STREAK_REQUIRED) -> None:
+    def __init__(
+        self,
+        pair: str,
+        streak_required: int = _DEFAULT_STREAK_REQUIRED,
+        restore_required: int = _DEFAULT_RESTORE_REQUIRED,
+    ) -> None:
         self._pair = pair
         self._active_strategy: str | None = None
         self._streak_required = streak_required
+        self._restore_required = min(restore_required, streak_required)  # streak 이하로 제한
         self._regime_history: list[str] = []  # 최대 streak_required개 유지
         self._last_switch_at: datetime | None = None
         self._switch_count: int = 0
@@ -137,13 +145,45 @@ class RegimeGate:
                     f"  이력: {history_str} → unclear 끼임, streak 리셋\n"
                     f"  활성전략: {prev_active} → None (양쪽 진입 차단)"
                 )
-            else:
-                logger.info(
-                    f"{_LOG_PREFIX} {self._pair}: 4H 체제 판정 갱신\n"
-                    f"  현재 regime={regime} (BB폭 {bb_width_pct:.1f}%, 가격범위 {range_pct:.1f}%) — {regime} 연속 {self._consecutive_count}회\n"
-                    f"  이력: {history_str} → unclear 포함, 전환 조건 미충족\n"
-                    f"  현재 활성: {self._active_strategy} 유지"
+                return None
+
+            # 현재 캔들이 U가 아님 — 꼬리 연속 카운트로 조기 복원 판정
+            tail_regime = self._regime_history[-1]
+            tail_streak = sum(
+                1 for _ in
+                itertools.takewhile(
+                    lambda r: r == tail_regime,
+                    reversed(self._regime_history),
                 )
+            )
+            target_strategy = _REGIME_TO_STRATEGY.get(tail_regime)
+
+            if target_strategy and tail_streak >= self._restore_required:
+                # 복원 조건 충족 (restore_required 연속)
+                prev_strategy = self._active_strategy
+                self._active_strategy = target_strategy
+                self._last_switch_at = datetime.now(timezone.utc)
+                self._switch_count += 1
+                trend_allow = "✅ 진입허용" if target_strategy == "trend_following" else "🚫 진입차단"
+                box_allow = "✅ 진입허용" if target_strategy == "box_mean_reversion" else "🚫 진입차단"
+                prev_label = _STRATEGY_LABEL.get(prev_strategy, str(prev_strategy)) if prev_strategy else "없음"
+                new_label = _STRATEGY_LABEL.get(target_strategy, target_strategy)
+                logger.warning(
+                    f"{_LOG_PREFIX} {self._pair}: 4H 체제 판정 갱신\n"
+                    f"  현재 regime={tail_regime} (BB폭 {bb_width_pct:.1f}%, 가격범위 {range_pct:.1f}%) — {tail_regime} 연속 {self._consecutive_count}회\n"
+                    f"  이력: {history_str} → unclear 포함이나 꼬리 {tail_streak}연속 (restore_required={self._restore_required})\n"
+                    f"  ⭐⭐⭐⭐ 전략 조기 복원: {prev_label} → {new_label}\n"
+                    f"  TrendManager {trend_allow}, BoxManager {box_allow}"
+                )
+                return target_strategy
+
+            # 아직 복원 기준 미달 — 차단 유지
+            logger.info(
+                f"{_LOG_PREFIX} {self._pair}: 4H 체제 판정 갱신\n"
+                f"  현재 regime={regime} (BB폭 {bb_width_pct:.1f}%, 가격범위 {range_pct:.1f}%) — {regime} 연속 {self._consecutive_count}회\n"
+                f"  이력: {history_str} → unclear 포함, 꼬리 {tail_streak}/{self._restore_required}연속 (복원 기준 미달)\n"
+                f"  현재 활성: {self._active_strategy} 유지 (차단 계속)"
+            )
             return None
 
         # 3-c. streak 미달 (모두 동일하지 않음)
@@ -251,6 +291,7 @@ class RegimeGate:
             "consecutive_regime": self._consecutive_regime,
             "last_candle_key": self._last_candle_key,
             "streak_required": self._streak_required,
+            "restore_required": self._restore_required,
         }
 
     def restore(self, state: dict) -> None:
@@ -266,6 +307,10 @@ class RegimeGate:
             return
 
         self._streak_required = int(state.get("streak_required", _DEFAULT_STREAK_REQUIRED))
+        self._restore_required = min(
+            int(state.get("restore_required", _DEFAULT_RESTORE_REQUIRED)),
+            self._streak_required,
+        )
         self._active_strategy = state.get("active_strategy")
         history = state.get("regime_history", [])
         self._regime_history = list(history)[-self._streak_required:]

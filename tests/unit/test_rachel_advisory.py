@@ -74,6 +74,9 @@ def _advisory(
         take_profit=take_profit,
         regime="trending",
         reasoning=reasoning,
+        alice_summary=None,
+        samantha_summary=None,
+        risk_notes=None,
         expires_at=_NOW + timedelta(hours=expires_offset_hours),
         hold_override_policy=hold_override_policy,
     )
