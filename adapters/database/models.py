@@ -482,6 +482,8 @@ def create_trend_position_model(prefix: str, order_id_length: int = 40):
         partial_exit_jpy = Column(Numeric(18, 2), nullable=True)
         partial_exit_reasons = Column(String(200), nullable=True)
 
+        pyramid_count = Column(Integer, nullable=False, server_default="0")
+
         exit_order_id = Column(String(order_id_length), nullable=True)
         exit_price = Column(Numeric(18, 8), nullable=True)
         exit_amount = Column(Numeric(18, 8), nullable=True)

@@ -527,7 +527,7 @@ class GmoCoinTrendManager(CfdTrendFollowingManager):
                     .where(Model.id == db_record_id)
                     .values(
                         entry_price=entry_price,
-                        entry_size=size,
+                        entry_amount=size,
                         stop_loss_price=stop_loss_price,
                         pyramid_count=pyramid_count,
                     )
