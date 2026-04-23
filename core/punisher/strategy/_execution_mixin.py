@@ -286,6 +286,16 @@ class ExecutionMixin:
                 )
                 return False
 
+            # BUG-032: advisory_id 단위 쿨다운 — 동일 advisory로 1회만 실행
+            advisory_id = result.decision.meta.get("advisory_id") if result.decision else None
+            if advisory_id is not None:
+                last_advisory_id = pos.extra.get("last_pyramid_advisory_id")
+                if last_advisory_id == advisory_id:
+                    logger.info(
+                        f"{self._log_prefix} {pair}: add_position 스킵 — "
+                        f"advisory_id={advisory_id} 이미 피라미딩 실행됨 (쿨다운)"
+                    )
+                    return False
             side = pos.extra.get("side", "buy")
             logger.info(
                 f"{self._log_prefix} {pair}: add_position 실행 시작 — "
@@ -299,6 +309,9 @@ class ExecutionMixin:
             # 실행 후 결과 로그
             updated_pos = self._position.get(pair)
             if updated_pos is not None and updated_pos.extra.get("pyramid_count", 0) > pyramid_count:
+                # BUG-032: 성공한 advisory_id 기록 → 다음 사이클 중복 차단
+                if advisory_id is not None:
+                    updated_pos.extra["last_pyramid_advisory_id"] = advisory_id
                 logger.info(
                     f"{self._log_prefix} {pair}: add_position 완료 — "
                     f"피라미딩 #{updated_pos.extra['pyramid_count']}/{_MAX_PYRAMID} "

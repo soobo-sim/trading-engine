@@ -91,7 +91,10 @@ class RachelAdvisoryDecision:
             decision = await self._fallback.decide(snapshot)
             return _replace_source(decision, _SOURCE_FALLBACK)
 
-        return self._merge_advisory_with_signal(advisory, snapshot, now, expires_at)
+        decision = self._merge_advisory_with_signal(advisory, snapshot, now, expires_at)
+        # advisory_id를 meta에 삽입 — add_position 쿨다운 체크용 (BUG-032)
+        decision.meta["advisory_id"] = advisory.id
+        return decision
 
     # ── 내부 헬퍼 ──────────────────────────────────────────────
 
@@ -394,6 +397,27 @@ class RachelAdvisoryDecision:
         _MAX_PYRAMID = 3
         if advisory_action == "add_position" and has_position:
             pyramid_count = snapshot.position.extra.get("pyramid_count", 0)
+
+            # 조건 0: 총 사이즈 상한 사전 차단 (GR-06 사전 방지)
+            # 이미 상한에 도달한 경우 판단 자체를 스킵 (WARNING 로그 없이 조용히 hold)
+            existing_total_pct = snapshot.position.extra.get("total_size_pct", 0.0)
+            add_pct = size_pct or 0.0
+            max_total_pct = float(snapshot.params.get("position_size_pct", 50.0)) / 100.0
+            new_total_pct = existing_total_pct + add_pct
+            if new_total_pct > max_total_pct:
+                logger.info(
+                    f"[RachelAdvisory] {snapshot.pair}: add_position 스킵 — "
+                    f"총 사이즈 상한 초과 ({existing_total_pct:.0%}+{add_pct:.0%}"
+                    f"={new_total_pct:.0%} > {max_total_pct:.0%})"
+                )
+                return self._decision(
+                    action="hold", snapshot=snapshot, confidence=confidence,
+                    size_pct=0.0, stop_loss=None, take_profit=None,
+                    reasoning=(
+                        f"총 사이즈 상한 초과 — 추가 매수 스킵 "
+                        f"({existing_total_pct:.0%}+{add_pct:.0%}={new_total_pct:.0%} > {max_total_pct:.0%})"
+                    ),
+                )
 
             # 조건 1: 피라미딩 횟수 제한
             if pyramid_count >= _MAX_PYRAMID:
