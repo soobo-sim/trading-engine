@@ -549,6 +549,7 @@ def create_cfd_position_model(prefix: str, pair_column: str = "product_code", or
         "entry_size": Column(Numeric(18, 8), nullable=False),
         "entry_collateral_jpy": Column(Numeric(18, 2), nullable=True),
         "stop_loss_price": Column(Numeric(18, 8), nullable=True),
+        "pyramid_count": Column(Integer, nullable=False, server_default="0"),
         "exit_order_id": Column(String(order_id_length), nullable=True),
         "exit_price": Column(Numeric(18, 8), nullable=True),
         "exit_size": Column(Numeric(18, 8), nullable=True),
