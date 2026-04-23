@@ -289,7 +289,7 @@ class TestTelegramAlertHandler:
 
     @pytest.mark.asyncio
     async def test_debounce_skips_duplicate(self):
-        """5초 이내 동일 logger+level은 스킵."""
+        """debounce_sec 이내 동일 logger+level+메시지는 스킵."""
         loop = asyncio.get_running_loop()
         h = TelegramAlertHandler("tok", "chat", exchange="BF", debounce_sec=100)
         h.set_loop(loop)
@@ -300,11 +300,30 @@ class TestTelegramAlertHandler:
             new_callable=AsyncMock,
             side_effect=lambda *a, **k: sent_texts.append(a[2]) or True,
         ):
-            h.emit(self._make_record(logging.WARNING, "first"))
-            h.emit(self._make_record(logging.WARNING, "second"))  # 디바운스로 스킵
+            h.emit(self._make_record(logging.WARNING, "same message"))
+            h.emit(self._make_record(logging.WARNING, "same message"))  # 디바운스로 스킵
             await asyncio.sleep(0)
 
         assert len(sent_texts) == 1  # 두 번째는 스킵
+
+    @pytest.mark.asyncio
+    async def test_different_message_same_logger_not_debounced(self):
+        """동일 logger + level이라도 메시지가 다르면 디바운스 미적용."""
+        loop = asyncio.get_running_loop()
+        h = TelegramAlertHandler("tok", "chat", exchange="BF", debounce_sec=100)
+        h.set_loop(loop)
+
+        sent_texts = []
+        with patch(
+            "core.shared.logging.telegram_handlers._send_telegram",
+            new_callable=AsyncMock,
+            side_effect=lambda *a, **k: sent_texts.append(a[2]) or True,
+        ):
+            h.emit(self._make_record(logging.WARNING, "GR-06 위반"))
+            h.emit(self._make_record(logging.WARNING, "GR-02 위반"))  # 다른 메시지 → 전송
+            await asyncio.sleep(0)
+
+        assert len(sent_texts) == 2
 
     @pytest.mark.asyncio
     async def test_different_logger_not_debounced(self):
@@ -1213,3 +1232,120 @@ class TestAdvisoryChangeDetection:
         assert h._state.get('advisory_samantha') == 'falling knife'
         assert h._state.get('advisory_risk_notes') == '변동성'
 
+
+# ─── BoxMgr 신호 필터 (매분 신호 변경 오발 방지) ────────────────────────────
+
+class TestBoxMgrSignalFilter:
+    """BX-01~BX-03: BoxMgr 로그의 signal은 judge 핸들러에서 파싱 무시해야 함.
+
+    추세 전략(GmocMgr)과 박스 전략(BoxMgr)이 같은 페어를 동시 처리할 때
+    두 전략의 signal이 교대로 파싱되면 매분 신호 변경 알림이 발송되는 버그.
+    [BoxMgr] 로그는 signal 파싱에서 완전 제외해야 함.
+    """
+
+    def _handler(self) -> TelegramTransactionHandler:
+        h = TelegramTransactionHandler("tok", "cid", exchange="GMO_COIN", domain="judge")
+        return h
+
+    def _trend_log(self, signal: str = "entry_ok") -> str:
+        return (
+            f"[GmocMgr] btc_jpy: 추세 유지 중 "
+            f"signal={signal} ema_slope_pct=0.0234 rsi=58.2 ema=12331251 price=12416643"
+        )
+
+    def _box_log(self, signal: str = "exit_warning") -> str:
+        return (
+            f"[BoxMgr] btc_jpy: 박스 이탈 감지 "
+            f"signal={signal} ema_slope_pct=0.0234 rsi=58.2 ema=12331251 price=12416643"
+        )
+
+    def test_bx01_box_log_does_not_update_signal_state(self):
+        """BX-01: [BoxMgr] signal=exit_warning 로그는 _state['signal']을 바꾸지 않음."""
+        h = self._handler()
+        h._state['signal'] = 'entry_ok'
+
+        h._parse_and_update(self._box_log('exit_warning'))
+
+        assert h._state['signal'] == 'entry_ok', (
+            "BoxMgr 로그가 signal 상태를 변경하면 안 됨"
+        )
+
+    def test_bx02_trend_log_after_box_log_stays_stable(self):
+        """BX-02: 추세 로그(entry_ok) → 박스 로그(exit_warning) 교대 → 상태는 entry_ok 유지."""
+        h = self._handler()
+        h._state['signal'] = None  # 초기화
+
+        h._parse_and_update(self._trend_log('entry_ok'))
+        assert h._state['signal'] == 'entry_ok'
+
+        # 박스 로그 → 무시
+        h._parse_and_update(self._box_log('exit_warning'))
+        assert h._state['signal'] == 'entry_ok', (
+            "BoxMgr 신호가 추세 신호를 덮어쓰면 안 됨"
+        )
+
+    def test_bx03_no_signal_change_task_from_box_log(self):
+        """BX-03: [BoxMgr] 로그는 _state['signal']이 변경되지 않으므로 signal_change 발송 불필요."""
+        h = self._handler()
+        initial_signal = h._state.get('signal')
+
+        # BoxMgr 로그 처리 전후로 signal 상태가 바뀌지 않으면 task 생성도 없음
+        h._parse_and_update(self._box_log('exit_warning'))
+
+        assert h._state['signal'] == initial_signal
+
+
+    def _rachel_box_advisory_log(self, signal: str = "exit_warning") -> str:
+        """BUG-034: RachelAdvisory:box_mean_reversion 로그."""
+        return (
+            f"[RachelAdvisory:box_mean_reversion] btc_jpy: advisory 읽음 — "
+            f"id=94 action=hold confidence=0.90 size_pct=None 잔여=4.7H "
+            f"signal={signal} 포지션 없음 pyramid=0\n"
+            f"  근거: 긴급 차단"
+        )
+
+    def _rachel_trend_advisory_log(self, signal: str = "entry_ok") -> str:
+        """BUG-034: RachelAdvisory:trend_following 로그."""
+        return (
+            f"[RachelAdvisory:trend_following] btc_jpy: advisory 읽음 — "
+            f"id=94 action=hold confidence=0.90 size_pct=None 잔여=4.7H "
+            f"signal={signal} 포지션 있음 pyramid=2\n"
+            f"  근거: 긴급 차단"
+        )
+
+    def test_bx04_box_advisory_log_does_not_update_signal(self):
+        """BX-04 (BUG-034): [RachelAdvisory:box_mean_reversion] 로그는 signal 갱신 안 함."""
+        h = self._handler()
+        h._state['signal'] = 'entry_ok'
+
+        h._parse_and_update(self._rachel_box_advisory_log('exit_warning'))
+
+        assert h._state['signal'] == 'entry_ok', \
+            "box_mean_reversion advisory 로그가 signal을 변경하면 안 됨"
+
+    def test_bx05_trend_advisory_log_updates_signal(self):
+        """BX-05: [RachelAdvisory:trend_following] 로그는 signal 정상 갱신."""
+        h = self._handler()
+        h._state['signal'] = None
+
+        h._parse_and_update(self._rachel_trend_advisory_log('entry_ok'))
+
+        # trend_following advisory 로그에 signal= 있으면 갱신돼야 함
+        # (상세 포맷 아니라 폴백 정규식으로 처리)
+        assert h._state['signal'] == 'entry_ok', \
+            "trend_following advisory 로그가 signal을 갱신해야 함"
+
+    def test_bx06_alternating_advisory_logs_no_spam(self):
+        """BX-06 (BUG-034): trend/box advisory 교대 5회 → signal 변경 횟수 0 (초기 제외)."""
+        h = self._handler()
+        h._state['signal'] = 'entry_ok'
+        signal_changes = []
+        original_signal = h._state['signal']
+
+        for _ in range(5):
+            h._parse_and_update(self._rachel_trend_advisory_log('entry_ok'))
+            h._parse_and_update(self._rachel_box_advisory_log('exit_warning'))
+
+        # entry_ok 유지 — exit_warning으로 변경되지 않음
+        assert h._state['signal'] == 'entry_ok', \
+            f"매분 교대 로그 후 signal이 변경됨: {h._state['signal']}"

@@ -6,7 +6,7 @@ Telegram 로그 핸들러 — 도메인별 채널 분리 전송.
   - 판단 도메인: 5분 정기 요약 + 시그널/체제/advisory/FNG 변경 시 즉시 전송
   - 실행 도메인: 진입/청산/스탑타이트닝 감지 시 즉시 전송
 - TelegramDigestHandler : INFO 버퍼링 배치 전송 (레거시, Deprecated)
-- TelegramAlertHandler : WARNING+ → 실행 도메인 그룹 즉시 (5초 디바운스)
+- TelegramAlertHandler : WARNING+ → 실행 도메인 그룹 즉시 (300초 디바운스, 동일 메시지)
 
 JUDGE_PREFIXES / PUNISHER_PREFIXES 로 라우팅 규칙 관리.
 
@@ -281,8 +281,15 @@ class TelegramTransactionHandler(logging.Handler):
             self._state['has_position'] = True
         
         # signal + ema_slope_pct + rsi + ema + price (candle_loop 상세 로그)
+        # [BoxMgr] 로그는 무시 — 박스 전략과 추세 전략이 같은 pair를 처리하므로
+        # 두 전략의 signal이 교대로 파싱되어 매분 신호 변경으로 감지되는 문제 방지
+        is_box_log = (
+            '[BoxMgr]' in msg
+            or 'box_mean_reversion' in msg
+            or 'BoxMeanReversion' in msg
+        )
         m = re.search(r'signal=(\w+) ema_slope_pct=([-\d.]+|N/A) rsi=([\d.]+|N/A) ema=([\d.]+|N/A) price=([\d.]+)', msg)
-        if m:
+        if m and not is_box_log:
             new_signal = m.group(1)
             if m.group(2) != 'N/A':
                 self._state['ema_slope_pct'] = float(m.group(2))
@@ -302,7 +309,7 @@ class TelegramTransactionHandler(logging.Handler):
         else:
             # 기존 signal= 파싱 폴백 (상세 포맷 없는 로그)
             m = re.search(r'signal=(\w+)', msg)
-            if m:
+            if m and not is_box_log:
                 new_signal = m.group(1)
                 if self._state['signal'] != new_signal:
                     self._state['prev_signal'] = self._state['signal']
@@ -979,7 +986,7 @@ class TelegramDigestHandler(logging.Handler):
 # ── WARNING+ 즉시 알림 (실행 도메인 채널) ───────────────────
 
 class TelegramAlertHandler(logging.Handler):
-    """WARNING 이상 → Save Us 그룹 즉시 전송 (5초 디바운스)."""
+    """WARNING 이상 → Save Us 그룹 즉시 전송 (300초 디바운스, 동일 메시지)."""
 
     LEVEL_EMOJI = {
         logging.WARNING: "⚠️",
@@ -992,7 +999,7 @@ class TelegramAlertHandler(logging.Handler):
         bot_token: str,
         chat_id: str,
         exchange: str = "??",
-        debounce_sec: float = 5.0,
+        debounce_sec: float = 300.0,
     ):
         super().__init__(level=logging.WARNING)
         self._bot_token = bot_token
@@ -1006,8 +1013,8 @@ class TelegramAlertHandler(logging.Handler):
         self._loop = loop
 
     def emit(self, record: logging.LogRecord) -> None:
-        # 디바운스: 동일 logger+level 조합 5초 이내 중복 스킵
-        key = f"{record.name}:{record.levelno}"
+        # 디바운스: 동일 logger+level+메시지 조합 debounce_sec 이내 중복 스킵
+        key = f"{record.name}:{record.levelno}:{record.getMessage()}"
         now = time.time()
         if now - self._last_sent.get(key, 0) < self._debounce:
             return
