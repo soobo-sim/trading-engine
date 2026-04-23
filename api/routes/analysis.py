@@ -34,6 +34,7 @@ class MacroBriefResponse(BaseModel):
     events: dict
     macro: dict | None
     context_summary: str
+    recalled_lessons: list[dict] | None = None  # P3: 자동 소환된 교훈 (최대 3개)
 
 
 # ── 엔드포인트 ────────────────────────────────────────────────
@@ -54,6 +55,7 @@ async def get_box_history(
 async def get_macro_brief(
     pair: str = Query("btc_jpy", description="페어 (예: btc_jpy)"),
     state: AppState = Depends(get_state),
+    db: AsyncSession = Depends(get_db),
 ):
     """Rachel이 한 번에 매크로 컨텍스트를 받을 수 있도록 통합 제공.
     
@@ -187,7 +189,53 @@ async def get_macro_brief(
             parts.append(", ".join(macro_parts))
     
     context_summary = ", ".join(parts) if parts else "데이터 없음"
-    
+
+    # P3: Lessons Recall — 현재 체제에 맞는 교훈 자동 첨부
+    recalled_lessons_data: list[dict] | None = None
+    try:
+        from api.services.lessons_recall import RecallContext, recall_lessons, summarize
+        from core.judge.analysis import analysis_service as _svc
+
+        # 현재 체제 정보 가져오기 (가능할 때만)
+        current_regime = "unclear"
+        try:
+            trend_mgr = state.trend_manager
+            candles_raw = await trend_mgr._fetch_candles_for_pair(pair)
+            if candles_raw and len(candles_raw) >= 30:
+                from core.shared.signals import classify_regime, compute_bb_width, compute_range_pct
+                bb = compute_bb_width(candles_raw[-60:] if len(candles_raw) >= 60 else candles_raw)
+                rng = compute_range_pct(candles_raw[-60:] if len(candles_raw) >= 60 else candles_raw)
+                params = trend_mgr._params if hasattr(trend_mgr, "_params") else {}
+                current_regime = classify_regime(bb, rng, params).value
+        except Exception:
+            pass  # 체제 파악 실패 → unclear 사용
+
+        fng_val: int | None = None
+        if fng and isinstance(fng.get("score"), (int, float)):
+            fng_val = fng["score"]
+
+        ctx = RecallContext(
+            pair=pair,
+            market_regime=current_regime,
+            macro_context={"fng": fng_val, "news_count": (news or {}).get("count", 0)},
+            workflow="4h_advisory",
+            top_k=3,
+        )
+        matches = await recall_lessons(db, ctx)
+        if matches:
+            recalled_lessons_data = [
+                {
+                    "id": l.id,
+                    "summary": summarize(l.observation, 100),
+                    "recommendation": l.recommendation,
+                    "confidence": l.confidence,
+                    "match_score": round(s, 3),
+                }
+                for l, s in matches
+            ]
+    except Exception:
+        pass  # recall 실패 시 None 반환 (non-critical)
+
     return MacroBriefResponse(
         fng=fng,
         fng_history=fng_history,
@@ -195,6 +243,7 @@ async def get_macro_brief(
         events=events,
         macro=macro,
         context_summary=context_summary,
+        recalled_lessons=recalled_lessons_data,
     )
 
 

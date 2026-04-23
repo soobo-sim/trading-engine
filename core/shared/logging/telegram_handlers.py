@@ -81,6 +81,17 @@ def _get_domain(logger_name: str) -> str:
     return "shared"  # 미분류 → 실행 도메인으로 fallback
 
 
+# ── 진화 도메인 라우팅 ────────────────────────────────
+
+EVOLUTION_PREFIXES: frozenset[str] = frozenset({
+    "core.judge.evolution",
+    "core.evolution",
+    "api.services.hypotheses_service",
+    "api.services.lessons_service",
+    "api.services.cycle_report_service",
+})
+
+
 # ── 유틸 ─────────────────────────────────────────────
 
 async def _send_telegram(bot_token: str, chat_id: str, text: str) -> bool:
@@ -165,6 +176,11 @@ class TelegramTransactionHandler(logging.Handler):
             # 시그널 상세 (candle_loop 로그에서 파싱)
             'ema_slope_pct': None,
             'rsi': None,
+            # 전략 파라미터 (seed_telegram_strategy_params로 주입)
+            'entry_rsi_min': 40.0,
+            'entry_rsi_max': 65.0,
+            'entry_rsi_min_short': 35.0,
+            'entry_rsi_max_short': 60.0,
             # 포지션 상태
             'has_position': False,
             'position_side': None,
@@ -775,7 +791,8 @@ class TelegramTransactionHandler(logging.Handler):
                 else:
                     condition_lines.append(" ❓ ② EMA 기울기    데이터 없음")
 
-                SHORT_RSI_MIN, SHORT_RSI_MAX = 35.0, 60.0
+                SHORT_RSI_MIN = self._state.get('entry_rsi_min_short', 35.0)
+                SHORT_RSI_MAX = self._state.get('entry_rsi_max_short', 60.0)
                 if rsi is not None:
                     c3 = "✅" if SHORT_RSI_MIN <= rsi <= SHORT_RSI_MAX else "❌"
                     condition_lines.append(f" {c3} ③ RSI 범위      {rsi:.0f}  (허용 {SHORT_RSI_MIN:.0f}~{SHORT_RSI_MAX:.0f})")
@@ -796,7 +813,8 @@ class TelegramTransactionHandler(logging.Handler):
                 else:
                     condition_lines.append(" ❓ ② EMA 기울기    데이터 없음")
 
-                LONG_RSI_MIN, LONG_RSI_MAX = 40.0, 65.0
+                LONG_RSI_MIN = self._state.get('entry_rsi_min', 40.0)
+                LONG_RSI_MAX = self._state.get('entry_rsi_max', 65.0)
                 if rsi is not None:
                     c3 = "✅" if LONG_RSI_MIN <= rsi <= LONG_RSI_MAX else "❌"
                     condition_lines.append(f" {c3} ③ RSI 범위      {rsi:.0f}  (허용 {LONG_RSI_MIN:.0f}~{LONG_RSI_MAX:.0f})")
@@ -1014,6 +1032,28 @@ class TelegramAlertHandler(logging.Handler):
 _handlers: list[TelegramTransactionHandler | TelegramDigestHandler | TelegramAlertHandler] = []
 
 
+def seed_telegram_strategy_params(params: dict) -> None:
+    """전략 파라미터를 핸들러 _state에 주입하여 RSI 범위 표시를 실제 파라미터와 동기화.
+
+    setup_telegram_logging() 호출 후, 전략 파라미터 로드 직후에 호출할 것.
+
+    Args:
+        params: gmoc_strategies.parameters dict (entry_rsi_min 등 포함)
+    """
+    keys = {
+        'entry_rsi_min': 'entry_rsi_min',
+        'entry_rsi_max': 'entry_rsi_max',
+        'entry_rsi_min_short': 'entry_rsi_min_short',
+        'entry_rsi_max_short': 'entry_rsi_max_short',
+    }
+    for param_key, state_key in keys.items():
+        val = params.get(param_key)
+        if val is not None:
+            for h in _handlers:
+                if isinstance(h, TelegramTransactionHandler):
+                    h._state[state_key] = float(val)
+
+
 def seed_telegram_regime_state(regime: str | None, consecutive: int) -> None:
     """서비스 재시작 후 RegimeGate DB 복원 상태를 핸들러 _state에 즉시 반영.
 
@@ -1030,6 +1070,39 @@ def seed_telegram_regime_state(regime: str | None, consecutive: int) -> None:
         if isinstance(h, TelegramTransactionHandler):
             h._state['regime_status'] = regime
             h._state['regime_consecutive'] = consecutive
+
+
+class TelegramEvolutionHandler(logging.Handler):
+    """진화 채널 전용 즉시 전송 핸들러.
+
+    EVOLUTION_PREFIXES에 해당하는 logger 이름의 INFO+ 메시지를
+    TELEGRAM_EVOLUTION_CHAT_ID 채널로 즉시 전송한다.
+    """
+
+    def __init__(self, bot_token: str, chat_id: str):
+        super().__init__()
+        self._bot_token = bot_token
+        self._chat_id = chat_id
+
+    def emit(self, record: logging.LogRecord) -> None:
+        # 진화 도메인만 처리
+        is_evolution = any(
+            record.name == p or record.name.startswith(p + ".")
+            for p in EVOLUTION_PREFIXES
+        )
+        if not is_evolution:
+            return
+        if record.levelno < logging.INFO:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+            asyncio.ensure_future(
+                _send_telegram(self._bot_token, self._chat_id, self.format(record)),
+                loop=loop,
+            )
+        except RuntimeError:
+            # 이벤트 루프가 없는 경우 조용히 건너뜀
+            pass
 
 
 async def setup_telegram_logging(exchange: str) -> None:
@@ -1100,6 +1173,14 @@ async def setup_telegram_logging(exchange: str) -> None:
         h_alert.set_loop(loop)
         root.addHandler(h_alert)
         _handlers.append(h_alert)
+
+    # 진화 도메인 핸들러 (Evolution 채널, 즉시 전송)
+    evolution_chat = os.environ.get("TELEGRAM_EVOLUTION_CHAT_ID", "")
+    if evolution_chat and not any(isinstance(h, TelegramEvolutionHandler) for h in _handlers):
+        h_evo = TelegramEvolutionHandler(bot_token, evolution_chat)
+        h_evo.setLevel(logging.INFO)
+        root.addHandler(h_evo)
+        _handlers.append(h_evo)
 
 
 async def shutdown_telegram_logging() -> None:

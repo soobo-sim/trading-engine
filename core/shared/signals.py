@@ -193,14 +193,23 @@ def classify_regime(
     range_pct: float,
     params: Optional[dict] = None,
 ) -> tuple:
+    """체제 판정 순수 함수.
+
+    trending 판정: bb_width_pct 단독 (볼린저밴드 폭은 현재 변동성에 즉응).
+    ranging 판정 : bb_width_pct < max AND range_pct < max (둘 다 좁아야 명확 횡보).
+    unclear      : 그 사이 전이 구간.
+
+    range_pct_trending_min 파라미터는 trending 판정에 더 이상 사용되지 않는다.
+    (range_pct 는 lookback window 내 max-min 기반으로 sticky 특성이 있어
+    현재 시장 상태를 즉각 반영하지 못한다 — 2026-04-21 재설계)
+    """
     if params is None:
         params = {}
     bb_trending_min = float(params.get("bb_width_trending_min", 3.0))
-    range_trending_min = float(params.get("range_pct_trending_min", 6.0))
     bb_ranging_max = float(params.get("bb_width_ranging_max", 3.0))
     range_ranging_max = float(params.get("range_pct_ranging_max", 5.0))
 
-    regime_trending = bb_width_pct >= bb_trending_min or range_pct >= range_trending_min
+    regime_trending = bb_width_pct >= bb_trending_min
     regime_ranging = bb_width_pct < bb_ranging_max and range_pct < range_ranging_max
 
     if regime_trending:

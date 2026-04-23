@@ -44,8 +44,8 @@ def _make_ranging_candles(n: int = 60) -> list[_Candle]:
 
 class TestClassifyRegime:
 
-    def test_rc01_btc_scenario_range_triggers_trending(self):
-        """RC-01: BTC 현실 수치 (BB=4.93%, range=11.95%) → trending (range≥10.0 충족)."""
+    def test_rc01_btc_scenario_bb_triggers_trending(self):
+        """RC-01: BTC 현실 수치 (BB=4.93%, range=11.95%) → trending (BB≥3.0 충족)."""
         regime, is_trending, is_ranging = classify_regime(bb_width_pct=4.93, range_pct=11.95)
         assert regime == "trending"
         assert is_trending is True
@@ -78,7 +78,7 @@ class TestClassifyRegime:
         assert regime == "trending"
 
     def test_rc06_bb_triggers_trending_with_default_params(self):
-        """RC-06: BB=6.1% → trending (BB≥4.5 기본 기준 충족)."""
+        """RC-06: BB=6.1% → trending (BB≥3.0 기본 기준 충족)."""
         regime, _, _ = classify_regime(bb_width_pct=6.1, range_pct=5.0)
         assert regime == "trending"
 
@@ -99,7 +99,19 @@ class TestClassifyRegime:
     def test_ec01_params_none_uses_defaults(self):
         """EC-01: params=None → 기본값으로 동작, 에러 없음."""
         regime, is_trending, is_ranging = classify_regime(bb_width_pct=4.93, range_pct=11.95, params=None)
-        assert regime == "trending"  # range≥10.0
+        assert regime == "trending"  # bb≥3.0
+
+    def test_rc09_range_only_high_bb_low_is_unclear(self):
+        """RC-09: BB=2.5%(trending 기준 미달), range=9.0%(높음) → unclear.
+
+        range_pct는 trending 판정 조건에서 제거됨 (2026-04-21).
+        bb_width가 3.0% 미만이면 range가 아무리 높아도 trending 아님.
+        ranging도 아님 (range=9.0 >= range_ranging_max=5.0) → unclear.
+        """
+        regime, is_trending, is_ranging = classify_regime(bb_width_pct=2.5, range_pct=9.0)
+        assert regime == "unclear"
+        assert is_trending is False
+        assert is_ranging is False
 
     def test_ec02_zero_values_ranging(self):
         """EC-02: BB=0.0%, range=0.0% → ranging (둘 다 max 미만)."""
@@ -192,16 +204,20 @@ class TestClassifyRegimeEdgeCases:
         assert regime in ("ranging", "unclear", "trending")  # 에러 없이 동작
 
     def test_ec04_bb_trending_min_boundary(self):
-        """EC-04: BB가 bb_trending_min(기본=4.5)과 정확히 같으면 trending (≥ 조건)."""
-        regime, is_trending, _ = classify_regime(bb_width_pct=4.5, range_pct=0.0)
+        """EC-04: BB가 bb_trending_min(기본=3.0)과 정확히 같으면 trending (≥ 조건)."""
+        regime, is_trending, _ = classify_regime(bb_width_pct=3.0, range_pct=0.0)
         assert is_trending is True
         assert regime == "trending"
 
-    def test_ec05_range_trending_min_boundary(self):
-        """EC-05: range가 range_trending_min(기본=8.5)과 정확히 같으면 trending (≥ 조건)."""
-        regime, is_trending, _ = classify_regime(bb_width_pct=0.0, range_pct=8.5)
-        assert is_trending is True
-        assert regime == "trending"
+    def test_ec05_range_alone_does_not_trigger_trending(self):
+        """EC-05: range만 높아도 BB < trending_min이면 trending 아님 (2026-04-21 재설계).
+
+        range_pct는 trending 판정 조건에서 제거됨.
+        bb=0.0, range=8.5 → ranging (bb<3.0 AND range<5.0? range가 8.5이면 ranging도 아님 → unclear).
+        """
+        regime, is_trending, is_ranging = classify_regime(bb_width_pct=0.0, range_pct=8.5)
+        assert is_trending is False
+        assert regime in ("ranging", "unclear")  # bb<3.0 AND range=8.5>=5.0 → unclear
 
     def test_ec06_return_tuple_length(self):
         """EC-06: 반환값이 정확히 3-tuple인지 확인."""

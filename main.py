@@ -109,8 +109,12 @@ from adapters.database.models import (
     create_trend_position_model,
 )
 from adapters.database.session import create_db_engine, create_session_factory
+from adapters.database import lesson_model  # noqa: F401 — Lesson 테이블 Base 메타데이터 등록
+from adapters.database import hypothesis_model  # noqa: F401 — Hypothesis 테이블 Base 메타데이터 등록
+from adapters.database import owner_query_model  # noqa: F401 — OwnerQuery 테이블 Base 메타데이터 등록
 from api.dependencies import AppState, ModelRegistry
-from api.routes import system, trading, account, strategies, boxes, candles, techniques, analysis, monitoring, cfd, performance, wake_up_reviews, strategy_changes, strategy_analysis, paper_trades, strategy_scores, advisories
+from api.routes import system, trading, account, strategies, boxes, candles, techniques, analysis, monitoring, cfd, performance, wake_up_reviews, strategy_changes, strategy_analysis, paper_trades, strategy_scores, advisories, evolution
+import core.shared.tunable_registry  # noqa: F401 — TunableCatalog 초기화 (side-effect import)
 from core.punisher.notifications.switch_telegram import send_switch_recommendation_telegram
 from core.punisher.monitoring.health import HealthChecker
 from core.judge.analysis.event_filter import create_event_filter
@@ -186,6 +190,7 @@ async def lifespan(app: FastAPI):
     # Telegram 로그 핸들러 초기화 (DEBUG→사만다, INFO→레이첼, WARNING+→Save Us)
     from core.logging.telegram_handlers import (
         setup_telegram_logging, shutdown_telegram_logging, seed_telegram_regime_state,
+        seed_telegram_strategy_params,
     )
     await setup_telegram_logging(exchange)
 
@@ -504,6 +509,9 @@ async def lifespan(app: FastAPI):
 
             if not await strategy_registry.start_strategy(style, pair, start_params):
                 logger.warning(f"미등록 전략 스타일: {style} (pair={pair})")
+            elif style in ("cfd_trend_following", "trend_following"):
+                # 주요 전략 파라미터를 텔레그램 핸들러에 주입해 RSI 표시 범위를 동기화
+                seed_telegram_strategy_params(params)
     except Exception as e:
         logger.warning(f"활성 전략 자동 기동 실패 (DB 없으면 정상): {e}")
 
@@ -584,10 +592,27 @@ async def lifespan(app: FastAPI):
             logger.warning("ENABLE_DAILY_BRIEFING=true이나 TELEGRAM_BOT_TOKEN/CHAT_ID 미설정 — 비활성화")
 
     logger.debug("Application startup complete")
+
+    # === P6: CanaryMonitor 시작 ===
+    from core.judge.evolution.canary_monitor import get_canary_monitor
+    from adapters.database.hypothesis_model import Hypothesis
+    from sqlalchemy import select as _sa_select
+    _canary_monitor = get_canary_monitor()
+    _canary_monitor._session_factory = session_factory  # session_factory 주입
+    async with session_factory() as _cm_db:
+        _active_canaries = (
+            await _cm_db.execute(_sa_select(Hypothesis).where(Hypothesis.status == "canary"))
+        ).scalars().all()
+        for _ch in _active_canaries:
+            await _canary_monitor._resolve_start_balance(_cm_db, _ch)
+            logger.info("Canary 가설 복원: %s", _ch.id)
+    await _canary_monitor.start()
+
     yield
 
     # === Shutdown ===
     logger.info("Shutting down trading-engine...")
+    await _canary_monitor.stop()
     # Telegram 로그 핸들러 정리 (잔여 버퍼 전송)
     await shutdown_telegram_logging()
     if auto_reporter:
@@ -635,3 +660,4 @@ app.include_router(strategy_analysis.router)
 app.include_router(paper_trades.router)
 app.include_router(strategy_scores.router)
 app.include_router(advisories.router)
+app.include_router(evolution.router)
