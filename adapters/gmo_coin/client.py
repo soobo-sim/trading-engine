@@ -473,7 +473,7 @@ class GmoCoinAdapter:
             "symbol": symbol,
             "side": side,
             "executionType": "MARKET" if is_market else "LIMIT",
-            "size": f"{round(float(size), 4):.4f}",
+            "size": f"{round(float(size), 3):.3f}",
         }
         if not is_market:
             if price is None:
@@ -537,7 +537,7 @@ class GmoCoinAdapter:
             "side": close_side,
             "executionType": "MARKET",
             "settlePosition": [
-                {"positionId": position_id, "size": f"{round(float(size), 4):.4f}"},
+                {"positionId": position_id, "size": f"{round(float(size), 3):.3f}"},
             ],
         }
 
@@ -596,7 +596,7 @@ class GmoCoinAdapter:
             "symbol": sym,
             "side": close_side,
             "executionType": "MARKET",
-            "size": f"{round(float(size), 4):.4f}",
+            "size": f"{round(float(size), 3):.3f}",
         }
 
         sign_path = "/v1/closeBulkOrder"
