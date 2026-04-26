@@ -1,0 +1,37 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+
+language: "ko"
+
+reviews:
+  profile: "chill"         # assertive(엄격) | chill(완화)
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+  collapse_walkthrough: false
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - main
+
+  path_instructions:
+    - path: "core/strategy/**"
+      instructions: |
+        전략 로직 변경 시 다음을 반드시 확인:
+        - RegimeGate와의 체제 전환 연동
+        - SL/TP 파라미터 하드코딩 여부
+        - docs/specs/punisher/TREND_FOLLOWING.md 동기화 필요 여부
+    - path: "core/judge/**"
+      instructions: |
+        판단 도메인 변경 시 확인:
+        - classify_regime() 체제 판단 로직
+        - signal 계산 정확성
+    - path: "tests/**"
+      instructions: |
+        테스트 커버리지 확인:
+        - requires_api_key 마커 누락 여부
+        - 엣지케이스(빈 입력, 경계값) 포함 여부
+
+chat:
+  auto_reply: true

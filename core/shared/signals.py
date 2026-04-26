@@ -280,10 +280,12 @@ def compute_trend_signal(
     sma = sum(bb_window) / bb_period if bb_period > 0 else 0
     std = (sum((c - sma) ** 2 for c in bb_window) / bb_period) ** 0.5 if sma > 0 else 0
     bb_width_pct = (4 * std) / sma * 100 if sma > 0 else 0
-    range_pct = (max(highs) - min(lows)) / closes[0] * 100 if closes[0] > 0 else 0
+    # BUG-040: range_pct도 bb_period 윈도우(최근 N봉)로 통일 — 전체 캔들 사용 시 unclear 과다 발생
+    range_pct = (max(highs[-bb_period:]) - min(lows[-bb_period:])) / closes[-bb_period] * 100 if closes[-bb_period] > 0 else 0
     _, regime_trending, regime_ranging = classify_regime(bb_width_pct, range_pct, params)
 
-    if price_above_ema and ema_slope_positive and rsi_in_range and not regime_ranging:
+    # BUG-042: not regime_ranging → regime_trending (unclear 체제 진입 차단)
+    if price_above_ema and ema_slope_positive and rsi_in_range and regime_trending:
         signal = "entry_ok"
     elif (
         price_above_ema is False

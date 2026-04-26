@@ -1,0 +1,40 @@
+name: CD
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    name: Deploy to production
+    runs-on: self-hosted
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check coinmarket-data is healthy
+        run: curl -f http://localhost:8002/health || (echo "coinmarket-data not healthy, aborting" && exit 1)
+
+      - name: Deploy trading-engine
+        working-directory: trading-engine
+        run: docker-compose up -d --build
+
+      - name: Health check
+        run: |
+          sleep 15
+          curl -f http://localhost:8004/health || exit 1
+
+      - name: Notify success
+        if: success()
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d text="✅ trading-engine 배포 완료 ($(git rev-parse --short HEAD))"
+
+      - name: Notify failure
+        if: failure()
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d text="❌ trading-engine 배포 실패! $(git rev-parse --short HEAD) 확인 필요"

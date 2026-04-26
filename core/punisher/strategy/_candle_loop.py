@@ -119,16 +119,8 @@ class CandleLoopMixin:
                 if cnt % _SYNC_INTERVAL_CYCLES == 0 and pair not in self._paper_executors:
                     await self._sync_position_state(pair)
 
-            # 서브클래스 추가 체크 (keep_rate, 보유시간 등)
-            should_continue = await self._on_candle_extra_checks(pair, params)
-            if not should_continue:
-                continue
-            # 추가 체크로 포지션이 청산됐을 수 있음
-            pos = self._position.get(pair)
-            entry_price = pos.entry_price if pos else None
-
             # ══════════════════════════════════════
-            # JUDGE 사이클: 시그널 계산
+            # JUDGE 사이클: 시그널 계산 (extra_checks 전 — BUG-041)
             # ══════════════════════════════════════
             try:
                 signal_data = await self._compute_signal(
@@ -143,6 +135,30 @@ class CandleLoopMixin:
 
             if signal_data is None:
                 continue
+
+            latest_candle_key = signal_data.get("latest_candle_open_time")
+
+            # ── RegimeGate 갱신 (extra_checks 전, 포지션 상태 무관 — BUG-041) ──
+            if latest_candle_key != self._ema_slope_last_key.get(pair):
+                if self._regime_gate is not None:
+                    _prev_key = self._regime_gate.last_candle_key
+                    self._regime_gate.update_regime(
+                        regime=signal_data.get("regime", "unclear"),
+                        bb_width_pct=signal_data.get("bb_width_pct", 0.0),
+                        range_pct=signal_data.get("range_pct", 0.0),
+                        candle_key=latest_candle_key,
+                    )
+                    if self._regime_gate.last_candle_key != _prev_key:
+                        from core.execution.regime_gate_persistence import save_regime_gate_state
+                        await save_regime_gate_state(self._session_factory, self._regime_gate)
+
+            # 서브클래스 추가 체크 (keep_rate, 보유시간 등)
+            should_continue = await self._on_candle_extra_checks(pair, params)
+            if not should_continue:
+                continue
+            # 추가 체크로 포지션이 청산됐을 수 있음
+            pos = self._position.get(pair)
+            entry_price = pos.entry_price if pos else None
 
             # exit_signal realtime price 보정 (profit_target 정확도)
             if pos is not None:
@@ -211,7 +227,7 @@ class CandleLoopMixin:
                 if pl_continue:
                     continue
 
-            # ── EMA 기울기 이력 + 다이버전스 + RegimeGate ──
+            # ── EMA 기울기 이력 + 다이버전스 (RegimeGate는 extra_checks 전으로 이동) ──
             if latest_candle_key != self._ema_slope_last_key.get(pair):
                 # 새 4H 캔들 완성: candle change time 기록 (개선 A cooling period)
                 if not hasattr(self, "_last_candle_change_time"):
@@ -240,20 +256,6 @@ class CandleLoopMixin:
                 if len(slope_history) > 3:
                     slope_history.pop(0)
                 self._ema_slope_last_key[pair] = latest_candle_key
-
-                # ── PUNISHER: RegimeGate 갱신 (4H 캔들 경계) ──
-                if self._regime_gate is not None:
-                    _prev_key = self._regime_gate.last_candle_key
-                    self._regime_gate.update_regime(
-                        regime=signal_data.get("regime", "unclear"),
-                        bb_width_pct=signal_data.get("bb_width_pct", 0.0),
-                        range_pct=signal_data.get("range_pct", 0.0),
-                        candle_key=latest_candle_key,
-                    )
-                    # 새 캔들이 처리됐을 때만 DB 영속화
-                    if self._regime_gate.last_candle_key != _prev_key:
-                        from core.execution.regime_gate_persistence import save_regime_gate_state
-                        await save_regime_gate_state(self._session_factory, self._regime_gate)
 
                 # ── PUNISHER: EMA 기울기 연속 하락 → 스탑 타이트닝 ──
                 if (
