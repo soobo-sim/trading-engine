@@ -53,6 +53,7 @@ from core.exchange.types import (
 )
 from adapters.gmo_coin.signer import GmoSigner
 from adapters.gmo_coin import parsers as _parsers
+from core.punisher.monitoring.maintenance import is_maintenance_window
 
 logger = logging.getLogger(__name__)
 
@@ -862,7 +863,10 @@ class GmoCoinAdapter:
                 raise
             except (ConnectionClosed, OSError, Exception) as e:
                 self._ws_connected = False
-                logger.warning(f"[GMO Coin WS] 끊김: {e}. {delay}초 후 재접속...")
+                if is_maintenance_window("gmo_coin"):
+                    logger.debug(f"[GMO Coin WS] 끊김 (메인터넌스 중): {e}. {delay}초 후 재접속...")
+                else:
+                    logger.warning(f"[GMO Coin WS] 끊김: {e}. {delay}초 후 재접속...")
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 30)
 
@@ -949,7 +953,10 @@ class GmoCoinAdapter:
             except asyncio.CancelledError:
                 raise
             except (ConnectionClosed, OSError, Exception) as e:
-                logger.warning(f"[GMO Coin Private WS] 끊김: {e}. {delay}초 후 재접속...")
+                if is_maintenance_window("gmo_coin"):
+                    logger.debug(f"[GMO Coin Private WS] 끊김 (메인터넌스 중): {e}. {delay}초 후 재접속...")
+                else:
+                    logger.warning(f"[GMO Coin Private WS] 끊김: {e}. {delay}초 후 재접속...")
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 60)
 

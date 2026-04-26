@@ -259,20 +259,28 @@ class CycleReportService:
         return report
 
     async def persist(self, report: CycleReportResponse) -> None:
-        """ai_judgments 테이블에 kind='cycle_report' 로 저장."""
+        """cycle_reports 테이블에 저장."""
         try:
             from sqlalchemy import text
-            payload = report.model_dump(mode="json")
+            raw = report.model_dump(mode="json")
             await self.db.execute(
                 text(
-                    "INSERT INTO ai_judgments (kind, pair, payload, judged_at) "
-                    "VALUES (:kind, :pair, :payload, :judged_at)"
+                    "INSERT INTO cycle_reports "
+                    "(id, period_start, period_end, cycle_type, mode, telegram_sent, raw_data, summary) "
+                    "VALUES (:id, :period_start, :period_end, :cycle_type, :mode, :telegram_sent, :raw_data, :summary) "
+                    "ON CONFLICT (id) DO UPDATE SET "
+                    "telegram_sent = EXCLUDED.telegram_sent, "
+                    "raw_data = EXCLUDED.raw_data"
                 ),
                 {
-                    "kind": "cycle_report",
-                    "pair": "btc_jpy",
-                    "payload": json.dumps(payload),
-                    "judged_at": report.cycle_at,
+                    "id": report.cycle_id,
+                    "period_start": report.cycle_at,
+                    "period_end": report.cycle_at,
+                    "cycle_type": "full",
+                    "mode": report.mode,
+                    "telegram_sent": report.telegram_sent,
+                    "raw_data": json.dumps(raw),
+                    "summary": report.observation[:500] if report.observation else "",
                 },
             )
             await self.db.commit()
@@ -286,14 +294,13 @@ class CycleReportService:
             rows = (
                 await self.db.execute(
                     text(
-                        "SELECT payload, judged_at FROM ai_judgments "
-                        "WHERE kind = 'cycle_report' "
-                        "ORDER BY judged_at DESC LIMIT :limit"
+                        "SELECT raw_data FROM cycle_reports "
+                        "ORDER BY created_at DESC LIMIT :limit"
                     ),
                     {"limit": limit},
                 )
             ).all()
-            return [json.loads(r[0]) for r in rows]
+            return [json.loads(r[0]) if isinstance(r[0], str) else r[0] for r in rows]
         except Exception as exc:
             logger.warning("cycle_report list failed: %s", exc)
             return []
@@ -306,17 +313,16 @@ class CycleReportService:
             row = (
                 await self.db.execute(
                     text(
-                        "SELECT payload FROM ai_judgments "
-                        "WHERE kind = 'cycle_report' "
-                        "ORDER BY judged_at DESC LIMIT 1"
-                    )
+                        "SELECT id FROM cycle_reports "
+                        "WHERE id LIKE :prefix "
+                        "ORDER BY created_at DESC LIMIT 1"
+                    ),
+                    {"prefix": f"{prefix}%"},
                 )
             ).scalar()
-            if row:
-                last_id = json.loads(row).get("cycle_id", "")
-                if last_id.startswith(prefix):
-                    num = int(last_id.split("-")[-1]) + 1
-                    return f"{prefix}{num:03d}"
+            if row and row.startswith(prefix):
+                num = int(row.split("-")[-1]) + 1
+                return f"{prefix}{num:03d}"
         except Exception:
             pass
         return f"{prefix}001"

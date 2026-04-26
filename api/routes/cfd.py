@@ -67,7 +67,7 @@ async def get_cfd_positions(
     db: AsyncSession = Depends(get_db),
 ):
     """DB에서 CFD 포지션 이력 조회."""
-    PosModel = state.models.cfd_position
+    PosModel = state.models.trend_position
     pair_col = getattr(PosModel, state.pair_column)
 
     stmt = select(PosModel).where(pair_col == product_code)

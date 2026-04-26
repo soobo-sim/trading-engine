@@ -291,20 +291,21 @@ class HealthChecker(SafetyChecksMixin):
 
     @staticmethod
     def _coin_amount(row) -> float:
-        """entry_amount에서 코인 수량을 안전하게 추출.
+        """entry_size에서 코인 수량을 안전하게 추출.
 
-        BUG-016: BF MARKET_BUY에서 entry_amount가 JPY 단위로 저장된 레코드 대응.
-        entry_jpy / entry_price가 가장 신뢰할 수 있으므로 우선 사용.
+        entry_collateral_jpy / entry_price가 있으면 나눗셈으로 계산.
+        없으면 entry_size를 사용.
         """
         entry_price = float(row.entry_price) if row.entry_price else 0
-        entry_jpy = float(row.entry_jpy) if getattr(row, "entry_jpy", None) else 0
+        entry_collateral_jpy = float(row.entry_collateral_jpy) if getattr(row, "entry_collateral_jpy", None) else 0
 
-        # entry_jpy와 entry_price가 있으면 나눗셈으로 정확한 코인 수량 계산
-        if entry_price > 0 and entry_jpy > 0:
-            return entry_jpy / entry_price
+        # entry_collateral_jpy와 entry_price가 있으면 나눗셈으로 정확한 코인 수량 계산
+        if entry_price > 0 and entry_collateral_jpy > 0:
+            return entry_collateral_jpy / entry_price
 
-        # fallback: entry_amount 그대로 사용
-        return float(row.entry_amount)
+        # fallback: entry_size 그대로 사용
+        entry_size = getattr(row, "entry_size", None) or getattr(row, "entry_amount", None)
+        return float(entry_size) if entry_size else 0.0
 
     async def _get_active_box_pairs(self) -> set[str]:
         """DB에서 status=active인 박스의 pair 집합을 반환. box_model 미설정 시 빈 집합."""

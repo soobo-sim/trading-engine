@@ -268,7 +268,7 @@ class AutoReporter:
         style_to_model_attr = {
             "trend_following": "trend_position",
             "box_mean_reversion": "box_position",
-            "cfd_trend_following": "cfd_position",
+            "cfd_trend_following": "trend_position",  # 구식 이름 하위 호환
         }
         model_attr = style_to_model_attr.get(style)
         if model_attr is None:

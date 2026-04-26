@@ -409,10 +409,10 @@ async def generate_cycle_report(
     except ValueError as exc:
         raise HTTPException(422, {"detail": "causality broken", "error": str(exc)}) from exc
 
-    await svc.persist(report)
     msg = format_evolution_report(report)
     sent = await notify_evolution(msg)
     report.telegram_sent = sent
+    await svc.persist(report)
     return report
 
 

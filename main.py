@@ -99,7 +99,6 @@ from adapters.database.models import (
     create_box_model,
     create_box_position_model,
     create_candle_model,
-    create_cfd_position_model,
     create_insight_model,
     create_strategy_model,
     create_strategy_snapshot_model,
@@ -167,8 +166,7 @@ def _create_models(prefix: str, pair_column: str, order_id_length: int) -> Model
         candle=create_candle_model(prefix, pair_column=pair_column),
         box=create_box_model(prefix, pair_column=pair_column),
         box_position=create_box_position_model(prefix, pair_column=pair_column, order_id_length=order_id_length),
-        trend_position=create_trend_position_model(prefix, order_id_length=order_id_length),
-        cfd_position=create_cfd_position_model(prefix, pair_column=pair_column, order_id_length=order_id_length),
+        trend_position=create_trend_position_model(prefix, pair_column=pair_column, order_id_length=order_id_length),
         technique=StrategyTechnique,
         strategy_snapshot=create_strategy_snapshot_model(prefix),
         switch_recommendation=create_switch_recommendation_model(prefix),
@@ -180,7 +178,7 @@ def _create_models(prefix: str, pair_column: str, order_id_length: int) -> Model
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """startup → yield → shutdown"""
-    exchange = os.environ.get("EXCHANGE", "bitflyer").lower()
+    exchange = os.environ.get("EXCHANGE", "gmo_coin").lower()
     if exchange not in _EXCHANGE_CONFIG:
         raise ValueError(f"Unknown EXCHANGE: {exchange}. {list(_EXCHANGE_CONFIG.keys())}만 가능.")
 
@@ -239,7 +237,7 @@ async def lifespan(app: FastAPI):
         supervisor=supervisor,
         session_factory=session_factory,
         candle_model=models.candle,
-        cfd_position_model=models.cfd_position,
+        cfd_position_model=models.trend_position,
         pair_column=pair_column,
         snapshot_collector=snapshot_collector,
     )
@@ -256,7 +254,7 @@ async def lifespan(app: FastAPI):
         pair_column=pair_column,
         snapshot_collector=snapshot_collector,
     )
-    strategy_registry.register("box_mean_reversion", box_manager)
+    strategy_registry.register("box_mean_reversion", box_manager)  # box_position은 gmoc_box_positions 사용
 
     # GMO Coin 단일 페어 btc_jpy → RegimeGate 1개 공유
     # TODO: 멀티 페어 지원 시 per-pair gate로 확장 필요
@@ -499,7 +497,7 @@ async def lifespan(app: FastAPI):
                     )
                     continue
                 # 전략 스타일별 매니저에 PaperExecutor 바인딩 (pair 레벨 분리)
-                if style == "cfd_trend_following":
+                if style in ("cfd_trend_following", "trend_following"):
                     trend_manager.register_paper_pair(pair, strategy.id)
                 proposed_count += 1
                 logger.debug(
@@ -511,6 +509,7 @@ async def lifespan(app: FastAPI):
                 logger.warning(f"미등록 전략 스타일: {style} (pair={pair})")
             elif style in ("cfd_trend_following", "trend_following"):
                 # 주요 전략 파라미터를 텔레그램 핸들러에 주입해 RSI 표시 범위를 동기화
+                # cfd_trend_following은 trend_following의 구식 이름 (하위 호환)
                 seed_telegram_strategy_params(params)
     except Exception as e:
         logger.warning(f"활성 전략 자동 기동 실패 (DB 없으면 정상): {e}")

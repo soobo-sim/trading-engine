@@ -444,98 +444,25 @@ def create_box_position_model(prefix: str, pair_column: str = "pair", order_id_l
     return type(cls_name, (Base,), attrs)
 
 
-def create_trend_position_model(prefix: str, order_id_length: int = 40):
+def create_trend_position_model(prefix: str, pair_column: str = "pair", order_id_length: int = 40):
     """
-    추세추종 포지션 ORM 모델 팩토리.
+    추세추종 포지션 ORM 모델 팩토리 (GMO Coin 레버리지 양방향 스키마).
 
-    create_trend_position_model("ck") → ck_trend_positions
-    create_trend_position_model("bf") → bf_trend_positions
+    create_trend_position_model("gmoc") → gmoc_trend_positions
+    create_trend_position_model("test") → test_trend_positions
     """
     _table = f"{prefix}_trend_positions"
     _strategies_table = f"{prefix}_strategies"
-
-    class TrendPosition(Base):
-        __tablename__ = _table
-        __table_args__ = (
-            Index(f"idx_{prefix}_trend_positions_pair_status", "pair", "status"),
-            Index(f"idx_{prefix}_trend_positions_strategy", "strategy_id"),
-            Index(f"idx_{prefix}_trend_positions_created", "pair", "created_at"),
-            CheckConstraint("status IN ('open','closed')", name=f"{prefix}_trend_positions_status_check"),
-            {"extend_existing": True},
-        )
-
-        id = Column(Integer, primary_key=True, autoincrement=True)
-        pair = Column(String(20), nullable=False)
-        strategy_id = Column(
-            Integer, ForeignKey(f"{_strategies_table}.id", ondelete="SET NULL"), nullable=True
-        )
-
-        entry_order_id = Column(String(order_id_length), nullable=False)
-        entry_price = Column(Numeric(18, 8), nullable=False)
-        entry_amount = Column(Numeric(18, 8), nullable=False)
-        entry_jpy = Column(Numeric(18, 2), nullable=True)
-
-        stop_loss_price = Column(Numeric(18, 8), nullable=True)
-
-        partial_exit_count = Column(Integer, nullable=False, default=0)
-        partial_exit_amount = Column(Numeric(18, 8), nullable=True)
-        partial_exit_jpy = Column(Numeric(18, 2), nullable=True)
-        partial_exit_reasons = Column(String(200), nullable=True)
-
-        pyramid_count = Column(Integer, nullable=False, server_default="0")
-
-        exit_order_id = Column(String(order_id_length), nullable=True)
-        exit_price = Column(Numeric(18, 8), nullable=True)
-        exit_amount = Column(Numeric(18, 8), nullable=True)
-        exit_jpy = Column(Numeric(18, 2), nullable=True)
-        exit_reason = Column(String(50), nullable=True)
-        realized_pnl_jpy = Column(Numeric(18, 2), nullable=True)
-        realized_pnl_pct = Column(Numeric(8, 4), nullable=True)
-
-        status = Column(String(20), nullable=False, default="open")
-        created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-        closed_at = Column(DateTime(timezone=True), nullable=True)
-
-        # 정신차리자 보고 자동화 (WAKE_UP_REVIEW_AUTO)
-        loss_webhook_sent = Column(Boolean, nullable=False, server_default="false")
-
-        # 진입 시그널 스냅샷 (Alice 사후 분석용)
-        entry_rsi = Column(Numeric(8, 4), nullable=True)
-        entry_ema_slope = Column(Numeric(10, 6), nullable=True)
-        entry_atr = Column(Numeric(18, 8), nullable=True)
-        entry_regime = Column(String(20), nullable=True)  # trending/ranging/unclear
-        entry_bb_width = Column(Numeric(8, 4), nullable=True)
-
-        def __repr__(self) -> str:
-            return (
-                f"<{self.__class__.__name__}(id={self.id}, pair={self.pair!r}, "
-                f"status={self.status})>"
-            )
-
-    TrendPosition.__name__ = f"{prefix.capitalize()}TrendPosition"
-    TrendPosition.__qualname__ = TrendPosition.__name__
-    return TrendPosition
-
-
-def create_cfd_position_model(prefix: str, pair_column: str = "product_code", order_id_length: int = 40):
-    """
-    CFD 포지션 ORM 모델 팩토리.
-
-    create_cfd_position_model("bf") → table: bf_cfd_positions
-    롱/숏 양방향, 증거금 기반 건옥 관리.
-    """
-    _table = f"{prefix}_cfd_positions"
-    _strategies_table = f"{prefix}_strategies"
-    cls_name = f"{prefix.capitalize()}CfdPosition"
+    cls_name = f"{prefix.capitalize()}TrendPosition"
 
     attrs: dict = {
         "__tablename__": _table,
         "__table_args__": (
-            Index(f"idx_{prefix}_cfd_positions_{pair_column}_status", pair_column, "status"),
-            Index(f"idx_{prefix}_cfd_positions_strategy", "strategy_id"),
-            Index(f"idx_{prefix}_cfd_positions_created", pair_column, "created_at"),
-            CheckConstraint("status IN ('open','closed')", name=f"{prefix}_cfd_positions_status_check"),
-            CheckConstraint("side IN ('buy','sell')", name=f"{prefix}_cfd_positions_side_check"),
+            Index(f"idx_{prefix}_trend_positions_{pair_column}_status", pair_column, "status"),
+            Index(f"idx_{prefix}_trend_positions_strategy", "strategy_id"),
+            Index(f"idx_{prefix}_trend_positions_created", pair_column, "created_at"),
+            CheckConstraint("status IN ('open','closed')", name=f"{prefix}_trend_positions_status_check"),
+            CheckConstraint("side IN ('buy','sell')", name=f"{prefix}_trend_positions_side_check"),
             {"extend_existing": True},
         ),
         "id": Column(Integer, primary_key=True, autoincrement=True),
@@ -550,6 +477,7 @@ def create_cfd_position_model(prefix: str, pair_column: str = "product_code", or
         "entry_collateral_jpy": Column(Numeric(18, 2), nullable=True),
         "stop_loss_price": Column(Numeric(18, 8), nullable=True),
         "pyramid_count": Column(Integer, nullable=False, server_default="0"),
+        "loss_webhook_sent": Column(Boolean, nullable=False, server_default="false"),
         "exit_order_id": Column(String(order_id_length), nullable=True),
         "exit_price": Column(Numeric(18, 8), nullable=True),
         "exit_size": Column(Numeric(18, 8), nullable=True),
@@ -565,6 +493,11 @@ def create_cfd_position_model(prefix: str, pair_column: str = "product_code", or
         ),
     }
     return type(cls_name, (Base,), attrs)
+
+
+def create_cfd_position_model(prefix: str, pair_column: str = "pair", order_id_length: int = 40):
+    """하위 호환성 alias → create_trend_position_model으로 위임."""
+    return create_trend_position_model(prefix, pair_column=pair_column, order_id_length=order_id_length)
 
 
 # ──────────────────────────────────────────

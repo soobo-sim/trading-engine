@@ -1,16 +1,16 @@
 """
 core/monitoring/maintenance.py 테스트.
 
-T-1: GMO FX 토 09:30 → 메인터넌스 중
-T-2: GMO FX 토 11:15 → 메인터넌스 아님 (종료 후)
-T-3: GMO FX 금 09:30 → 메인터넌스 아님 (다른 요일)
+T-1: GMO Coin 토 09:30 → 메인터넌스 중
+T-2: GMO Coin 토 11:15 → 메인터넌스 아님 (종료 후)
+T-3: GMO Coin 금 09:30 → 메인터넌스 아님 (다른 요일)
 T-4: 미등록 거래소 → 항상 False
 T-5: 경계값 — 토 09:00 (시작)
-T-6: 경계값 — 토 11:10 (종료)
+T-6: 경계값 — 토 11:10 (종료, 기본 11:00 + 프레오픈 10분)
 T-alert-1: _send_safety_telegram_alert 메인터넌스 중 스킵
 T-alert-2: _send_safety_telegram_alert 메인터넌스 外 전송 시도
-T-auto-1:  auto_reporter 보고 텍스트에 메인터넌스 접두어 추가
-T-auto-2:  auto_reporter EXCHANGE 환경변수 GMOFX → gmofx 변환 정상
+T-auto-1:  auto_reporter EXCHANGE 환경변수 GMO_COIN → gmo_coin 변환 정상
+T-auto-2:  auto_reporter 미등록 거래소 → False
 T-end-1:   seconds_until_maintenance_end — 메인터넌스 중 남은 초 계산
 T-end-2:   seconds_until_maintenance_end — 메인터넌스 아닐 때 0
 T-sf03-1:  SF-03 메인터넌스 중 n/a 반환
@@ -18,10 +18,13 @@ T-sf06-1:  SF-06 메인터넌스 중 n/a + get_balance 미호출
 T-reporter-1: auto_reporter _run_once — 메인터넌스 중 간소 보고 + _generate_report 미호출
 T-reporter-2: auto_reporter _run_once — 메인터넌스 종료 후 정상 보고 경로
 T-balance-1:  _check_position_balance_consistency — 메인터넌스 중 빈 리스트 반환
+T-env-1:   환경변수 오버라이드 → 커스텀 시간 반영
+T-env-2:   환경변수 미설정 → 기본값 (토 09:00-11:10)
 """
 from __future__ import annotations
 
-from datetime import datetime
+import os
+from datetime import datetime, time
 from unittest.mock import AsyncMock, MagicMock, patch
 from zoneinfo import ZoneInfo
 
@@ -47,17 +50,17 @@ class TestIsMaintenance:
     def test_t1_sat_during_maintenance(self):
         """T-1: 토 09:30 → 메인터넌스 중."""
         dt = _jst(*_SAT, 9, 30)
-        assert is_maintenance_window("gmofx", dt) is True
+        assert is_maintenance_window("gmo_coin", dt) is True
 
     def test_t2_sat_after_maintenance(self):
         """T-2: 토 11:15 → 메인터넌스 종료 후."""
         dt = _jst(*_SAT, 11, 15)
-        assert is_maintenance_window("gmofx", dt) is False
+        assert is_maintenance_window("gmo_coin", dt) is False
 
     def test_t3_fri_same_time(self):
         """T-3: 금 09:30 → 요일 불일치."""
         dt = _jst(*_FRI, 9, 30)
-        assert is_maintenance_window("gmofx", dt) is False
+        assert is_maintenance_window("gmo_coin", dt) is False
 
     def test_t4_unknown_exchange(self):
         """T-4: 미등록 거래소 → 항상 False."""
@@ -68,23 +71,23 @@ class TestIsMaintenance:
     def test_t5_boundary_start(self):
         """T-5: 경계값 — 토 09:00 (시작 포함)."""
         dt = _jst(*_SAT, 9, 0)
-        assert is_maintenance_window("gmofx", dt) is True
+        assert is_maintenance_window("gmo_coin", dt) is True
 
     def test_t6_boundary_end(self):
-        """T-6: 경계값 — 토 11:10 (종료 포함)."""
+        """T-6: 경계값 — 토 11:10 (기본값: 11:00 + 프레오픈 10분, 종료 포함)."""
         dt = _jst(*_SAT, 11, 10)
-        assert is_maintenance_window("gmofx", dt) is True
+        assert is_maintenance_window("gmo_coin", dt) is True
 
     def test_t7_case_insensitive(self):
         """대소문자 무관."""
         dt = _jst(*_SAT, 9, 30)
-        assert is_maintenance_window("GMOFX", dt) is True
-        assert is_maintenance_window("GmoFx", dt) is True
+        assert is_maintenance_window("GMO_COIN", dt) is True
+        assert is_maintenance_window("Gmo_Coin", dt) is True
 
     def test_t8_sunday(self):
         """일요일은 메인터넌스 대상 아님."""
         dt = _jst(*_SUN, 9, 30)
-        assert is_maintenance_window("gmofx", dt) is False
+        assert is_maintenance_window("gmo_coin", dt) is False
 
 
 class TestTelegramAlertSkipDuringMaintenance:
@@ -154,26 +157,23 @@ class TestTelegramAlertSkipDuringMaintenance:
 class TestAutoReporterMaintenancePrefix:
     """T-auto: auto_reporter 메인터넌스 표시 — EXCHANGE 환경변수 기반 판별."""
 
-    def test_exchange_env_gmofx_maps_to_gmofx(self):
-        """T-auto-1: GMOFX 환경변수 → is_maintenance_window("GMOFX") 호출 — 대소문자 무관 정상 동작."""
-        # EXCHANGE=GMOFX → is_maintenance_window("GMOFX") → .lower() → "gmofx" → 스케줄 매칭
+    def test_exchange_env_gmo_coin_maps_correctly(self):
+        """T-auto-1: GMO_COIN 환경변수 → is_maintenance_window("GMO_COIN") 호출 — 대소문자 무관 정상 동작."""
         dt_sat = _jst(*_SAT, 9, 30)
-        assert is_maintenance_window("GMOFX", dt_sat) is True
+        assert is_maintenance_window("GMO_COIN", dt_sat) is True
 
     def test_exchange_env_bf_no_maintenance(self):
         """T-auto-2: EXCHANGE=BITFLYER → 스케줄 미등록 → False."""
         dt_sat = _jst(*_SAT, 9, 30)
         assert is_maintenance_window("BITFLYER", dt_sat) is False
 
-    def test_prefix_rstrip_was_bug(self):
-        """T-auto-3 (회귀 방지): prefix 기반(gmo_ → gmo) 방식은 gmofx 스케줄과 매칭 안 됨.
-        auto_reporter.py는 EXCHANGE env를 사용해야 한다.
-        """
+    def test_old_gmofx_key_no_longer_matches(self):
+        """T-auto-3 (회귀 방지): gmofx 키는 삭제됨 — 항상 False."""
         dt_sat = _jst(*_SAT, 9, 30)
-        # 이전 버그 코드 방식: state.prefix.rstrip("_") → "gmo"
-        assert is_maintenance_window("gmo", dt_sat) is False  # 버그일 때의 동작
-        # 올바른 방식: EXCHANGE env → "GMOFX"
-        assert is_maintenance_window("GMOFX", dt_sat) is True
+        # gmofx 키는 스케줄에서 제거되었으므로 False
+        assert is_maintenance_window("gmofx", dt_sat) is False
+        # gmo_coin 이 올바른 키
+        assert is_maintenance_window("gmo_coin", dt_sat) is True
 
 
 class TestSecondsUntilMaintenanceEnd:
@@ -183,14 +183,14 @@ class TestSecondsUntilMaintenanceEnd:
         """T-end-1: 메인터넌스 중 (토 09:30) → 남은 초 = 100분 = 6000초."""
         from core.punisher.monitoring.maintenance import seconds_until_maintenance_end
         dt = _jst(*_SAT, 9, 30)  # 종료 11:10 까지 100분 = 6000초
-        result = seconds_until_maintenance_end("gmofx", dt)
+        result = seconds_until_maintenance_end("gmo_coin", dt)
         assert result == 6000
 
     def test_end_2_outside_maintenance(self):
         """T-end-2: 메인터넌스 외 → 0."""
         from core.punisher.monitoring.maintenance import seconds_until_maintenance_end
         dt = _jst(*_SAT, 11, 30)
-        result = seconds_until_maintenance_end("gmofx", dt)
+        result = seconds_until_maintenance_end("gmo_coin", dt)
         assert result == 0
 
     def test_end_3_unknown_exchange(self):
@@ -204,7 +204,7 @@ class TestSecondsUntilMaintenanceEnd:
         """T-end-4: 종료 직전 (토 11:09) → 60초."""
         from core.punisher.monitoring.maintenance import seconds_until_maintenance_end
         dt = _jst(*_SAT, 11, 9)  # 종료 11:10 까지 1분 = 60초
-        result = seconds_until_maintenance_end("gmofx", dt)
+        result = seconds_until_maintenance_end("gmo_coin", dt)
         assert result == 60
 
 
@@ -375,7 +375,7 @@ class TestSecondsUntilEndBoundary:
         JST = ZoneInfo("Asia/Tokyo")
         # 2026-04-04는 토요일, 11:10:00 = 종료 경계
         dt = datetime(2026, 4, 4, 11, 10, 0, tzinfo=JST)
-        result = seconds_until_maintenance_end("gmofx", dt)
+        result = seconds_until_maintenance_end("gmo_coin", dt)
         assert result == 0
 
     def test_end_during_maintenance_large_window(self):
@@ -385,6 +385,43 @@ class TestSecondsUntilEndBoundary:
         from zoneinfo import ZoneInfo
         JST = ZoneInfo("Asia/Tokyo")
         dt = datetime(2026, 4, 4, 9, 0, 0, tzinfo=JST)
-        result = seconds_until_maintenance_end("gmofx", dt)
+        result = seconds_until_maintenance_end("gmo_coin", dt)
         # 11:10 - 09:00 = 130분 = 7800초
         assert result == 130 * 60
+
+
+class TestMaintenanceEnvOverride:
+    """T-env: 환경변수로 메인터넌스 시간 오버라이드."""
+
+    def test_env_override_custom_time(self):
+        """T-env-1: 환경변수 오버라이드 → 커스텀 시간 반영."""
+        from core.punisher.monitoring.maintenance import _build_gmo_coin_schedule
+
+        with patch.dict("os.environ", {
+            "GMO_COIN_MAINTENANCE_WEEKDAY": "0",   # 월요일
+            "GMO_COIN_MAINTENANCE_START": "10:00",
+            "GMO_COIN_MAINTENANCE_END": "12:00",
+            "GMO_COIN_MAINTENANCE_PREOPEN_MIN": "5",
+        }):
+            schedule = _build_gmo_coin_schedule()
+
+        assert len(schedule) == 1
+        weekday, start, end = schedule[0]
+        assert weekday == 0               # 월요일
+        assert start == time(10, 0)
+        assert end == time(12, 5)         # 12:00 + 5분
+
+    def test_env_default_values(self):
+        """T-env-2: 환경변수 미설정 → 기본값 (토 09:00-11:10)."""
+        from core.punisher.monitoring.maintenance import _build_gmo_coin_schedule
+
+        # GMO_COIN_MAINTENANCE_* 환경변수 제거 후 호출
+        clean_env = {k: v for k, v in os.environ.items()
+                     if not k.startswith("GMO_COIN_MAINTENANCE")}
+        with patch.dict("os.environ", clean_env, clear=True):
+            schedule = _build_gmo_coin_schedule()
+
+        weekday, start, end = schedule[0]
+        assert weekday == 5           # 토요일
+        assert start == time(9, 0)
+        assert end == time(11, 10)    # 11:00 + 프레오픈 10분

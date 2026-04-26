@@ -105,6 +105,9 @@ class BaseTrendManager(CandleLoopMixin, JudgeMixin, ExecutionMixin, ABC):
         # 시그널 변경 감지용 (동일 시그널 반복 출력 억제)
         self._last_signal: Dict[str, str] = {}
 
+        # SF-10 RSI 캐시 (pair → 최근 RSI 값)
+        self._last_rsi: Dict[str, Optional[float]] = {}
+
         # Execution Layer 연결 (Step 4)
         self._orchestrator: Optional[ExecutionOrchestrator] = None
         # Data Layer 연결 (v1.5)

@@ -39,6 +39,7 @@ def _snapshot(
     signal: str = "entry_ok",
     exit_action: str = "hold",
     position: PositionDTO | None = None,
+    params: dict | None = None,
 ) -> SignalSnapshot:
     return SignalSnapshot(
         pair="BTC_JPY",
@@ -48,7 +49,7 @@ def _snapshot(
         current_price=10_000_000.0,
         exit_signal={"action": exit_action, "reason": ""},
         position=position,
-        params={"position_size_pct": 1.0},
+        params=params if params is not None else {"position_size_pct": 100.0},
     )
 
 
@@ -716,6 +717,7 @@ def _pos_with_pyramid(
     entry_price: float = 9_800_000.0,
     pyramid_count: int = 0,
     unrealized_pnl: float = 200_000.0,
+    total_size_pct: float = 0.0,
 ) -> PositionDTO:
     """피라미딩 테스트용 PositionDTO."""
     return PositionDTO(
@@ -724,7 +726,11 @@ def _pos_with_pyramid(
         entry_amount=0.3,
         stop_loss_price=9_500_000.0,
         stop_tightened=False,
-        extra={"pyramid_count": pyramid_count, "unrealized_pnl": unrealized_pnl},
+        extra={
+            "pyramid_count": pyramid_count,
+            "unrealized_pnl": unrealized_pnl,
+            "total_size_pct": total_size_pct,
+        },
     )
 
 
@@ -881,6 +887,68 @@ async def test_p08_add_position_full_exit_signal_blocks():
     assert "긴급 시그널" in result.reasoning
 
 
+@pytest.mark.asyncio
+async def test_p09_add_position_blocks_when_total_size_exceeds_limit():
+    """
+    P-09: 기존 total_size_pct=70% + 추가 35% = 105% > 상한 70% → hold (사전 차단)
+
+    총 사이즈가 상한을 초과하면 GR-06 경고 없이 조용히 판단 자체를 스킵한다.
+    advisory 승인 → GR-06 차단 → WARNING 로그 패턴을 사전에 방지.
+    """
+    adv = _advisory(action="add_position", confidence=0.80, size_pct=0.35)
+    dec, _ = _make_decision(advisory=adv)
+
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
+        mock_dt.now.return_value = _NOW
+        # 기존 포지션이 이미 70% 투입된 상태
+        pos = _pos_with_pyramid(
+            pyramid_count=0,
+            unrealized_pnl=500_000.0,
+            total_size_pct=0.70,
+        )
+        # position_size_pct=70% 상한 설정
+        result = await dec.decide(
+            _snapshot(
+                signal="entry_ok",
+                position=pos,
+                params={"position_size_pct": 70.0},
+            )
+        )
+
+    assert result.action == "hold"
+    assert "총 사이즈 상한 초과" in result.reasoning
+
+
+@pytest.mark.asyncio
+async def test_p10_add_position_at_exact_limit_blocks():
+    """
+    P-10: 기존 total_size_pct=35% + 추가 35% = 70% == 상한 70% → hold (경계값: 초과)
+
+    경계값 = 상한과 정확히 같은 경우 차단 (> 이므로 등호는 통과)
+    """
+    adv = _advisory(action="add_position", confidence=0.80, size_pct=0.35)
+    dec, _ = _make_decision(advisory=adv)
+
+    with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
+        mock_dt.now.return_value = _NOW
+        pos = _pos_with_pyramid(
+            pyramid_count=0,
+            unrealized_pnl=300_000.0,
+            total_size_pct=0.35,
+        )
+        # new_total = 0.35 + 0.35 = 0.70 == max_total_pct(0.70) → 초과 아님 → 통과
+        result = await dec.decide(
+            _snapshot(
+                signal="entry_ok",
+                position=pos,
+                params={"position_size_pct": 70.0},
+            )
+        )
+
+    # 0.70 == 0.70 (> 조건 불충족) → 차단 안 됨 → 다음 조건들로 진행
+    assert result.action == "add_position"
+
+
 # ──────────────────────────────────────────────────────────────
 # 큐니 보강 — 피라미딩 엣지 케이스
 # ──────────────────────────────────────────────────────────────
@@ -916,7 +984,7 @@ async def test_p_short_profitable_allows_add_position():
             current_price=9_500_000.0,   # entry(10M) > current(9.5M) → 숏 수익
             exit_signal={"action": "hold"},
             position=short_pos,
-            params={"position_size_pct": 20.0},
+            params={"position_size_pct": 100.0},
         )
         result = await dec.decide(snap)
 
@@ -954,7 +1022,7 @@ async def test_p_short_losing_blocks_add_position():
             current_price=10_500_000.0,  # entry(10M) < current(10.5M) → 숏 손실
             exit_signal={"action": "hold"},
             position=short_pos,
-            params={"position_size_pct": 20.0},
+            params={"position_size_pct": 100.0},
         )
         result = await dec.decide(snap)
 
@@ -992,7 +1060,7 @@ async def test_p_pyramid_count_missing_from_extra_defaults_to_zero():
             current_price=10_000_000.0,  # 수익 중
             exit_signal={"action": "hold"},
             position=pos_no_pyramid_key,
-            params={"position_size_pct": 20.0},
+            params={"position_size_pct": 100.0},
         )
         result = await dec.decide(snap)
 
@@ -1548,7 +1616,7 @@ async def test_ap05_entry_short_plus_short_position_profitable_converts_to_add_p
             current_price=9_500_000.0,   # entry > current → 숏 수익
             exit_signal={"action": "hold", "reason": ""},
             position=pos,
-            params={"position_size_pct": 1.0},
+            params={"position_size_pct": 100.0},
         )
         result = await dec.decide(snap)
 

@@ -575,7 +575,6 @@ class TestHasOpenPosition:
         mock_state.pair_column = "pair"
         mock_state.models.trend_position = TrendPos
         mock_state.models.box_position = BoxPos
-        mock_state.models.cfd_position = None
         return mock_state
 
     def _make_db(self, row_id=None):

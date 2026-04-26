@@ -218,9 +218,10 @@ class TestHealthChecker:
         # DB에 오픈 포지션 기록 (50 XRP) — grace period 회피를 위해 2분 전 생성
         pos = HlthTrendPosition(
             pair="xrp_jpy",
+            side="buy",
             entry_order_id="FAKE-001",
             entry_price=80.0,
-            entry_amount=50.0,
+            entry_size=50.0,
             status="open",
             created_at=datetime.now(timezone.utc) - timedelta(minutes=2),
         )

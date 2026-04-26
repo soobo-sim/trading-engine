@@ -165,6 +165,7 @@ class CandleLoopMixin:
             ema = signal_data.get("ema")
             ema_slope_pct = signal_data.get("ema_slope_pct")
             rsi = signal_data.get("rsi")
+            self._last_rsi[pair] = rsi
             exit_signal = signal_data.get("exit_signal", {})
             exit_action = exit_signal.get("action", "hold")
             latest_candle_key = signal_data.get("latest_candle_open_time")
@@ -185,7 +186,7 @@ class CandleLoopMixin:
             signal_changed = signal != self._last_signal.get(pair, "")
             if signal_changed:
                 self._last_signal[pair] = signal
-            _sig_level = signal == "hold" or not signal_changed
+            _sig_level = not signal_changed
             _sig_log = logger.debug if _sig_level else logger.info
             if pos:
                 _side = {"buy": "롱", "sell": "숏"}.get(pos.extra.get("side", "buy"), pos.extra.get("side", "buy"))

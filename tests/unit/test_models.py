@@ -90,6 +90,10 @@ def test_all_factories_return_classes_for_ck() -> None:
     assert "pair" in CkBox.__table__.columns
     assert "pair" in CkBoxPos.__table__.columns
     assert "pair" in CkTrendPos.__table__.columns
+    # 새 통합 스키마 컬럼 검증
+    assert "side" in CkTrendPos.__table__.columns
+    assert "entry_size" in CkTrendPos.__table__.columns
+    assert "loss_webhook_sent" in CkTrendPos.__table__.columns
 
 
 def test_all_factories_return_classes_for_bf() -> None:
@@ -115,7 +119,10 @@ def test_all_factories_return_classes_for_bf() -> None:
     assert "product_code" in BfCandle.__table__.columns
     assert "product_code" in BfBox.__table__.columns
     assert "product_code" in BfBoxPos.__table__.columns
-    assert "pair" in BfTrendPos.__table__.columns  # BUG-011: trend_position은 항상 pair
+    assert "pair" in BfTrendPos.__table__.columns  # 기본 pair_column="pair"
+    # 새 통합 스키마 컬럼 검증
+    assert "side" in BfTrendPos.__table__.columns
+    assert "entry_size" in BfTrendPos.__table__.columns
 
 
 # ──────────────────────────────────────────────────────────────
