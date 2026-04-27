@@ -13,6 +13,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Copy .env
+        run: cp /Users/soobo/repo/trading-engine/.env .env
+
       - name: Check coinmarket-data is healthy
         run: curl -f http://localhost:8002/health || (echo "coinmarket-data not healthy, aborting" && exit 1)
 
