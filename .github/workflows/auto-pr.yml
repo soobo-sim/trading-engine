@@ -1,0 +1,39 @@
+name: Auto PR
+
+on:
+  push:
+    branches:
+      - 'feature/**'
+      - 'fix/**'
+      - 'hotfix/**'
+
+jobs:
+  create-pr:
+    name: Create PR if not exists
+    runs-on: self-hosted
+    permissions:
+      pull-requests: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create Pull Request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH="${{ github.ref_name }}"
+          TITLE="[Auto] ${BRANCH}"
+
+          # 이미 PR이 존재하면 스킵
+          EXISTING=$(gh pr list --head "$BRANCH" --json number --jq '.[0].number' 2>/dev/null)
+          if [ -n "$EXISTING" ]; then
+            echo "PR already exists: #${EXISTING}"
+            exit 0
+          fi
+
+          gh pr create \
+            --title "$TITLE" \
+            --body "## 변경 사항\n\n> 이 PR은 \`${BRANCH}\` 브랜치 push 시 자동 생성되었습니다.\n\n- [ ] 변경 내용 설명\n- [ ] 테스트 확인" \
+            --base main \
+            --head "$BRANCH"
