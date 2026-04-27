@@ -284,8 +284,26 @@ def compute_trend_signal(
     range_pct = (max(highs[-bb_period:]) - min(lows[-bb_period:])) / closes[-bb_period] * 100 if closes[-bb_period] > 0 else 0
     _, regime_trending, regime_ranging = classify_regime(bb_width_pct, range_pct, params)
 
+    # trending_score: bb/range/ATR/slope 4가지 지표 가중합 (0~6)
+    # entry_ok 조건: trending_score >= 1 (최소 1개 지표라도 추세 확인)
+    _atr_pct = (atr / current_price * 100) if (atr and current_price > 0) else 0
+    _bb_trending_threshold = float(params.get("bb_width_trending_min", 3.0))
+    _range_trending_min = float(params.get("range_pct_trending_min", 6.0))
+    trending_score = 0
+    if bb_width_pct >= max(_bb_trending_threshold, 4.5):
+        trending_score += 2
+    elif bb_width_pct >= _bb_trending_threshold:
+        trending_score += 1
+    if range_pct >= _range_trending_min:
+        trending_score += 1
+    if _atr_pct >= 2.5:
+        trending_score += 1
+    if ema_slope_pct is not None and abs(ema_slope_pct) >= 4.0:
+        trending_score += 1
+
     # BUG-042: not regime_ranging → regime_trending (unclear 체제 진입 차단)
-    if price_above_ema and ema_slope_positive and rsi_in_range and regime_trending:
+    # ① RegimeGate 수정: trending_score >= 1 추가 조건 (score=0 → 추세 미확인 → 차단)
+    if price_above_ema and ema_slope_positive and rsi_in_range and regime_trending and trending_score >= 1:
         signal = "entry_ok"
     elif (
         price_above_ema is False
@@ -332,6 +350,7 @@ def compute_trend_signal(
         "exit_signal": exit_signal,
         "bb_width_pct": bb_width_pct,
         "range_pct": range_pct,
+        "trending_score": trending_score,
     }
 
 
