@@ -17,7 +17,6 @@ jobs:
         run: curl -f http://localhost:8002/health || (echo "coinmarket-data not healthy, aborting" && exit 1)
 
       - name: Deploy trading-engine
-        working-directory: trading-engine
         run: docker-compose up -d --build
 
       - name: Health check

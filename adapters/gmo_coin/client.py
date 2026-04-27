@@ -538,7 +538,7 @@ class GmoCoinAdapter:
             "side": close_side,
             "executionType": "MARKET",
             "settlePosition": [
-                {"positionId": position_id, "size": f"{round(float(size), 3):.3f}"},
+                {"positionId": position_id, "size": str(round(float(size), 8))},
             ],
         }
 

@@ -999,7 +999,7 @@ class TelegramAlertHandler(logging.Handler):
         bot_token: str,
         chat_id: str,
         exchange: str = "??",
-        debounce_sec: float = 5.0,
+        debounce_sec: float = 300.0,
     ):
         super().__init__(level=logging.WARNING)
         self._bot_token = bot_token
@@ -1013,8 +1013,8 @@ class TelegramAlertHandler(logging.Handler):
         self._loop = loop
 
     def emit(self, record: logging.LogRecord) -> None:
-        # 디바운스: 동일 logger+level 조합 debounce_sec 이내 중복 스킵
-        key = f"{record.name}:{record.levelno}"
+        # 디바운스: 동일 logger+level+메시지 조합 debounce_sec 이내 중복 스킵
+        key = f"{record.name}:{record.levelno}:{record.getMessage()}"
         now = time.time()
         if now - self._last_sent.get(key, 0) < self._debounce:
             return
