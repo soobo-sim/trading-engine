@@ -116,6 +116,8 @@ class BaseTrendManager(CandleLoopMixin, JudgeMixin, ExecutionMixin, ABC):
         self._post_analyzer: Optional[Any] = None
         # Regime Gate (듀얼 매니저 체제 전환)
         self._regime_gate: Optional[Any] = None  # RegimeGate | None
+        # Approval Gate (실제 주문 성공 후 보고용)
+        self._approval_gate: Optional[Any] = None  # AutoApprovalGate | None
 
     # ──────────────────────────────────────────
     # Public API
@@ -215,6 +217,10 @@ class BaseTrendManager(CandleLoopMixin, JudgeMixin, ExecutionMixin, ABC):
     def set_regime_gate(self, gate: Any) -> None:
         """RegimeGate를 주입한다. main.py lifespan에서 양쪽 매니저에 동일 인스턴스 주입."""
         self._regime_gate = gate
+
+    def set_approval_gate(self, gate: Any) -> None:
+        """ApprovalGate를 주입한다. 실제 주문 성공 후에만 보고 전송 용."""
+        self._approval_gate = gate
 
     def get_position(self, pair: str) -> Optional[Position]:
         return self._position.get(pair)
