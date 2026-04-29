@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from core.data.dto import Decision, SignalSnapshot
+from core.shared.logging.context import get_judge_cycle_id
 
 logger = logging.getLogger("core.judge.decision.rule_based")  # 구 경로 유지
 
@@ -101,14 +102,19 @@ class RuleBasedDecision:
             )
 
         # 서사 로그: hold=DEBUG, 그 외 상태 변이=INFO
+        _strat = snapshot.strategy_type
+        _cid = get_judge_cycle_id()
+        _cid_prefix = f"[{_cid}]" if _cid else ""
         if decision.action == "hold":
             logger.debug(
-                f"[RuleBasedDecision] {snapshot.pair}: signal={signal} pos={'있음' if pos else '없음'} "
+                f"{_cid_prefix}[JUDGE][RuleBasedDecision][{_strat}] {snapshot.pair}: "
+                f"signal={signal} pos={'있음' if pos else '없음'} "
                 f"→ hold. {decision.reasoning[:60]}"
             )
         else:
             logger.info(
-                f"[RuleBasedDecision] {snapshot.pair}: signal={signal} pos={'있음' if pos else '없음'} "
+                f"{_cid_prefix}[JUDGE][RuleBasedDecision][{_strat}] {snapshot.pair}: "
+                f"signal={signal} pos={'있음' if pos else '없음'} "
                 f"→ {decision.action}. {decision.reasoning[:60]}"
             )
         return decision

@@ -54,7 +54,7 @@ PUNISHER_PREFIXES: frozenset[str] = frozenset({
     # canonical 경로 (core.punisher.*) — Phase E 이후 정식 경로
     "core.punisher",
     # 레거시 경로 (shim 유지 기간 동안 하위호환)
-    "core.strategy.base_trend",
+    # NOTE: core.strategy.base_trend 제거 — 로거명 core.judge.candle_loop/core.judge.signal로 이관
     "core.strategy.plugins",
     "core.strategy.registry",
     "core.strategy.snapshot_collector",

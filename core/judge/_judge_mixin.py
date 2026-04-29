@@ -29,7 +29,7 @@ from core.shared.signals import compute_candle_limit, compute_trend_signal
 if TYPE_CHECKING:
     from core.exchange.types import Position
 
-logger = logging.getLogger("core.strategy.base_trend")
+logger = logging.getLogger("core.judge.signal")
 
 
 class JudgeMixin:

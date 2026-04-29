@@ -656,7 +656,7 @@ class TestDomainRouting:
     def test_punisher_prefixes_mapped_correctly(self):
         """PUNISHER_PREFIXES 속한 logger가 'punisher'로 분류됨."""
         from core.logging.telegram_handlers import _get_domain
-        assert _get_domain("core.strategy.base_trend") == "punisher"
+        # NOTE: core.strategy.base_trend 제거 — core.judge.candle_loop/core.judge.signal로 이관
         assert _get_domain("core.strategy.plugins.gmo_coin_trend") == "punisher"
         assert _get_domain("core.execution.regime_gate") == "punisher"
         assert _get_domain("core.punisher.task.auto_reporter") == "punisher"
@@ -673,7 +673,7 @@ class TestDomainRouting:
     def test_judge_digest_filters_punisher_logs(self):
         """domain='judge' 핸들러는 punisher logger INFO를 무시."""
         h = TelegramDigestHandler("tok", "chat", domain="judge")
-        record = self._make_record("core.strategy.base_trend")
+        record = self._make_record("core.punisher.strategy.base_trend")
         h.emit(record)
         assert len(h._buffer) == 0
 
