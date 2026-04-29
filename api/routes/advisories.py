@@ -268,14 +268,21 @@ async def clear_advisory_bypass():
 async def get_latest_advisory(
     pair: str,
     include_expired: bool = Query(False, description="만료된 자문도 포함"),
+    trading_style: str | None = Query(None, description="전략 필터 (trend_following|box_mean_reversion). 없으면 최신 1건"),
     state: AppState = Depends(get_state),
     db: AsyncSession = Depends(get_db),
 ):
     """디버깅용 — 해당 pair의 최신 자문 (미만료) 조회.
 
     include_expired=true 이면 만료된 자문도 반환 (기동 확인용).
+    trading_style 지정 시 해당 전략의 advisory만 조회.
     advisory 없으면 404.
     """
+    if trading_style is not None and trading_style not in _VALID_STYLES:
+        raise HTTPException(
+            400,
+            {"blocked_code": "INVALID_STYLE", "detail": f"trading_style은 {sorted(_VALID_STYLES)} 중 하나여야 합니다."},
+        )
     exchange = os.environ.get("EXCHANGE", "bitflyer").lower()
     pair = normalize_pair(pair)
     now = datetime.now(timezone.utc)
@@ -289,6 +296,8 @@ async def get_latest_advisory(
     )
     if not include_expired:
         stmt = stmt.where(RachelAdvisory.expires_at > now)
+    if trading_style is not None:
+        stmt = stmt.where(RachelAdvisory.trading_style == trading_style)
 
     stmt = stmt.order_by(desc(RachelAdvisory.created_at)).limit(1)
     result = await db.execute(stmt)

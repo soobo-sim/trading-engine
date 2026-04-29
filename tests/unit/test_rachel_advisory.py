@@ -636,7 +636,7 @@ async def test_fetch_advisory_matches_lowercase_pair():
     )
 
     # 소문자 btc_jpy로 조회 → 그대로 매칭
-    result = await dec._fetch_advisory("btc_jpy", "gmo_coin")
+    result = await dec._fetch_advisory("btc_jpy", "gmo_coin", "trend_following")
     assert result is not None, "pair 소문자 입력 시 advisory를 찾아야 함"
     assert result.pair == "btc_jpy"
     assert result.action == "hold"
@@ -685,7 +685,7 @@ async def test_fetch_advisory_uppercase_input_matches_lowercase_db():
     )
 
     # 대문자 입력으로 조회 → normalize_pair 후 매칭
-    result = await dec._fetch_advisory("BTC_JPY", "gmo_coin")
+    result = await dec._fetch_advisory("BTC_JPY", "gmo_coin", "trend_following")
     assert result is not None, "대문자 pair 입력 시에도 advisory를 찾아야 함 (BUG-038)"
     assert result.pair == "btc_jpy"
     assert result.action == "entry_long"
@@ -1075,10 +1075,10 @@ async def test_p_pyramid_count_missing_from_extra_defaults_to_zero():
 
 @pytest.mark.asyncio
 async def test_ts01_fetch_advisory_called_with_pair_and_exchange():
-    """TS-01: decide()이 _fetch_advisory를 pair/exchange만으로 호출한다.
+    """TS-01: decide()이 _fetch_advisory를 pair/exchange/trading_style로 호출한다.
 
-    변경 (2026-04-15): trading_style 필터 제거. Rachel은 체제 이미 고려한
-    시장 판단 1건을 생성. 전략 선택은 RegimeGate가 담당.
+    변경 (2026-04-29): trading_style 필터 추가. 각 전략매니저가 자신의 trading_style
+    advisory만 조회하도록 _fetch_advisory(pair, exchange, trading_style) 호출.
     """
     adv = _advisory(action="entry_long")
     dec, _ = _make_decision(advisory=adv)
@@ -1090,14 +1090,14 @@ async def test_ts01_fetch_advisory_called_with_pair_and_exchange():
         signal="long_setup",
         current_price=10_000_000.0,
         exit_signal={"action": "hold"},
-        params={},
+        params={"trading_style": "box_mean_reversion"},
         strategy_type="box_mean_reversion",
     )
     with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         await dec.decide(snap)
 
-    dec._fetch_advisory.assert_awaited_once_with("BTC_JPY", "gmo_coin")
+    dec._fetch_advisory.assert_awaited_once_with("BTC_JPY", "gmo_coin", "box_mean_reversion")
 
 
 @pytest.mark.asyncio
@@ -1170,16 +1170,16 @@ async def test_ts03_different_strategy_type_goes_to_fallback():
 
 @pytest.mark.asyncio
 async def test_ts04_fetch_advisory_uses_pair_exchange_only():
-    """TS-04: strategy_type 무관하게 _fetch_advisory(pair, exchange)만 호출."""
+    """TS-04: params에 trading_style이 없으면 기본값 'trend_following'으로 호출."""
     adv = _advisory(action="hold")
     dec, _ = _make_decision(advisory=adv)
 
-    snap = _snapshot(signal="long_setup")  # strategy_type 기본값 "trend_following"
+    snap = _snapshot(signal="long_setup")  # params에 trading_style 없음 → 기본값 trend_following
     with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         await dec.decide(snap)
 
-    dec._fetch_advisory.assert_awaited_once_with("BTC_JPY", "bitflyer")
+    dec._fetch_advisory.assert_awaited_once_with("BTC_JPY", "bitflyer", "trend_following")
 
 
 # ──────────────────────────────────────────────────────────────
@@ -1191,12 +1191,10 @@ async def test_ts04_fetch_advisory_uses_pair_exchange_only():
 @pytest.mark.asyncio
 async def test_ec01_box_manager_snapshot_queries_same_advisory():
     """
-    EC-01: strategy_type='box_mean_reversion' 스냅샷도 (pair, exchange)만으로
-           _fetch_advisory 호출 — trading_style 필터 없음.
+    EC-01: strategy_type='box_mean_reversion' 스냅샷은 (pair, exchange, 'box_mean_reversion')
+           으로 _fetch_advisory를 호출한다.
 
-    배경: 롤백 전엔는 box_mean_reversion 스냅샷이 _fetch_advisory(…,
-    'box_mean_reversion')를 호출 → advisory 없음 → WARNING WARNING 반복.
-    롤백 후엔는 strategy_type 무관하게 (pair, exchange)만 호출.
+    변경 (2026-04-29 A안): trading_style 필터 추가. 박스 매니저는 자신의 advisory만 조회.
     """
     adv = _advisory(action="hold")
     dec, _ = _make_decision(advisory=adv)
@@ -1208,15 +1206,15 @@ async def test_ec01_box_manager_snapshot_queries_same_advisory():
         signal="long_setup",
         current_price=10_000_000.0,
         exit_signal={"action": "hold"},
-        params={},
+        params={"trading_style": "box_mean_reversion"},
         strategy_type="box_mean_reversion",
     )
     with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
         mock_dt.now.return_value = _NOW
         result = await dec.decide(box_snap)
 
-    # trading_style 인자 없이 (pair, exchange)만으로 호출
-    dec._fetch_advisory.assert_awaited_once_with("BTC_JPY", "gmo_coin")
+    # box_mean_reversion 인자로 호출
+    dec._fetch_advisory.assert_awaited_once_with("BTC_JPY", "gmo_coin", "box_mean_reversion")
     # advisory action=hold → entry 없음
     assert result.action == "hold"
     assert result.source == "rachel_advisory"
@@ -1225,11 +1223,10 @@ async def test_ec01_box_manager_snapshot_queries_same_advisory():
 @pytest.mark.asyncio
 async def test_ec02_different_strategy_types_get_same_advisory():
     """
-    EC-02: trend_following 스냅샷과 box_mean_reversion 스냅샷이
-           동일한 advisory를 받아야 한다.
+    EC-02: trend_following과 box_mean_reversion 스냅샷이 각각 자신의
+           trading_style로 _fetch_advisory를 호출한다.
 
-    이 테스트는 두 카리의 decide()가 동일한 advisory를 변환하는지를 확인.
-    RegimeGate가 어느 카리의 진입을 허용할지 담당 — advisory는 전략 무관하게 1건.
+    변경 (2026-04-29 A안): 각 매니저가 자신의 trading_style advisory를 독립 조회.
     """
     adv = _advisory(action="entry_long", confidence=0.75)
     # trend 매니저
@@ -1240,13 +1237,13 @@ async def test_ec02_different_strategy_types_get_same_advisory():
     trend_snap = SignalSnapshot(
         pair="BTC_JPY", exchange="gmo_coin",
         timestamp=_NOW, signal="long_setup", current_price=10_000_000.0,
-        exit_signal={"action": "hold"}, params={},
+        exit_signal={"action": "hold"}, params={"trading_style": "trend_following"},
         strategy_type="trend_following",
     )
     box_snap = SignalSnapshot(
         pair="BTC_JPY", exchange="gmo_coin",
         timestamp=_NOW, signal="long_setup", current_price=10_000_000.0,
-        exit_signal={"action": "hold"}, params={},
+        exit_signal={"action": "hold"}, params={"trading_style": "box_mean_reversion"},
         strategy_type="box_mean_reversion",
     )
     with patch("core.judge.decision.rachel_advisory.datetime") as mock_dt:
@@ -1259,9 +1256,9 @@ async def test_ec02_different_strategy_types_get_same_advisory():
     assert result_box.action == "entry_long"
     assert result_trend.confidence == pytest.approx(0.75)
     assert result_box.confidence == pytest.approx(0.75)
-    # 호출 시그니쳐는 strategy_type 없이 (pair, exchange)만
-    dec_trend._fetch_advisory.assert_awaited_once_with("BTC_JPY", "gmo_coin")
-    dec_box._fetch_advisory.assert_awaited_once_with("BTC_JPY", "gmo_coin")
+    # 각 매니저가 자신의 trading_style로 독립 호출
+    dec_trend._fetch_advisory.assert_awaited_once_with("BTC_JPY", "gmo_coin", "trend_following")
+    dec_box._fetch_advisory.assert_awaited_once_with("BTC_JPY", "gmo_coin", "box_mean_reversion")
 
 
 # ──────────────────────────────────────────────────────────────

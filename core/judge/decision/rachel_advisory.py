@@ -60,7 +60,8 @@ class RachelAdvisoryDecision:
         2. advisory 없거나 만료됨 → v1 폴백
         3. advisory 있음 → _merge_advisory_with_signal()
         """
-        advisory = await self._fetch_advisory(snapshot.pair, snapshot.exchange)
+        trading_style = snapshot.params.get("trading_style", "trend_following")
+        advisory = await self._fetch_advisory(snapshot.pair, snapshot.exchange, trading_style)
 
         # ── bypass 창 활성 시 → 조용히 v1 폴백 ──────────────
         if advisory_bypass.is_active():
@@ -99,12 +100,11 @@ class RachelAdvisoryDecision:
 
     # ── 내부 헬퍼 ──────────────────────────────────────────────
 
-    async def _fetch_advisory(self, pair: str, exchange: str):
+    async def _fetch_advisory(self, pair: str, exchange: str, trading_style: str):
         """DB에서 최신 미만료 advisory 조회.
 
-        Note: trading_style 조건 없음 — Rachel은 체제를 이미 고려한 시장 판단을
-        1건 생성한다. 전략 선택은 RegimeGate가 담당하므로 여기서 trading_style
-        로 필터링하지 않는다.
+        trading_style 필터를 적용하여 trend/box 전략별 독립 advisory를 조회한다.
+        해당 trading_style advisory가 없으면 None 반환 → v1 폴백.
         """
         pair = normalize_pair(pair)
         now = datetime.now(timezone.utc)
@@ -116,6 +116,7 @@ class RachelAdvisoryDecision:
                     .where(
                         model.pair == pair,
                         model.exchange == exchange,
+                        model.trading_style == trading_style,
                         model.expires_at > now,
                     )
                     .order_by(desc(model.created_at))
