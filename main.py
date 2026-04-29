@@ -476,6 +476,8 @@ async def lifespan(app: FastAPI):
 
         proposed_count = 0
         _PAPER_TRADING_HARDCAP = 3  # proposed 동시 실행 최대 수
+        _strategy_start_count = 0   # 전략 기동 순서 카운터 (오프셋 계산용)
+        _CANDLE_START_OFFSET_SEC = 30  # 전략 간 candle_monitor 기동 오프셋 (초)
 
         for strategy in all_strategies:
             params = strategy.parameters or {}
@@ -505,12 +507,17 @@ async def lifespan(app: FastAPI):
                     f"({proposed_count}/{_PAPER_TRADING_HARDCAP})"
                 )
 
-            if not await strategy_registry.start_strategy(style, pair, start_params):
+            if not await strategy_registry.start_strategy(
+                style, pair, start_params,
+                initial_delay_sec=_strategy_start_count * _CANDLE_START_OFFSET_SEC,
+            ):
                 logger.warning(f"미등록 전략 스타일: {style} (pair={pair})")
-            elif style in ("cfd_trend_following", "trend_following"):
-                # 주요 전략 파라미터를 텔레그램 핸들러에 주입해 RSI 표시 범위를 동기화
-                # cfd_trend_following은 trend_following의 구식 이름 (하위 호환)
-                seed_telegram_strategy_params(params)
+            else:
+                _strategy_start_count += 1
+                if style in ("cfd_trend_following", "trend_following"):
+                    # 주요 전략 파라미터를 텔레그램 핸들러에 주입해 RSI 표시 범위를 동기화
+                    # cfd_trend_following은 trend_following의 구식 이름 (하위 호환)
+                    seed_telegram_strategy_params(params)
     except Exception as e:
         logger.warning(f"활성 전략 자동 기동 실패 (DB 없으면 정상): {e}")
 

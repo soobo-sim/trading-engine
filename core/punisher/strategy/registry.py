@@ -46,14 +46,21 @@ class StrategyRegistry:
         """전체 매니저 딕셔너리 반환 (읽기 전용 목적)."""
         return dict(self._managers)
 
-    async def start_strategy(self, trading_style: str, pair: str, params: Dict) -> bool:
+    async def start_strategy(
+        self,
+        trading_style: str,
+        pair: str,
+        params: Dict,
+        *,
+        initial_delay_sec: float = 0,
+    ) -> bool:
         """trading_style로 전략을 찾아 start. 성공 여부 반환."""
         manager = self.get(trading_style)
         if manager is None:
             logger.warning(f"[Registry] 미등록 전략: {trading_style}")
             return False
-        await manager.start(pair, params)
-        logger.debug(f"[Registry] {type(manager).__name__} 기동: pair={pair}")
+        await manager.start(pair, params, initial_delay_sec=initial_delay_sec)
+        logger.debug(f"[Registry] {type(manager).__name__} 기동: pair={pair} initial_delay={initial_delay_sec:.0f}s")
         return True
 
     async def stop_pair_all_managers(self, pair: str) -> None:

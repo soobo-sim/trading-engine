@@ -102,8 +102,10 @@ class CandleLoopMixin:
     # Task 1: 캔들 모니터 (접합점 — JUDGE→PUNISHER 사이클)
     # ──────────────────────────────────────────
 
-    async def _candle_monitor(self, pair: str) -> None:
+    async def _candle_monitor(self, pair: str, initial_delay_sec: float = 0) -> None:
         """60초마다 시그널 재계산 → 진입/청산/트레일링."""
+        if initial_delay_sec > 0:
+            await asyncio.sleep(initial_delay_sec)
         while True:
             await asyncio.sleep(_CANDLE_POLL_INTERVAL)
 

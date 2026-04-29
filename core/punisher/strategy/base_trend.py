@@ -121,7 +121,7 @@ class BaseTrendManager(CandleLoopMixin, JudgeMixin, ExecutionMixin, ABC):
     # Public API
     # ──────────────────────────────────────────
 
-    async def start(self, pair: str, params: Dict) -> None:
+    async def start(self, pair: str, params: Dict, *, initial_delay_sec: float = 0) -> None:
         """pair에 대한 추세추종 태스크 2개 등록."""
         self._params[pair] = params
         self._last_seen_open_time[pair] = None
@@ -138,9 +138,10 @@ class BaseTrendManager(CandleLoopMixin, JudgeMixin, ExecutionMixin, ABC):
             pos.db_record_id = await self._recover_db_position_id(pair)
 
         prefix = self._task_prefix
+        _delay = initial_delay_sec
         await self._supervisor.register(
             f"{prefix}_candle:{pair}",
-            lambda p=pair: self._candle_monitor(p),
+            lambda p=pair, d=_delay: self._candle_monitor(p, initial_delay_sec=d),
             max_restarts=5,
         )
         await self._supervisor.register(
