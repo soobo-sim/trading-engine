@@ -35,7 +35,7 @@ class GmoCoinTrendManager(CfdTrendFollowingManager):
     """GMO Coin レバレッジ 추세추종 매니저. 롱/숏 양방향."""
 
     _task_prefix = "gmoc_trend"
-    _log_prefix = "[GmocMgr]"
+    _log_prefix = "[TrendMgr]"
     # _supports_short = True — CdfTrendFollowingManager에서 상속
 
     def _get_strategy_type(self) -> str:
@@ -73,7 +73,7 @@ class GmoCoinTrendManager(CfdTrendFollowingManager):
                     elapsed = (datetime.now(timezone.utc) - approved_at).total_seconds()
                     if elapsed > APPROVE_TTL_SEC:
                         logger.warning(
-                            f"[GmocMgr] {product_code}: 승인 TTL 만료 ({elapsed:.0f}s > {APPROVE_TTL_SEC}s) → 진입 차단"
+                            f"[TrendMgr] {product_code}: 승인 TTL 만료 ({elapsed:.0f}s > {APPROVE_TTL_SEC}s) → 진입 차단"
                         )
                         return
                 except Exception:
@@ -86,7 +86,7 @@ class GmoCoinTrendManager(CfdTrendFollowingManager):
                 if latest_price and latest_price > 0:
                     price = latest_price  # 이후 계산에 최신 가격 사용
             except Exception as e:
-                logger.warning(f"[GmocMgr] {product_code}: 최신 ticker 재취득 실패 — {e}. 원래 가격 유지")
+                logger.warning(f"[TrendMgr] {product_code}: 최신 ticker 재취득 실패 — {e}. 원래 가격 유지")
 
             # ② 시그널 재평가 — EMA/RSI/slope 전체 재계산
             if approved_at_str:  # approve 게이트를 통과한 경우만
@@ -94,37 +94,37 @@ class GmoCoinTrendManager(CfdTrendFollowingManager):
                 try:
                     fresh_signal = await self._compute_signal(product_code, basis_tf, params=params)
                     if fresh_signal is None:
-                        logger.warning(f"[GmocMgr] {product_code}: 재평가 시그널 계산 실패 → 진입 차단")
+                        logger.warning(f"[TrendMgr] {product_code}: 재평가 시그널 계산 실패 → 진입 차단")
                         return
                     sig = fresh_signal.get("signal", "no_signal")
                     if sig not in ("long_setup", "short_setup", "entry_preview"):
                         logger.info(
-                            f"[GmocMgr] {product_code}: 시그널 소멸 (approve 후 재평가={sig}) → 진입 차단"
+                            f"[TrendMgr] {product_code}: 시그널 소멸 (approve 후 재평가={sig}) → 진입 차단"
                         )
                         # Telegram 알림 (fire-and-forget)
                         try:
                             from core.punisher.task.auto_reporter import send_telegram_message
                             asyncio.ensure_future(
                                 send_telegram_message(
-                                    f"[GmocMgr] {product_code} 시그널 소멸\napprove 후 재평가 결과: {sig}\n진입 차단됨"
+                                    f"[TrendMgr] {product_code} 시그널 소멸\napprove 후 재평가 결과: {sig}\n진입 차단됨"
                                 )
                             )
                         except Exception:
                             pass
                         return
                 except Exception as e:
-                    logger.warning(f"[GmocMgr] {product_code}: 시그널 재평가 실패 — {e}. fail-safe → 진입 차단")
+                    logger.warning(f"[TrendMgr] {product_code}: 시그널 재평가 실패 — {e}. fail-safe → 진입 차단")
                     return
             # ──────────────────────────────────────────────────────────
 
             if not hasattr(self._adapter, "get_collateral"):
-                logger.error(f"[GmocMgr] {product_code}: 어댑터에 get_collateral 없음")
+                logger.error(f"[TrendMgr] {product_code}: 어댑터에 get_collateral 없음")
                 return
 
             collateral = await self._adapter.get_collateral()
             available_collateral = collateral.collateral - collateral.require_collateral
             if available_collateral <= 0:
-                logger.debug(f"[GmocMgr] {product_code}: 여유 증거금 없음, 진입 스킵")
+                logger.debug(f"[TrendMgr] {product_code}: 여유 증거금 없음, 진입 스킵")
                 return
 
             position_size_pct = float(params.get("position_size_pct", 10.0))
@@ -133,7 +133,7 @@ class GmoCoinTrendManager(CfdTrendFollowingManager):
 
             if invest_jpy < min_jpy:
                 logger.info(
-                    f"[GmocMgr] {product_code}: 투입 JPY({invest_jpy:.0f}) < {min_jpy:.0f}, 스킵"
+                    f"[TrendMgr] {product_code}: 투입 JPY({invest_jpy:.0f}) < {min_jpy:.0f}, 스킵"
                 )
                 return
 
@@ -148,13 +148,13 @@ class GmoCoinTrendManager(CfdTrendFollowingManager):
             if effective_leverage > max_leverage:
                 coin_size = round(collateral.collateral * max_leverage / price, 8)
                 logger.info(
-                    f"[GmocMgr] {product_code}: 레버리지 제한 → size={coin_size:.8f}"
+                    f"[TrendMgr] {product_code}: 레버리지 제한 → size={coin_size:.8f}"
                 )
 
             min_coin = float(params.get("min_coin_size", 0.001))
             if coin_size < min_coin:
                 logger.debug(
-                    f"[GmocMgr] {product_code}: 수량 부족 ({coin_size} < {min_coin})"
+                    f"[TrendMgr] {product_code}: 수량 부족 ({coin_size} < {min_coin})"
                 )
                 return
 
@@ -170,11 +170,11 @@ class GmoCoinTrendManager(CfdTrendFollowingManager):
                             spread_pct = (chk_ticker.ask - chk_ticker.bid) / chk_ticker.bid * 100
                             if spread_pct > max_slippage_pct:
                                 logger.warning(
-                                    f"[GmocMgr] {product_code}: 스프레드 초과 {spread_pct:.3f}%, 스킵"
+                                    f"[TrendMgr] {product_code}: 스프레드 초과 {spread_pct:.3f}%, 스킵"
                                 )
                                 return
                     except Exception as e:
-                        logger.warning(f"[GmocMgr] {product_code}: 슬리피지 체크 시세 조회 실패 — {e}")
+                        logger.warning(f"[TrendMgr] {product_code}: 슬리피지 체크 시세 조회 실패 — {e}")
 
             # GMO Coin 어댑터 주문 시맨틱:
             #   MARKET_BUY: JPY 금액 전달 → 어댑터가 jpy / ticker.ask 로 BTC 변환
@@ -228,12 +228,12 @@ class GmoCoinTrendManager(CfdTrendFollowingManager):
             )
 
             logger.info(
-                f"[GmocMgr] {product_code}: {side} 진입 완료 "
+                f"[TrendMgr] {product_code}: {side} 진입 완료 "
                 f"order_id={order.order_id} price=¥{exec_price} size={exec_amount} "
                 f"stop_loss=¥{initial_sl}"
             )
         except Exception as e:
-            logger.error(f"[GmocMgr] {product_code}: 진입 오류 — {e}", exc_info=True)
+            logger.error(f"[TrendMgr] {product_code}: 진입 오류 — {e}", exc_info=True)
 
     # ──────────────────────────────────────────
     # 청산
@@ -258,7 +258,7 @@ class GmoCoinTrendManager(CfdTrendFollowingManager):
 
             if close_size < min_size:
                 logger.warning(
-                    f"[GmocMgr] {product_code}: 포지션 수량 부족 ({close_size} < {min_size})"
+                    f"[TrendMgr] {product_code}: 포지션 수량 부족 ({close_size} < {min_size})"
                 )
                 prev_db_id = pos.db_record_id
                 self._position[product_code] = None
@@ -277,7 +277,7 @@ class GmoCoinTrendManager(CfdTrendFollowingManager):
 
             if not hasattr(self._adapter, "close_position_bulk"):
                 logger.error(
-                    f"[GmocMgr] {product_code}: 어댑터에 close_position_bulk 없음"
+                    f"[TrendMgr] {product_code}: 어댑터에 close_position_bulk 없음"
                 )
                 return
 
@@ -311,14 +311,14 @@ class GmoCoinTrendManager(CfdTrendFollowingManager):
             )
 
             logger.info(
-                f"[GmocMgr] {product_code}: {side} 청산 완료 reason={reason} "
+                f"[TrendMgr] {product_code}: {side} 청산 완료 reason={reason} "
                 f"order_id={order.order_id} size={close_size}"
             )
         except ExchangeError as e:
             if "ERR-422" in str(e):
                 # 거래소에 포지션 없음 → 이미 청산된 것으로 간주
                 logger.warning(
-                    f"[GmocMgr] {product_code}: 거래소 포지션 없음(ERR-422) "
+                    f"[TrendMgr] {product_code}: 거래소 포지션 없음(ERR-422) "
                     f"→ 인메모리 클리어 reason={reason}"
                 )
                 prev_pos = self._position.get(product_code)
@@ -339,12 +339,12 @@ class GmoCoinTrendManager(CfdTrendFollowingManager):
                         )
                     except Exception as rec_err:
                         logger.error(
-                            f"[GmocMgr] {product_code}: ERR-422 후 DB 기록 실패 — {rec_err}"
+                            f"[TrendMgr] {product_code}: ERR-422 후 DB 기록 실패 — {rec_err}"
                         )
             else:
-                logger.error(f"[GmocMgr] {product_code}: 청산 오류 — {e}", exc_info=True)
+                logger.error(f"[TrendMgr] {product_code}: 청산 오류 — {e}", exc_info=True)
         except Exception as e:
-            logger.error(f"[GmocMgr] {product_code}: 청산 오류 — {e}", exc_info=True)
+            logger.error(f"[TrendMgr] {product_code}: 청산 오류 — {e}", exc_info=True)
 
     # ──────────────────────────────────────────
     # 피라미딩 (포지션 추가 매수)
@@ -372,7 +372,7 @@ class GmoCoinTrendManager(CfdTrendFollowingManager):
         try:
             pos = self._position.get(product_code)
             if pos is None:
-                logger.warning(f"[GmocMgr] {product_code}: add_to_position 호출 시 포지션 없음 — 스킵")
+                logger.warning(f"[TrendMgr] {product_code}: add_to_position 호출 시 포지션 없음 — 스킵")
                 return
 
             # ── 투입 비율 결정 ──
@@ -390,20 +390,20 @@ class GmoCoinTrendManager(CfdTrendFollowingManager):
 
             # ── 증거금 조회 ──
             if not hasattr(self._adapter, "get_collateral"):
-                logger.error(f"[GmocMgr] {product_code}: 어댑터에 get_collateral 없음")
+                logger.error(f"[TrendMgr] {product_code}: 어댑터에 get_collateral 없음")
                 return
 
             collateral = await self._adapter.get_collateral()
             available_collateral = collateral.collateral - collateral.require_collateral
             if available_collateral <= 0:
-                logger.warning(f"[GmocMgr] {product_code}: 피라미딩 — 여유 증거금 없음, 스킵")
+                logger.warning(f"[TrendMgr] {product_code}: 피라미딩 — 여유 증거금 없음, 스킵")
                 return
 
             invest_jpy = available_collateral * add_size_pct / 100
             min_jpy = float(params.get("min_order_jpy", 500))
             if invest_jpy < min_jpy:
                 logger.info(
-                    f"[GmocMgr] {product_code}: 피라미딩 투입 JPY({invest_jpy:.0f}) < {min_jpy:.0f}, 스킵"
+                    f"[TrendMgr] {product_code}: 피라미딩 투입 JPY({invest_jpy:.0f}) < {min_jpy:.0f}, 스킵"
                 )
                 return
 
@@ -417,11 +417,11 @@ class GmoCoinTrendManager(CfdTrendFollowingManager):
             )
             if effective_leverage > max_leverage:
                 coin_size = round(collateral.collateral * max_leverage / price, 8)
-                logger.info(f"[GmocMgr] {product_code}: 피라미딩 레버리지 제한 → size={coin_size:.8f}")
+                logger.info(f"[TrendMgr] {product_code}: 피라미딩 레버리지 제한 → size={coin_size:.8f}")
 
             min_coin = float(params.get("min_coin_size", 0.001))
             if coin_size < min_coin:
-                logger.info(f"[GmocMgr] {product_code}: 피라미딩 수량 부족 ({coin_size} < {min_coin}), 스킵")
+                logger.info(f"[TrendMgr] {product_code}: 피라미딩 수량 부족 ({coin_size} < {min_coin}), 스킵")
                 return
 
             # ── 주문 실행 ──
@@ -486,7 +486,7 @@ class GmoCoinTrendManager(CfdTrendFollowingManager):
             pos.extra["total_size_pct"] = pos.extra.get("total_size_pct", 0.0) + add_size_pct / 100.0
 
             logger.info(
-                f"[GmocMgr] {product_code}: 피라미딩 #{pyramid_count + 1}/3 완료 "
+                f"[TrendMgr] {product_code}: 피라미딩 #{pyramid_count + 1}/3 완료 "
                 f"order_id={order.order_id} exec_price=¥{exec_price} exec_amount={exec_amount} "
                 f"new_avg=¥{new_avg_price} total_amount={new_amount} new_sl=¥{new_sl}"
             )
@@ -502,7 +502,7 @@ class GmoCoinTrendManager(CfdTrendFollowingManager):
             )
 
         except Exception as e:
-            logger.error(f"[GmocMgr] {product_code}: 피라미딩 오류 — {e}", exc_info=True)
+            logger.error(f"[TrendMgr] {product_code}: 피라미딩 오류 — {e}", exc_info=True)
 
     async def _update_position_in_db(
         self,
@@ -515,7 +515,7 @@ class GmoCoinTrendManager(CfdTrendFollowingManager):
     ) -> None:
         """gmoc_trend_positions 레코드를 피라미딩 후 상태로 업데이트."""
         if db_record_id is None:
-            logger.warning(f"[GmocMgr] {product_code}: DB 업데이트 스킵 — db_record_id 없음")
+            logger.warning(f"[TrendMgr] {product_code}: DB 업데이트 스킵 — db_record_id 없음")
             return
         try:
             from sqlalchemy import update as sa_update
@@ -534,11 +534,11 @@ class GmoCoinTrendManager(CfdTrendFollowingManager):
                 )
                 await db.commit()
             logger.debug(
-                f"[GmocMgr] {product_code}: DB 피라미딩 업데이트 id={db_record_id} "
+                f"[TrendMgr] {product_code}: DB 피라미딩 업데이트 id={db_record_id} "
                 f"avg=¥{entry_price} size={size} sl=¥{stop_loss_price} pyramid={pyramid_count}"
             )
         except Exception as e:
-            logger.error(f"[GmocMgr] {product_code}: DB 피라미딩 업데이트 실패 — {e}", exc_info=True)
+            logger.error(f"[TrendMgr] {product_code}: DB 피라미딩 업데이트 실패 — {e}", exc_info=True)
 
     # ──────────────────────────────────────────
     # 진입 전 체크 오버라이드
@@ -592,7 +592,7 @@ class GmoCoinTrendManager(CfdTrendFollowingManager):
                 ok = await self._adapter.change_losscut_price(fx_pos.position_id, new_sl)
                 if not ok:
                     logger.warning(
-                        f"[GmocMgr] {pair}: ロスカットレート 동기화 실패 "
+                        f"[TrendMgr] {pair}: ロスカットレート 동기화 실패 "
                         f"(position_id={fx_pos.position_id}, sl=¥{new_sl:.0f}) — "
                         "in-memory stop이 보호 중"
                     )
@@ -605,7 +605,7 @@ class GmoCoinTrendManager(CfdTrendFollowingManager):
                             _send_telegram(
                                 bot_token,
                                 chat_id,
-                                f"⚠️ [GmocMgr] {pair} 로스컷 동기화 실패\n"
+                                f"⚠️ [TrendMgr] {pair} 로스컷 동기화 실패\n"
                                 f"position_id={fx_pos.position_id}\n"
                                 f"SL=¥{new_sl:,.0f} — 인메모리 SL 보호 중",
                             )
@@ -614,8 +614,8 @@ class GmoCoinTrendManager(CfdTrendFollowingManager):
                         pass
                 else:
                     logger.debug(
-                        f"[GmocMgr] {pair}: ロスカットレート 동기화 완료 "
+                        f"[TrendMgr] {pair}: ロスカットレート 동기화 완료 "
                         f"(position_id={fx_pos.position_id}, sl=¥{new_sl})"
                     )
         except Exception as e:
-            logger.warning(f"[GmocMgr] {pair}: ロスカットレート 동기화 오류 — {e}")
+            logger.warning(f"[TrendMgr] {pair}: ロスカットレート 동기화 오류 — {e}")

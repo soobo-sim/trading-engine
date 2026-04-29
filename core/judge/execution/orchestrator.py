@@ -185,7 +185,12 @@ class ExecutionOrchestrator:
         결과를 받아 실제 주문 실행(open/close)은 매니저가 한다.
         """
         tx_id = get_judge_cycle_id() or "????"
-        prefix = f"[Judge-Layer][{tx_id}]"
+        _STRAT_LABEL: dict[str, str] = {
+            "trend_following": "TrendMgr",
+            "box_mean_reversion": "BoxMgr",
+        }
+        _strat = _STRAT_LABEL.get(snapshot.strategy_type, snapshot.strategy_type)
+        prefix = f"[Judge-Layer][{tx_id}][{_strat}]"
 
         # Step 1: 판단
         try:
