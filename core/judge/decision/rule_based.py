@@ -104,16 +104,16 @@ class RuleBasedDecision:
         # 서사 로그: hold=DEBUG, 그 외 상태 변이=INFO
         _strat = snapshot.strategy_type
         _cid = get_judge_cycle_id()
-        _cid_prefix = f"[{_cid}]" if _cid else ""
+        _cid_prefix = f"[Judge-Layer][{_cid}]" if _cid else "[Judge-Layer]"
         if decision.action == "hold":
             logger.debug(
-                f"{_cid_prefix}[JUDGE][RuleBasedDecision][{_strat}] {snapshot.pair}: "
+                f"{_cid_prefix}[RuleBasedDecision][{_strat}] {snapshot.pair}: "
                 f"signal={signal} pos={'있음' if pos else '없음'} "
                 f"→ hold. {decision.reasoning[:60]}"
             )
         else:
             logger.info(
-                f"{_cid_prefix}[JUDGE][RuleBasedDecision][{_strat}] {snapshot.pair}: "
+                f"{_cid_prefix}[RuleBasedDecision][{_strat}] {snapshot.pair}: "
                 f"signal={signal} pos={'있음' if pos else '없음'} "
                 f"→ {decision.action}. {decision.reasoning[:60]}"
             )

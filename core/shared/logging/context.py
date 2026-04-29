@@ -15,19 +15,25 @@ _candle_monitor() 진입 시 cycle_id를 설정하면
 from __future__ import annotations
 
 import contextvars
-from datetime import datetime, timezone, timedelta
-
-_JST = timezone(timedelta(hours=9))
 
 # 현재 Judge 사이클 ID.  "" = 사이클 외부
 _judge_cycle_id: contextvars.ContextVar[str] = contextvars.ContextVar(
     "judge_cycle_id", default=""
 )
 
+# 4자리 단조 증가 카운터 (0001~9999 순환)
+_cycle_counter: int = 0
+
 
 def set_judge_cycle_id() -> str:
-    """현재 JST 시각 기반 cycle_id 생성 + 설정 후 반환."""
-    cycle_id = datetime.now(_JST).strftime("%m/%d %H:%M:%S")
+    """4자리 카운터 기반 cycle_id 생성 + 설정 후 반환.
+
+    형식: 0001~9999 (9999 도달 후 0001로 순환).
+    로그의 ts 필드에 시각이 이미 포함되므로 cycle_id는 사이클 식별만 담당한다.
+    """
+    global _cycle_counter
+    _cycle_counter = (_cycle_counter % 9999) + 1
+    cycle_id = f"{_cycle_counter:04d}"
     _judge_cycle_id.set(cycle_id)
     return cycle_id
 

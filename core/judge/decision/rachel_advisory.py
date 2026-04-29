@@ -167,7 +167,7 @@ class RachelAdvisoryDecision:
         if _risk_str:
             _extra_lines += f"\n  리스크: {_risk_str}"
         _cid = get_judge_cycle_id()
-        _cid_prefix = f"[{_cid}][JUDGE]" if _cid else "[JUDGE]"
+        _cid_prefix = f"[Judge-Layer][{_cid}]" if _cid else "[Judge-Layer]"
         logger.info(
             f"{_cid_prefix}[RachelAdvisory:{style}] {snapshot.pair}: advisory 읽음 — "
             f"id={advisory.id} action={advisory.action} confidence={advisory.confidence:.2f} "
