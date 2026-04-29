@@ -311,7 +311,7 @@ class AutoApprovalGate:
     async def request_approval(self, decision: Decision) -> bool:
         """자동 승인 조건 평가.
 
-        조건 충족 → Telegram 사후 보고 (fire-and-forget) + True
+        조건 충족 → True (실행 후 send_entry_report()를 별도 호출해야 함)
         조건 미충족 → telegram_gate.request_approval() 폴백
         """
         if self._should_auto_approve(decision):
@@ -321,7 +321,6 @@ class AutoApprovalGate:
             )
             # 승인 시각 기록 — TTL 체크용 (BUG-031)
             decision.meta["approved_at"] = datetime.now(timezone.utc).isoformat()
-            asyncio.create_task(self._send_post_report(decision))
             return True
 
         logger.info(
@@ -344,8 +343,11 @@ class AutoApprovalGate:
 
         return True
 
-    async def _send_post_report(self, decision: Decision) -> None:
-        """Telegram 사후 보고 (火-and-forget). 실패해도 WARNING만."""
+    async def send_entry_report(self, decision: Decision, exec_price: float | None = None) -> None:
+        """주문 실행 완료 후 Telegram 보고. 실패해도 WARNING만.
+
+        _execution_mixin에서 실제 포지션 생성 확인 후 호출한다.
+        """
         try:
             pair_display = decision.pair.replace("_", "/")
             action_label = {
@@ -353,17 +355,18 @@ class AutoApprovalGate:
                 "entry_short": "숏 진입",
             }.get(decision.action, decision.action)
             now_jst = datetime.now(JST).strftime("%H:%M")
+            price_str = f"¥{exec_price:,.0f}" if exec_price else "시장가"
             sl_str = f"¥{decision.stop_loss:,.0f}" if decision.stop_loss else "없음"
             tp_str = f"¥{decision.take_profit:,.0f}" if decision.take_profit else "없음"
 
             text = (
                 f"📊 거래 실행 완료 (자동) {now_jst}\n"
                 "━━━━━━━━━━━━━━━━━━━\n"
-                f"🪙 {pair_display} {action_label}\n"
+                f"🪙 {pair_display} {action_label} @ {price_str}\n"
                 f"확신도: {decision.confidence:.0%} | 크기: {decision.size_pct:.0%}\n"
                 f"SL: {sl_str} | TP: {tp_str}\n"
                 f"근거: {(decision.reasoning or '')[:80]}"
             )
             await self._telegram_gate._send_message(text, {"inline_keyboard": []})
         except Exception as e:
-            logger.warning(f"[AutoApprovalGate] 사후 보고 실패 (무시): {e}")
+            logger.warning(f"[AutoApprovalGate] 실행 보고 실패 (무시): {e}")

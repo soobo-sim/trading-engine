@@ -313,8 +313,7 @@ async def test_auto_approve_conditions_met_returns_true():
 
     d = _make_decision(confidence=0.7, size_pct=0.35, meta={"samantha_verdict": "agree"})
 
-    with patch.object(gate, "_send_post_report", new=AsyncMock()):
-        result = await gate.request_approval(d)
+    result = await gate.request_approval(d)
 
     assert result is True
     tg_gate.request_approval.assert_not_called()
@@ -341,26 +340,19 @@ async def test_auto_approve_fallback_to_telegram():
 @pytest.mark.asyncio
 async def test_auto_approve_post_report_failure_does_not_block():
     """
-    Given: 자동 승인 조건 충족 + 사후 보고 실패
-    When:  request_approval()
-    Then:  True 반환 (거래 진행) — 보고 실패 무시
+    Given: send_entry_report 실패 (Telegram 오류)
+    When:  send_entry_report() 호출
+    Then:  예외 흡수 (WARNING만) — 승인과 독립적
     """
     tg_gate = TelegramApprovalGate(bot_token="tok", chat_id="chat")
+    tg_gate._send_message = AsyncMock(side_effect=RuntimeError("보고 실패"))
     gate = AutoApprovalGate(telegram_gate=tg_gate, min_confidence=0.65, max_auto_size=0.40)
 
     d = _make_decision(confidence=0.7, size_pct=0.35, meta={"samantha_verdict": "agree"})
 
-    async def _fail_report(*args, **kwargs):
-        raise RuntimeError("보고 실패")
-
-    with patch.object(gate, "_send_post_report", new=_fail_report):
-        # _send_post_report는 create_task로 fire-and-forget이므로 직접 호출하면 오류
-        # _should_auto_approve=True 경우 실제 create_task 호출. 태스크 완료 전 검사.
-        result = await gate.request_approval(d)
-        # 실행 중인 태스크 취소 방지 — 이벤트 루프 한 턴 실행
-        await asyncio.sleep(0)
-
-    assert result is True
+    # send_entry_report는 예외를 WARNING만 내고 무시해야 함
+    await gate.send_entry_report(d, exec_price=5_000_000.0)
+    # 예외 발생 안 함 (WARNING만)
 
 
 # ──────────────────────────────────────────────────────────────

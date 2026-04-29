@@ -223,6 +223,13 @@ class ExecutionMixin:
                     f"확신도={new_pos.extra.get('confidence', 0.0):.0%}, "
                     f"side={new_pos.extra.get('side', 'long')}"
                 )
+            # 실제 주문 성공 후 텔레그램 보고 (포지션 생성 확인)
+            if new_pos is not None and result.decision is not None:
+                _approval_gate = getattr(self, "_approval_gate", None)
+                if _approval_gate is not None and hasattr(_approval_gate, "send_entry_report"):
+                    asyncio.create_task(
+                        _approval_gate.send_entry_report(result.decision, new_pos.entry_price)
+                    )
             return False
 
         if action == "entry_short":
@@ -252,6 +259,13 @@ class ExecutionMixin:
                     f"확신도={new_pos.extra.get('confidence', 0.0):.0%}, "
                     f"side={new_pos.extra.get('side', 'short')}"
                 )
+            # 실제 주문 성공 후 텔레그램 보고 (포지션 생성 확인)
+            if new_pos is not None and result.decision is not None:
+                _approval_gate = getattr(self, "_approval_gate", None)
+                if _approval_gate is not None and hasattr(_approval_gate, "send_entry_report"):
+                    asyncio.create_task(
+                        _approval_gate.send_entry_report(result.decision, new_pos.entry_price)
+                    )
             return False
 
         if action == "blocked":

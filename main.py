@@ -305,6 +305,9 @@ async def lifespan(app: FastAPI):
                         os.environ.get("AUTO_APPROVAL_MAX_SIZE", "0.40")
                     ),
                 )
+                # 실제 주문 성공 후 보고를 위해 매니저에 주입
+                trend_manager.set_approval_gate(_approval_gate)
+                box_manager.set_approval_gate(_approval_gate)
                 logger.debug("Approval Gate: Phase B 자동 승인 (AutoApprovalGate)")
             else:
                 _approval_gate = _tg_gate
