@@ -119,6 +119,7 @@ class DataHub:
         self._positions = positions or {}
         self._trading_data_url = trading_data_url.rstrip("/") if trading_data_url else None
         self._lesson_model = lesson_model
+        self._fetch_counter: int = 0
         self._macro_cache: Optional[tuple[MacroSnapshotDTO, datetime]] = None
         self._events_cache: Optional[tuple[tuple[EconomicEventDTO, ...], datetime]] = None
         self._news_cache: dict[str, tuple[tuple[NewsDTO, ...], datetime]] = {}
@@ -166,6 +167,11 @@ class DataHub:
             timeframe=getattr(row, "timeframe", ""),
         )
 
+    def _next_fetch_id(self) -> str:
+        """데이터 레이어 fetch 고유 ID (4자리 카운터, 0001~9999 순환)."""
+        self._fetch_counter = (self._fetch_counter % 9999) + 1
+        return f"{self._fetch_counter:04d}"
+
     async def get_ticker(self, pair: str) -> Optional[Ticker]:
         try:
             return await self._adapter.get_ticker(pair)
@@ -191,13 +197,15 @@ class DataHub:
             if (now - fetched_at).total_seconds() < _MACRO_CACHE_TTL:
                 return cached
 
+        _fid = self._next_fetch_id()
+        _prefix = f"[Data-Layer][{_fid}]"
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
                 resp = await client.get(f"{self._trading_data_url}/api/intermarket/latest")
                 resp.raise_for_status()
                 series = resp.json().get("series", {})
         except Exception as e:
-            logger.warning(f"[DataHub] 매크로 스냅샷 조회 실패 (graceful): {e}")
+            logger.warning(f"{_prefix} 매크로 스냅샷 조회 실패 (graceful): {e}")
             return self._macro_cache[0] if self._macro_cache else None
 
         dto = MacroSnapshotDTO(
@@ -229,6 +237,8 @@ class DataHub:
             if (now - fetched_at).total_seconds() < _EVENTS_CACHE_TTL:
                 return cached
 
+        _fid = self._next_fetch_id()
+        _prefix = f"[Data-Layer][{_fid}]"
         try:
             params: dict = {"hours": 24, "limit": 10}
             if category:
@@ -241,7 +251,7 @@ class DataHub:
                 resp.raise_for_status()
                 articles = resp.json().get("articles", [])
         except Exception as e:
-            logger.warning(f"[DataHub] 뉴스 조회 실패 (graceful): {e}")
+            logger.warning(f"{_prefix} 뉴스 조회 실패 (graceful): {e}")
             return ()
 
         dtos: tuple[NewsDTO, ...] = tuple(
@@ -271,6 +281,8 @@ class DataHub:
             if (now - fetched_at).total_seconds() < _SENTIMENT_CACHE_TTL:
                 return cached
 
+        _fid = self._next_fetch_id()
+        _prefix = f"[Data-Layer][{_fid}]"
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
                 resp = await client.get(
@@ -292,12 +304,12 @@ class DataHub:
                 )
                 self._sentiment_cache = (dto, now)
                 logger.info(
-                    f"[DataHub] 센티먼트 갱신 (FNG): score={dto.score} "
+                    f"{_prefix} 센티먼트 갱신 (FNG): score={dto.score} "
                     f"({dto.classification}) — 다음 갱신 ~1시간 후"
                 )
                 return dto
         except Exception as e:
-            logger.warning(f"[DataHub] Fear & Greed 조회 실패 (뉴스로 폴백): {e}")
+            logger.warning(f"{_prefix} Fear & Greed 조회 실패 (뉴스로 폴백): {e}")
 
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
@@ -308,7 +320,7 @@ class DataHub:
                 resp.raise_for_status()
                 body = resp.json()
         except Exception as e:
-            logger.warning(f"[DataHub] 센티먼트 조회 실패 (graceful): {e}")
+            logger.warning(f"{_prefix} 센티먼트 조회 실패 (graceful): {e}")
             return None
 
         avg = body.get("avg_sentiment")
@@ -337,7 +349,7 @@ class DataHub:
         )
         self._sentiment_cache = (dto, now)
         logger.info(
-            f"[DataHub] 센티먼트 갱신 (뉴스 폴백): score={score_100} "
+            f"{_prefix} 센티먼트 갱신 (뉴스 폴백): score={score_100} "
             f"({classification}) — 다음 갱신 ~1시간 후"
         )
         return dto
@@ -354,6 +366,8 @@ class DataHub:
                 # 캐시된 것이 limit보다 많으면 슬라이스 반환
                 return cached[:limit]
 
+        _fid = self._next_fetch_id()
+        _prefix = f"[Data-Layer][{_fid}]"
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
                 resp = await client.get(
@@ -378,7 +392,7 @@ class DataHub:
             self._sentiment_history_cache = (dtos, now)
             return dtos[:limit]
         except Exception as e:
-            logger.warning(f"[DataHub] FNG 이력 조회 실패 (graceful): {e}")
+            logger.warning(f"{_prefix} FNG 이력 조회 실패 (graceful): {e}")
             return self._sentiment_history_cache[0][:limit] if self._sentiment_history_cache else ()
 
     async def get_upcoming_events(self) -> tuple[EconomicEventDTO, ...]:
@@ -391,6 +405,8 @@ class DataHub:
             if (now - fetched_at).total_seconds() < _EVENTS_CACHE_TTL:
                 return cached
 
+        _fid = self._next_fetch_id()
+        _prefix = f"[Data-Layer][{_fid}]"
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
                 resp = await client.get(
@@ -400,7 +416,7 @@ class DataHub:
                 resp.raise_for_status()
                 events_raw = resp.json().get("events", [])
         except Exception as e:
-            logger.warning(f"[DataHub] 경제 이벤트 조회 실패 (graceful): {e}")
+            logger.warning(f"{_prefix} 경제 이벤트 조회 실패 (graceful): {e}")
             return self._events_cache[0] if self._events_cache else ()
 
         dtos = []
@@ -415,14 +431,14 @@ class DataHub:
                     previous=ev.get("previous"),
                 ))
             except (KeyError, ValueError) as parse_err:
-                logger.debug(f"[DataHub] 이벤트 파싱 스킵: {parse_err}")
+                logger.debug(f"{_prefix} 이벤트 파싱 스킵: {parse_err}")
                 continue
 
         result: tuple[EconomicEventDTO, ...] = tuple(dtos)
         self._events_cache = (result, now)
         high_events = [d for d in dtos if d.importance == "High"]
         logger.info(
-            f"[DataHub] 경제 이벤트 갱신: 전체 {len(result)}건 "
+            f"{_prefix} 경제 이벤트 갱신: 전체 {len(result)}건 "
             f"(S/A급 {len(high_events)}건: "
             + (', '.join(e.name for e in high_events) if high_events else '없음')
             + ") — 다음 갱신 ~30분 후"
@@ -433,6 +449,8 @@ class DataHub:
         if self._lesson_model is None:
             return ()
 
+        _fid = self._next_fetch_id()
+        _prefix = f"[Data-Layer][{_fid}]"
         try:
             LessonModel = self._lesson_model
             async with self._session_factory() as db:
@@ -459,5 +477,5 @@ class DataHub:
                 for row in rows
             )
         except Exception as e:
-            logger.warning(f"[DataHub] 교훈 조회 실패 (graceful): {e}")
+            logger.warning(f"{_prefix} 교훈 조회 실패 (graceful): {e}")
             return ()
