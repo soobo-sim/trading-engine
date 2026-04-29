@@ -125,7 +125,7 @@ async def test_get_news_summary_returns_empty(hub):
 
 @pytest.mark.asyncio
 async def test_get_lessons_returns_empty(hub):
-    assert await hub.get_lessons("BTC_JPY", "entry_ok") == ()
+    assert await hub.get_lessons("BTC_JPY", "long_setup") == ()
 
 
 # ── v1.5: get_macro_snapshot ─────────────────────────────────
@@ -406,7 +406,7 @@ async def test_get_lessons_returns_pair_match(db_and_factory):
         lesson_model=WakeUpReview,
     )
 
-    result = await hub.get_lessons("USD_JPY", "entry_ok")
+    result = await hub.get_lessons("USD_JPY", "long_setup")
     await adapter.close()
 
     assert len(result) == 2
@@ -428,7 +428,7 @@ async def test_get_lessons_outcome_loss(db_and_factory):
         pair_column="pair",
         lesson_model=WakeUpReview,
     )
-    result = await hub.get_lessons("USD_JPY", "entry_ok")
+    result = await hub.get_lessons("USD_JPY", "long_setup")
     await adapter.close()
 
     assert result[0].outcome == "loss"
@@ -448,7 +448,7 @@ async def test_get_lessons_outcome_win(db_and_factory):
         pair_column="pair",
         lesson_model=WakeUpReview,
     )
-    result = await hub.get_lessons("USD_JPY", "entry_ok")
+    result = await hub.get_lessons("USD_JPY", "long_setup")
     await adapter.close()
 
     assert result[0].outcome == "win"
@@ -467,7 +467,7 @@ async def test_get_lessons_no_model_returns_empty(db_and_factory):
         pair_column="pair",
         lesson_model=None,
     )
-    assert await hub.get_lessons("USD_JPY", "entry_ok") == ()
+    assert await hub.get_lessons("USD_JPY", "long_setup") == ()
     await adapter.close()
 
 
@@ -490,7 +490,7 @@ async def test_get_lessons_skips_null_lessons(db_and_factory):
         pair_column="pair",
         lesson_model=WakeUpReview,
     )
-    result = await hub.get_lessons("USD_JPY", "entry_ok")
+    result = await hub.get_lessons("USD_JPY", "long_setup")
     await adapter.close()
 
     assert len(result) == 1
@@ -628,7 +628,7 @@ async def test_get_lessons_db_exception_graceful(db_and_factory):
         pair_column="pair",
         lesson_model=WakeUpReview,
     )
-    result = await hub.get_lessons("USD_JPY", "entry_ok")
+    result = await hub.get_lessons("USD_JPY", "long_setup")
     await adapter.close()
 
     assert result == ()
@@ -649,7 +649,7 @@ async def test_get_lessons_respects_limit(db_and_factory):
         pair_column="pair",
         lesson_model=WakeUpReview,
     )
-    result = await hub.get_lessons("USD_JPY", "entry_ok")
+    result = await hub.get_lessons("USD_JPY", "long_setup")
     await adapter.close()
 
     assert len(result) == 5

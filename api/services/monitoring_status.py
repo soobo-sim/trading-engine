@@ -169,7 +169,7 @@ async def generate_trend_status(
                 "tighten_reason": exit_signal.get("reason") if position_obj.stop_tightened else None,
             },
             "exit_signals": {
-                "ema_below": sig["signal"] == "exit_warning",
+                "ema_below": sig["signal"] == "long_caution",
                 "trailing_stop_hit": False,
                 "action": exit_signal["action"],
                 "reason": exit_signal["reason"],

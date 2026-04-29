@@ -108,11 +108,11 @@ class TestGetVolatilityState:
 
 class TestGetMarketSummary:
     def test_exit_warning(self):
-        result = get_market_summary(-0.2, 40.0, "exit_warning")
+        result = get_market_summary(-0.2, 40.0, "long_caution")
         assert "하락" in result
 
     def test_entry_ready(self):
-        result = get_market_summary(0.15, 50.0, "entry_ok")
+        result = get_market_summary(0.15, 50.0, "long_setup")
         assert "진입" in result
 
     def test_pullback_wait(self):
@@ -159,7 +159,7 @@ class TestGetPositionSummary:
 class TestGetEntryBlockers:
     def test_all_blockers(self):
         blockers = get_entry_blockers(
-            signal="exit_warning",
+            signal="long_caution",
             current_price=90.0,
             ema=100.0,
             ema_slope_pct=-0.15,
@@ -172,7 +172,7 @@ class TestGetEntryBlockers:
 
     def test_rsi_too_high(self):
         blockers = get_entry_blockers(
-            signal="wait_dip",
+            signal="long_overheated",
             current_price=110.0,
             ema=100.0,
             ema_slope_pct=0.2,
@@ -183,7 +183,7 @@ class TestGetEntryBlockers:
 
     def test_no_blockers(self):
         blockers = get_entry_blockers(
-            signal="entry_ok",
+            signal="long_setup",
             current_price=105.0,
             ema=100.0,
             ema_slope_pct=0.15,
@@ -214,10 +214,10 @@ class TestGetEntryBlockers:
         assert "횡보 레짐" in blockers[0]
         assert "BB폭" in blockers[0]
 
-    def test_entry_ok_signal_no_regime_blocker(self):
-        """entry_ok 시그널이면 레짐 blocker 없어야 한다."""
+    def test_long_setup_signal_no_regime_blocker(self):
+        """long_setup 시그널이면 레짐 blocker 없어야 한다."""
         blockers = get_entry_blockers(
-            signal="entry_ok",
+            signal="long_setup",
             current_price=105.0,
             ema=100.0,
             ema_slope_pct=0.15,
@@ -228,7 +228,7 @@ class TestGetEntryBlockers:
     def test_custom_rsi_min_honored(self):
         """전략별 RSI 하한(entry_rsi_min=45)이 반영되어야 한다."""
         blockers = get_entry_blockers(
-            signal="entry_ok",
+            signal="long_setup",
             current_price=105.0,
             ema=100.0,
             ema_slope_pct=0.15,
@@ -242,7 +242,7 @@ class TestGetEntryBlockers:
     def test_custom_rsi_max_honored(self):
         """GMO FX 전략 RSI 상한(entry_rsi_max=60)이 반영되어야 한다."""
         blockers = get_entry_blockers(
-            signal="wait_dip",
+            signal="long_overheated",
             current_price=105.0,
             ema=100.0,
             ema_slope_pct=0.15,
@@ -257,7 +257,7 @@ class TestGetEntryBlockers:
     def test_default_rsi_65_no_block_at_63(self):
         """기본 rsi_max=65일 때 RSI 63은 block 없음."""
         blockers = get_entry_blockers(
-            signal="entry_ok",
+            signal="long_setup",
             current_price=105.0,
             ema=100.0,
             ema_slope_pct=0.15,
@@ -268,7 +268,7 @@ class TestGetEntryBlockers:
     def test_custom_rsi_max_60_blocks_at_63(self):
         """rsi_max=60일 때 RSI 63은 block되어야 한다."""
         blockers = get_entry_blockers(
-            signal="entry_ok",
+            signal="long_setup",
             current_price=105.0,
             ema=100.0,
             ema_slope_pct=0.15,
@@ -294,7 +294,7 @@ class TestGetEntryBlockers:
     def test_slope_min_custom(self):
         """전략별 slope_min이 반영되어야 한다."""
         blockers = get_entry_blockers(
-            signal="entry_ok",
+            signal="long_setup",
             current_price=105.0,
             ema=100.0,
             ema_slope_pct=0.05,
@@ -308,7 +308,7 @@ class TestGetEntryBlockers:
     def test_slope_min_negative_allowed(self):
         """slope_min=-0.05일 때 slope -0.03은 통과."""
         blockers = get_entry_blockers(
-            signal="entry_ok",
+            signal="long_setup",
             current_price=105.0,
             ema=100.0,
             ema_slope_pct=-0.03,
@@ -323,14 +323,14 @@ class TestGetEntryBlockers:
 class TestGetNarrativeSituation:
     def test_no_position_downtrend(self):
         result = get_narrative_situation(
-            has_position=False, signal="exit_warning",
+            has_position=False, signal="long_caution",
             ema_slope_pct=-0.15, rsi=28.0, current_price=90.0, ema=100.0,
         )
         assert "EMA 아래" in result and "하락" in result
 
     def test_no_position_uptrend_entry_ready(self):
         result = get_narrative_situation(
-            has_position=False, signal="entry_ok",
+            has_position=False, signal="long_setup",
             ema_slope_pct=0.15, rsi=52.0, current_price=105.0, ema=100.0,
         )
         assert "상승" in result and "진입" in result
@@ -345,7 +345,7 @@ class TestGetNarrativeSituation:
 
     def test_with_position_full_exit(self):
         result = get_narrative_situation(
-            has_position=True, signal="exit_warning",
+            has_position=True, signal="long_caution",
             ema_slope_pct=-0.2, rsi=28.0, current_price=95.0, ema=100.0,
             unrealized_pnl_pct=-1.0,
             exit_signal={"action": "full_exit"},
@@ -962,7 +962,7 @@ class TestBuildTelegramText:
 class TestBuildMemoryBlock:
     def test_no_position(self):
         data = {
-            "signal": "exit_warning",
+            "signal": "long_caution",
             "current_price": 232.49,
             "ema_state": "EMA 아래 -0.14%",
             "rsi_state": "RSI 과매도(31.5)",
@@ -1373,22 +1373,22 @@ class TestBoxTelegramTextModes:
 
 class TestIsRegimeShift:
     def test_bullish_to_bearish(self):
-        assert _is_regime_shift("entry_ok", "exit_warning") is True
+        assert _is_regime_shift("long_setup", "long_caution") is True
 
     def test_wait_dip_to_bearish(self):
-        assert _is_regime_shift("wait_dip", "exit_warning") is True
+        assert _is_regime_shift("long_overheated", "long_caution") is True
 
     def test_bearish_to_bullish(self):
-        assert _is_regime_shift("exit_warning", "entry_ok") is True
+        assert _is_regime_shift("long_caution", "long_setup") is True
 
     def test_same_direction(self):
-        assert _is_regime_shift("entry_ok", "wait_dip") is False
+        assert _is_regime_shift("long_setup", "long_overheated") is False
 
     def test_no_signal(self):
-        assert _is_regime_shift("no_signal", "entry_ok") is False
+        assert _is_regime_shift("no_signal", "long_setup") is False
 
     def test_wait_regime_not_shift(self):
-        assert _is_regime_shift("wait_regime", "exit_warning") is False
+        assert _is_regime_shift("wait_regime", "long_caution") is False
 
 
 class TestEvaluateAlert:
@@ -1403,7 +1403,7 @@ class TestEvaluateAlert:
             "ema_slope_pct": 0.1,
             "candle_change_pct": 0.5,
             "candle_1h_change_pct": 0.3,
-            "signal": "wait_dip",
+            "signal": "long_overheated",
             "position": None,
         }
         raw.update(overrides)
@@ -1498,16 +1498,16 @@ class TestEvaluateAlert:
     # --- Critical: 체제 전환 ---
 
     def test_regime_shift(self):
-        prev = self._base_raw(signal="entry_ok")
-        raw = self._base_raw(signal="exit_warning")
+        prev = self._base_raw(signal="long_setup")
+        raw = self._base_raw(signal="long_caution")
         alert = evaluate_alert(raw, prev)
         assert alert["level"] == "critical"
         assert "regime_shift" in alert["triggers"]
-        assert "entry_ok → exit_warning" in alert["text"]
+        assert "long_setup → long_caution" in alert["text"]
 
     def test_no_regime_shift_same_direction(self):
-        prev = self._base_raw(signal="entry_ok")
-        raw = self._base_raw(signal="wait_dip")
+        prev = self._base_raw(signal="long_setup")
+        raw = self._base_raw(signal="long_overheated")
         assert evaluate_alert(raw, prev) is None
 
     # --- Warning: RSI 경고 ---
@@ -1654,7 +1654,7 @@ class TestEvaluateAlert:
 
     def test_no_prev_raw_no_regime_shift(self):
         """prev_raw이 None이면 regime_shift/slope_reversal는 안 뜸."""
-        raw = self._base_raw(signal="exit_warning")
+        raw = self._base_raw(signal="long_caution")
         alert = evaluate_alert(raw, None)
         # exit_warning 자체로는 critical 아님 (regime_shift 없이)
         assert alert is None or "regime_shift" not in alert.get("triggers", [])
@@ -2117,7 +2117,7 @@ class TestGetNarrativeSituationEdgeCases:
     def test_above_ema_weak_slope(self):
         """EMA 위지만 slope 약 → RSI 조건 대기."""
         result = get_narrative_situation(
-            has_position=False, signal="wait_dip",
+            has_position=False, signal="long_overheated",
             ema_slope_pct=0.05, rsi=55.0, current_price=105.0, ema=100.0,
         )
         assert "EMA 위" in result or "RSI 조건" in result or "상승" in result
@@ -2134,7 +2134,7 @@ class TestGetNarrativeSituationEdgeCases:
     def test_with_position_tighten_stop(self):
         """tighten_stop → 스탑 조임 문구."""
         result = get_narrative_situation(
-            has_position=True, signal="exit_warning",
+            has_position=True, signal="long_caution",
             ema_slope_pct=-0.05, rsi=45.0, current_price=105.0, ema=107.0,
             unrealized_pnl_pct=0.5,
             exit_signal={"action": "tighten_stop"},
@@ -2159,7 +2159,7 @@ class TestGetWaitDirection:
 
     def test_wd03_long_when_signal_is_wait_dip(self):
         """WD-03: signal=wait_dip → long (롱 조건 부분 충족)."""
-        result = get_wait_direction(True, "wait_dip", 105.0, 100.0, 0.03)
+        result = get_wait_direction(True, "long_overheated", 105.0, 100.0, 0.03)
         assert result == "long"
 
     def test_wd03b_long_when_signal_is_wait_regime(self):
@@ -2223,7 +2223,7 @@ class TestGetEntryBlockersShort:
     def test_no_blockers_when_all_conditions_met(self):
         """모든 숏 진입 조건 충족 → 빈 리스트."""
         blockers = get_entry_blockers_short(
-            signal="entry_sell",
+            signal="short_setup",
             current_price=9_900_000,
             ema=10_000_000,
             ema_slope_pct=-0.1,
@@ -2308,22 +2308,22 @@ class TestBuildTelegramTextWaitDirection:
 # ── 엣지케이스 보강 ────────────────────────────────────────────
 
 class TestWaitDirectionEntrySignals:
-    """entry_sell/entry_ok 시그널 → wait_direction 경로 확인."""
+    """short_setup/long_setup 시그널 → wait_direction 경로 확인."""
 
-    def test_entry_sell_signal_gives_short_direction(self):
-        """entry_sell: price<EMA + slope 강하 → short."""
-        # signals.py entry_sell 조건을 재현
-        result = get_wait_direction(True, "entry_sell", 9_900_000, 10_000_000, -0.1)
+    def test_short_setup_signal_gives_short_direction(self):
+        """short_setup: price<EMA + slope 강하 → short."""
+        # signals.py short_setup 조건을 재현
+        result = get_wait_direction(True, "short_setup", 9_900_000, 10_000_000, -0.1)
         assert result == "short"
 
-    def test_entry_ok_signal_gives_long_direction(self):
-        """entry_ok: price>EMA + slope 양수 → long (signal 명시 없어도 long)."""
-        result = get_wait_direction(True, "entry_ok", 10_100_000, 10_000_000, 0.1)
+    def test_long_setup_signal_gives_long_direction(self):
+        """long_setup: price>EMA + slope 양수 → long (signal 명시 없어도 long)."""
+        result = get_wait_direction(True, "long_setup", 10_100_000, 10_000_000, 0.1)
         assert result == "long"
 
     def test_exit_warning_price_below_ema_short(self):
         """exit_warning + price<EMA + slope 음수 → short."""
-        result = get_wait_direction(True, "exit_warning", 9_900_000, 10_000_000, -0.2)
+        result = get_wait_direction(True, "long_caution", 9_900_000, 10_000_000, -0.2)
         assert result == "short"
 
     def test_no_signal_price_above_ema_slope_negative_neutral(self):
@@ -2335,10 +2335,10 @@ class TestWaitDirectionEntrySignals:
 class TestEntryBlockersShortEdgeCases:
     """숏 블로커 엣지케이스."""
 
-    def test_entry_sell_signal_no_blockers(self):
-        """entry_sell 시그널 = 모든 숏 조건 충족 → 빈 리스트."""
+    def test_short_setup_signal_no_blockers(self):
+        """short_setup 시그널 = 모든 숏 조건 충족 → 빈 리스트."""
         blockers = get_entry_blockers_short(
-            signal="entry_sell",
+            signal="short_setup",
             current_price=9_900_000,
             ema=10_000_000,
             ema_slope_pct=-0.1,
@@ -2783,7 +2783,7 @@ class TestGetEntryConditionLinesLong:
     def test_cll01_all_met(self):
         """CL-L01: 4개 조건 모두 충족 → 4줄 전부 ✅."""
         lines = get_entry_condition_lines_long(
-            signal="entry_ok",
+            signal="long_setup",
             current_price=105.0,
             ema=100.0,
             ema_slope_pct=0.15,
@@ -2822,7 +2822,7 @@ class TestGetEntryConditionLinesLong:
     def test_cll03_price_below_ema_unmet(self):
         """CL-L03: 가격 < EMA → ❌ ① 라인에 ↑ 필요 금액 표시."""
         lines = get_entry_condition_lines_long(
-            signal="exit_warning",
+            signal="long_caution",
             current_price=95.0,
             ema=100.0,
             ema_slope_pct=0.1,
@@ -2852,7 +2852,7 @@ class TestGetEntryConditionLinesLong:
     def test_cll05_rsi_too_high(self):
         """CL-L05: RSI 과열 → ❌ ③ 라인에 초과·과열 표시."""
         lines = get_entry_condition_lines_long(
-            signal="wait_dip",
+            signal="long_overheated",
             current_price=105.0,
             ema=100.0,
             ema_slope_pct=0.1,
@@ -2896,7 +2896,7 @@ class TestGetEntryConditionLinesLong:
     def test_cll08_regime_active_shows_consecutive(self):
         """CL-L08: regime_active=True → ✅ ④ 라인에 연속 횟수 표시."""
         lines = get_entry_condition_lines_long(
-            signal="entry_ok",
+            signal="long_setup",
             current_price=105.0,
             ema=100.0,
             ema_slope_pct=0.1,
@@ -2917,7 +2917,7 @@ class TestGetEntryConditionLinesShort:
     def test_cls01_all_met(self):
         """CL-S01: 4개 조건 모두 충족 → 4줄 전부 ✅."""
         lines = get_entry_condition_lines_short(
-            signal="entry_sell",
+            signal="short_setup",
             current_price=9_900_000,
             ema=10_000_000,
             ema_slope_pct=-0.1,
@@ -2996,7 +2996,7 @@ class TestGetEntryConditionLinesShort:
     def test_cls06_slope_met_shows_threshold(self):
         """CL-S06: slope 충족 시 ≤threshold 충족 표시."""
         lines = get_entry_condition_lines_short(
-            signal="entry_sell",
+            signal="short_setup",
             current_price=9_900_000,
             ema=10_000_000,
             ema_slope_pct=-0.08,

@@ -3,13 +3,13 @@ GmoCoinBoxManager 단위 테스트.
 
 테스트 케이스:
   BX-01: _get_strategy_type() == "box_mean_reversion"
-  BX-02: 박스 감지 성공 + near_lower → "entry_ok"
-  BX-03: 박스 감지 성공 + near_upper → "entry_sell"
+  BX-02: 박스 감지 성공 + near_lower → "long_setup"
+  BX-03: 박스 감지 성공 + near_upper → "short_setup"
   BX-04: 박스 감지 성공 + outside → "exit_warning"
   BX-05: 박스 감지 성공 + middle → "no_signal"
   BX-06: 박스 미감지 → "no_signal"
-  BX-07: RegimeGate 차단 시 entry_ok 진입 스킵
-  BX-08: RegimeGate 차단 없을 시 entry_ok 진입 허용
+  BX-07: RegimeGate 차단 시 long_setup 진입 스킵
+  BX-08: RegimeGate 차단 없을 시 long_setup 진입 허용
   BX-09: 부모 _compute_signal None이면 None 반환
   BX-10: _compute_signal 반환에 box_detected, box_upper, box_lower, range_pct 포함
   BX-11: regime="ranging" 항상 반환 (RegimeGate 로그용)
@@ -17,8 +17,8 @@ GmoCoinBoxManager 단위 테스트.
   BM-P02: DB 미청산 있음 + 어댑터 포지션 있음 → Position(...)
   BM-P03: DB 미청산 있음 + 어댑터 포지션 없음 → None
   BM-P04: DB 조회 예외 → None + WARNING
-  BX-07: RegimeGate 차단 시 entry_ok 진입 스킵
-  BX-08: RegimeGate 차단 없을 시 entry_ok 진입 허용
+  BX-07: RegimeGate 차단 시 long_setup 진입 스킵
+  BX-08: RegimeGate 차단 없을 시 long_setup 진입 허용
   BX-09: 부모 _compute_signal None이면 None 반환
   BX-10: _compute_signal 반환에 box_detected, box_upper, box_lower, range_pct 포함
   BX-11: regime="ranging" 항상 반환 (RegimeGate 로그용)
@@ -161,22 +161,22 @@ class TestComputeSignalMapping:
             near_bound_pct=near_bound_pct,
         )
         _MAP = {
-            "near_lower": "entry_ok",
-            "near_upper": "entry_sell",
+            "near_lower": "long_setup",
+            "near_upper": "short_setup",
             "outside": "exit_warning",
             "middle": "no_signal",
         }
         return {"signal": _MAP[location], "box_detected": True, "location": location}
 
-    def test_near_lower_yields_entry_ok(self):
-        """박스 하단 근처 → entry_ok (롱 진입)."""
+    def test_near_lower_yields_long_setup(self):
+        """박스 하단 근처 → long_setup (롱 진입)."""
         result = self._run(current_price=10050000, near_bound_pct=1.0)
-        assert result["signal"] == "entry_ok"
+        assert result["signal"] == "long_setup"
 
-    def test_near_upper_yields_entry_sell(self):
-        """박스 상단 근처 → entry_sell (숏 진입)."""
+    def test_near_upper_yields_short_setup(self):
+        """박스 상단 근처 → short_setup (숏 진입)."""
         result = self._run(current_price=10950000, near_bound_pct=1.0)
-        assert result["signal"] == "entry_sell"
+        assert result["signal"] == "short_setup"
 
     def test_outside_yields_exit_warning(self):
         """박스 이탈 → exit_warning."""
@@ -300,7 +300,6 @@ class TestBoxManagerRegimeGate:
         mock_snapshot.atr = 100000.0
         mock_snapshot.ema_slope_pct = None
         mock_snapshot.rsi = None
-        mock_snapshot.is_preview = False
         mock_snapshot.pair = "btc_jpy"
 
         mgr._on_entry_signal = AsyncMock()

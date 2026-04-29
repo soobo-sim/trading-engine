@@ -301,8 +301,8 @@ def run_backtest(
             # ── 포지션 없음: 진입 시그널 체크 ──
             sig = compute_trend_signal(window, params)
 
-            if sig["signal"] in ("entry_ok", "entry_sell"):
-                side = "buy" if sig["signal"] == "entry_ok" else "sell"
+            if sig["signal"] in ("long_setup", "short_setup"):
+                side = "buy" if sig["signal"] == "long_setup" else "sell"
                 entry_price = _apply_slippage(
                     current_price, side, config.slippage_pct
                 )

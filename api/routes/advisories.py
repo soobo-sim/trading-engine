@@ -29,7 +29,7 @@ router = APIRouter(prefix="/api/advisories", tags=["Advisories"])
 _VALID_ACTIONS = frozenset({"entry_long", "entry_short", "hold", "exit", "adjust_risk", "add_position"})
 _VALID_REGIMES = frozenset({"trending", "ranging", "uncertain"})
 _VALID_STYLES = frozenset({"trend_following", "box_mean_reversion"})
-_VALID_HOLD_OVERRIDES = frozenset({"none", "signal_entry_ok"})
+_VALID_HOLD_OVERRIDES = frozenset({"none", "signal_long_setup"})
 
 
 # ── Schemas ───────────────────────────────────────────────────
@@ -49,7 +49,7 @@ class AdvisoryCreateRequest(BaseModel):
     trading_style: str = Field("trend_following", description="trend_following|box_mean_reversion")
     hold_override_policy: str = Field(
         "none",
-        description="hold 시 엔진 자율 진입 허용 정책. none=절대 hold | signal_entry_ok=entry_ok/entry_sell 시그널 시 진입 허용 (기술적 hold 전용)",
+        description="hold 시 엔진 자율 진입 허용 정책. none=절대 hold | signal_long_setup=long_setup/short_setup 시그널 시 진입 허용 (기술적 hold 전용)",
     )
     ttl_hours: float = Field(5.0, gt=0.0, le=48.0, description="만료까지 시간 (기본 5H, 최대 48H)")
     adjustments: dict | None = Field(

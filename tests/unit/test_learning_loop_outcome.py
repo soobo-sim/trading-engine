@@ -128,7 +128,7 @@ def _make_decision(action="entry_long", confidence=0.70) -> Decision:
         risk_factors=(),
         source="rule_based_v1",
         trigger="regular_4h",
-        raw_signal="entry_ok",
+        raw_signal="long_setup",
     )
 
 
@@ -146,7 +146,7 @@ def _make_snapshot() -> SignalSnapshot:
         pair="USD_JPY",
         exchange="gmo_fx",
         timestamp=datetime(2026, 4, 11, 4, 0, 0, tzinfo=timezone.utc),
-        signal="entry_ok",
+        signal="long_setup",
         current_price=150.50,
         exit_signal={"action": "hold"},
     )
@@ -154,7 +154,7 @@ def _make_snapshot() -> SignalSnapshot:
 
 def _make_signal_data() -> dict:
     return {
-        "signal": "entry_ok",
+        "signal": "long_setup",
         "current_price": 150.50,
         "exit_signal": {"action": "hold"},
     }
@@ -363,7 +363,7 @@ async def test_entry_short_saves_side_short(db_and_factory):
     mgr._params[pair] = {}
     mgr._latest_price[pair] = 150.50
 
-    # base._on_entry_signal은 entry_ok만 처리 → entry_short는 서브클래스 override 담당
+    # base._on_entry_signal은 long_setup만 처리 → entry_short는 서브클래스 override 담당
     # 여기서는 _on_entry_signal을 직접 모킹해 Position을 생성
     async def _mock_on_entry(p, signal, price, atr, params, signal_data):
         mgr._position[p] = Position(pair=p, entry_price=price, entry_amount=1000.0)
@@ -374,11 +374,11 @@ async def test_entry_short_saves_side_short(db_and_factory):
     snap = SignalSnapshot(
         pair=pair, exchange="gmo_fx",
         timestamp=datetime(2026, 4, 11, 4, 0, 0, tzinfo=timezone.utc),
-        signal="entry_sell", current_price=150.50,
+        signal="short_setup", current_price=150.50,
         exit_signal={"action": "hold"},
     )
     await mgr._handle_execution_result(
-        pair, result, snap, {"signal": "entry_sell", "current_price": 150.50, "exit_signal": {"action": "hold"}}, {}
+        pair, result, snap, {"signal": "short_setup", "current_price": 150.50, "exit_signal": {"action": "hold"}}, {}
     )
 
     pos = mgr._position.get(pair)
@@ -686,13 +686,13 @@ class TestNarrativeLogging:
         snap = SignalSnapshot(
             pair=pair, exchange="gmo_fx",
             timestamp=datetime(2026, 4, 11, 4, 0, 0, tzinfo=timezone.utc),
-            signal="entry_sell", current_price=150.50,
+            signal="short_setup", current_price=150.50,
             exit_signal={"action": "hold"},
         )
         with caplog.at_level(logging.INFO, logger="core.strategy.base_trend"):
             await mgr._handle_execution_result(
                 pair, result, snap,
-                {"signal": "entry_sell", "current_price": 150.50, "exit_signal": {"action": "hold"}},
+                {"signal": "short_setup", "current_price": 150.50, "exit_signal": {"action": "hold"}},
                 {}
             )
 

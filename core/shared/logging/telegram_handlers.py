@@ -301,7 +301,7 @@ class TelegramTransactionHandler(logging.Handler):
             if self._state['signal'] != new_signal:
                 self._state['prev_signal'] = self._state['signal']
                 self._state['signal'] = new_signal
-                if new_signal not in ('entry_ok', 'entry_sell'):
+                if new_signal not in ('long_setup', 'short_setup'):
                     self._state['signal_confidence'] = None
                     self._state['signal_size_pct'] = None
                 if self._domain == "judge" and self._loop and self._state['prev_signal'] is not None:
@@ -314,7 +314,7 @@ class TelegramTransactionHandler(logging.Handler):
                 if self._state['signal'] != new_signal:
                     self._state['prev_signal'] = self._state['signal']
                     self._state['signal'] = new_signal
-                    if new_signal not in ('entry_ok', 'entry_sell'):
+                    if new_signal not in ('long_setup', 'short_setup'):
                         self._state['signal_confidence'] = None
                         self._state['signal_size_pct'] = None
                     if self._domain == "judge" and self._loop and self._state['prev_signal'] is not None:
@@ -537,9 +537,9 @@ class TelegramTransactionHandler(logging.Handler):
         curr = self._state.get('signal')
         
         signal_kr = {
-            'entry_ok': '롱 진입 가능',
+            'long_setup': '롱 진입 가능',
             'hold': '관망',
-            'entry_sell': '숏 진입 가능',
+            'short_setup': '숏 진입 가능',
         }
         
         prev_kr = signal_kr.get(prev, prev)
@@ -569,9 +569,9 @@ class TelegramTransactionHandler(logging.Handler):
         if has_pos:
             conclusion = "포지션 보유 중 — 청산 조건 감시"
         else:
-            if curr == 'entry_ok':
+            if curr == 'long_setup':
                 conclusion = "롱 진입 기회"
-            elif curr == 'entry_sell':
+            elif curr == 'short_setup':
                 conclusion = "숏 진입 기회"
             else:
                 conclusion = "진입 조건 미충족"
@@ -721,9 +721,9 @@ class TelegramTransactionHandler(logging.Handler):
         regime_gate_ok = regime == 'trending' and consecutive >= 3
         if not regime_gate_ok:
             gate_status = "진입 차단 중"
-        elif _signal_now == 'entry_ok':
+        elif _signal_now == 'long_setup':
             gate_status = "신호 발생 (롱)"
-        elif _signal_now == 'entry_sell':
+        elif _signal_now == 'short_setup':
             gate_status = "신호 발생 (숏)"
         else:
             gate_status = "체제OK · 신호 대기"
@@ -749,7 +749,7 @@ class TelegramTransactionHandler(logging.Handler):
             _sig_now = self._state.get('signal')
             _sig_conf = self._state.get('signal_confidence')
             _sig_size = self._state.get('signal_size_pct')
-            if _sig_now in ('entry_ok', 'entry_sell') and _sig_conf is not None and _sig_size is not None:
+            if _sig_now in ('long_setup', 'short_setup') and _sig_conf is not None and _sig_size is not None:
                 _conf_ok = _sig_conf >= _min_conf
                 _size_ok = _sig_size <= _max_size
                 if _conf_ok and _size_ok:
@@ -844,9 +844,9 @@ class TelegramTransactionHandler(logging.Handler):
             else:
                 conclusion = "포지션 보유 중 — 청산 조건 감시"
         else:
-            if signal == 'entry_ok':
+            if signal == 'long_setup':
                 conclusion = "롱 진입 기회"
-            elif signal == 'entry_sell':
+            elif signal == 'short_setup':
                 conclusion = "숏 진입 기회"
             else:
                 conclusion = "진입 조건 미충족"

@@ -5,17 +5,17 @@ _candle_monitor()의 if/elif 분기 로직을 IDecisionMaker로 분리한 것.
 코드 동작은 완전히 동일하며, 테스트와 교체(v2 AI)가 쉬운 구조로 만든다.
 
 signal → action 매핑:
-┌─────────────────┬──────────────────┬─────────────────────────────────┐
-│ signal          │ position 상태    │ action                          │
-├─────────────────┼──────────────────┼─────────────────────────────────┤
-│ entry_ok        │ 없음             │ entry_long                      │
-│ entry_preview   │ 없음             │ entry_long (confidence × 0.8)   │
-│ entry_sell      │ 없음             │ entry_short                     │
-│ exit_warning    │ 있음             │ exit (trigger=exit_warning)     │
-│ (exit_signal)   │ 있음 full_exit   │ exit (trigger=full_exit)        │
-│ (exit_signal)   │ 있음 tighten_stop│ tighten_stop                    │
-│ 그 외           │ -                │ hold                            │
-└─────────────────┴──────────────────┴─────────────────────────────────┘
+┌──────────────────┬──────────────────┬──────────────────────────────────┐
+│ signal           │ position 상태    │ action                           │
+├──────────────────┼──────────────────┼──────────────────────────────────┤
+│ long_setup       │ 없음             │ entry_long                       │
+│ short_setup      │ 없음             │ entry_short                      │
+│ long_caution     │ 있음(롱)         │ exit (trigger=long_caution)      │
+│ short_caution    │ 있음(숏)         │ exit (trigger=short_caution)     │
+│ (exit_signal)    │ 있음 full_exit   │ exit (trigger=full_exit)         │
+│ (exit_signal)    │ 있음 tighten_stop│ tighten_stop                     │
+│ 그 외            │ -                │ hold                             │
+└──────────────────┴──────────────────┴──────────────────────────────────┘
 """
 from __future__ import annotations
 
@@ -50,18 +50,11 @@ class RuleBasedDecision:
 
         # ── 포지션 없음: 진입 판단 ────────────────
         if pos is None:
-            if signal == "entry_ok":
+            if signal == "long_setup":
                 decision = self._entry_decision(
                     snapshot, "entry_long", "롱 진입 조건 충족", now
                 )
-            elif signal == "entry_preview":
-                # 미완성 캔들 프리뷰 — confidence 할인 (0.7 × 0.8 = 0.56)
-                decision = self._entry_decision(
-                    snapshot, "entry_long",
-                    "프리뷰 시그널 (미완성 캔들 기반) — 4H 완성 시 재검증", now,
-                    confidence_override=0.56,
-                )
-            elif signal == "entry_sell":
+            elif signal == "short_setup":
                 decision = self._entry_decision(
                     snapshot, "entry_short", "숏 진입 조건 충족", now
                 )
@@ -69,11 +62,11 @@ class RuleBasedDecision:
                 decision = self._hold(snapshot, f"signal={signal} — 진입 조건 없음", now)
 
         # ── 포지션 있음: 청산 우선순위 ────────────
-        # 1) exit_warning (EMA 이탈 하드 청산)
-        elif signal == "exit_warning":
+        # 1) long_caution / short_caution (EMA 이탈 하드 청산)
+        elif signal in ("long_caution", "short_caution"):
             decision = self._exit_decision(
-                snapshot, "exit_warning",
-                f"exit_warning @ {snapshot.current_price} — EMA20 이탈", now,
+                snapshot, signal,
+                f"{signal} @ {snapshot.current_price} — EMA 이탈", now,
             )
 
         # 2) full_exit (exit_signal 기반 전량 청산)

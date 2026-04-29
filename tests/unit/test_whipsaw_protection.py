@@ -147,7 +147,7 @@ def test_cp_01_exit_warning_suppressed_within_cooling():
     # 방금 캔들 교체 (2초 전)
     mgr._last_candle_change_time = {"btc_jpy": datetime.now(timezone.utc) - timedelta(seconds=2)}
 
-    result = mgr._check_exit_warning("btc_jpy", "exit_warning", 10_500_000.0, 11_000_000.0, pos)
+    result = mgr._check_exit_warning("btc_jpy", "long_caution", 10_500_000.0, 11_000_000.0, pos)
     assert result == "no_signal", f"cooling 중 exit_warning이 억제돼야 함, got={result}"
 
 
@@ -161,7 +161,7 @@ def test_cp_02_exit_warning_allowed_after_cooling():
 
     # 롱: price < ema → exit_warning
     result = mgr._check_exit_warning("btc_jpy", "hold", 10_500_000.0, 11_000_000.0, pos)
-    assert result == "exit_warning", f"cooling 후 exit_warning 발동돼야 함, got={result}"
+    assert result == "long_caution", f"cooling 후 exit_warning 발동돼야 함, got={result}"
 
 
 def test_cp_03_cooling_long_position():
@@ -170,7 +170,7 @@ def test_cp_03_cooling_long_position():
     pos = _make_pos(side="buy")
     mgr._last_candle_change_time = {"btc_jpy": datetime.now(timezone.utc) - timedelta(seconds=10)}
 
-    result = mgr._check_exit_warning("btc_jpy", "exit_warning", 10_500_000.0, 11_000_000.0, pos)
+    result = mgr._check_exit_warning("btc_jpy", "long_caution", 10_500_000.0, 11_000_000.0, pos)
     assert result == "no_signal"
 
 
@@ -180,7 +180,7 @@ def test_cp_04_cooling_short_position():
     pos = _make_pos(side="sell")
     mgr._last_candle_change_time = {"btc_jpy": datetime.now(timezone.utc) - timedelta(seconds=10)}
 
-    result = mgr._check_exit_warning("btc_jpy", "exit_warning", 11_500_000.0, 11_000_000.0, pos)
+    result = mgr._check_exit_warning("btc_jpy", "long_caution", 11_500_000.0, 11_000_000.0, pos)
     assert result == "no_signal"
 
 
@@ -305,7 +305,7 @@ def test_ew_01_long_price_below_ema_minus_cushion():
     price = ema - atr * 0.1 - 1
 
     result = mgr._check_exit_warning("btc_jpy", "hold", price, ema, pos, atr=atr)
-    assert result == "exit_warning", f"EW-01 실패: got={result}"
+    assert result == "long_caution", f"EW-01 실패: got={result}"
 
 
 def test_ew_02_long_price_above_threshold_clears_exit_warning():
@@ -320,12 +320,12 @@ def test_ew_02_long_price_above_threshold_clears_exit_warning():
     price = ema - atr * 0.1 + 1
 
     # compute_trend_signal이 잘못 exit_warning을 반환했다고 가정
-    result = mgr._check_exit_warning("btc_jpy", "exit_warning", price, ema, pos, atr=atr)
+    result = mgr._check_exit_warning("btc_jpy", "long_caution", price, ema, pos, atr=atr)
     assert result == "no_signal", f"EW-02 실패: 오판 exit_warning이 no_signal로 교정돼야 함, got={result}"
 
 
 def test_ew_03_short_price_above_ema_plus_cushion():
-    """EW-03: 숏 + price > ema + cushion → exit_warning."""
+    """EW-03: 숏 + price > ema + cushion → short_caution."""
     mgr = _make_margin_mgr(params={"exit_ema_atr_cushion": 0.1})
     pos = _make_pos(side="sell")
 
@@ -335,7 +335,7 @@ def test_ew_03_short_price_above_ema_plus_cushion():
     price = ema + atr * 0.1 + 1
 
     result = mgr._check_exit_warning("btc_jpy", "hold", price, ema, pos, atr=atr)
-    assert result == "exit_warning", f"EW-03 실패: got={result}"
+    assert result == "short_caution", f"EW-03 실패: got={result}"
 
 
 def test_ew_04_short_price_below_ema_clears_exit_warning():
@@ -346,11 +346,11 @@ def test_ew_04_short_price_below_ema_clears_exit_warning():
     ema = 11_000_000.0
     atr = 100_000.0
     # 숏 포지션인데 price < ema → 숏에게는 유리한 방향 (이탈 아님)
-    # compute_trend_signal이 오판해서 exit_warning 반환했을 경우 → no_signal 교정
+    # compute_trend_signal이 오판해서 short_caution 반환했을 경우 → no_signal 교정
     price = ema - 50_000.0
 
-    result = mgr._check_exit_warning("btc_jpy", "exit_warning", price, ema, pos, atr=atr)
-    assert result == "no_signal", f"EW-04 실패: 숏 오판 exit_warning이 no_signal로 교정돼야 함, got={result}"
+    result = mgr._check_exit_warning("btc_jpy", "short_caution", price, ema, pos, atr=atr)
+    assert result == "no_signal", f"EW-04 실패: 숏 오판 short_caution이 no_signal로 교정돼야 함, got={result}"
 
 
 def test_ew_05_atr_none_means_no_cushion():
@@ -364,12 +364,12 @@ def test_ew_05_atr_none_means_no_cushion():
     price = ema - 1
 
     result = mgr._check_exit_warning("btc_jpy", "hold", price, ema, pos, atr=None)
-    assert result == "exit_warning", f"EW-05 실패: atr=None 시 cushion=0으로 동작해야 함, got={result}"
+    assert result == "long_caution", f"EW-05 실패: atr=None 시 cushion=0으로 동작해야 함, got={result}"
 
 
 def test_ew_06_no_position_returns_signal_unchanged():
     """EW-06: pos=None이면 signal 그대로 반환."""
     mgr = _make_margin_mgr()
 
-    result = mgr._check_exit_warning("btc_jpy", "entry_ok", 11_000_000.0, 11_000_000.0, None)
-    assert result == "entry_ok", f"EW-06 실패: pos=None시 signal 그대로여야 함, got={result}"
+    result = mgr._check_exit_warning("btc_jpy", "long_setup", 11_000_000.0, 11_000_000.0, None)
+    assert result == "long_setup", f"EW-06 실패: pos=None시 signal 그대로여야 함, got={result}"

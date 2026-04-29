@@ -108,8 +108,8 @@ class SignalSnapshot:
     기존 로직은 동일하게 동작한다.
 
     signal 값:
-      "entry_ok"     — 롱 진입 조건 충족
-      "entry_sell"   — 숏 진입 조건 충족 (CFD/FX)
+      "long_setup"     — 롱 진입 조건 충족
+      "short_setup"   — 숏 진입 조건 충족 (CFD/FX)
       "exit_warning" — EMA 하방 돌파, 즉시 청산
       "wait_dip"     — 과매수 대기
       "wait_regime"  — 횡보 체제 대기
@@ -125,7 +125,7 @@ class SignalSnapshot:
     timestamp: datetime
 
     # 기존 signals.py 출력 (필수)
-    signal: str                        # "entry_ok" | "entry_sell" | "exit_warning" | ...
+    signal: str                        # "long_setup" | "short_setup" | "exit_warning" | ...
     current_price: float
     exit_signal: dict                  # {"action": str, "reason": str, "triggers": dict, ...}
 
@@ -153,9 +153,6 @@ class SignalSnapshot:
 
     # 추가 파라미터 (RuleBasedDecision에서 사이징 등에 필요)
     params: dict = field(default_factory=dict)
-
-    # 미완성 캔들 기반 프리뷰 시그널 여부 (True → 4H 완성 시 재검증 필요)
-    is_preview: bool = False
 
     # 이 스냅샷을 생성한 매니저 전략 타입 (듀얼 매니저 advisory 분리용)
     strategy_type: str = "trend_following"
@@ -189,7 +186,7 @@ class Decision:
     risk_factors: tuple[str, ...]
     source: str              # "rule_based_v1" | "ai_v2"
     trigger: str             # "regular_4h" | "event" | "stop_loss" | "trailing"
-    raw_signal: str          # 원본 시그널 ("entry_ok", "exit_warning", ...)
+    raw_signal: str          # 원본 시그널 ("long_setup", "exit_warning", ...)
     timestamp: Optional[datetime] = None
     meta: dict = field(default_factory=dict)   # ai_v2: alice/samantha/rachel 세부 데이터
 

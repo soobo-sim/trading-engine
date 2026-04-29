@@ -190,7 +190,7 @@ class CandleLoopMixin:
             signal = self._on_signal_computed(pair, signal, signal_data, pos)
 
             # ── 포지션 보유 중 entry signal 무시 ──
-            if pos is not None and signal in ("entry_ok", "entry_sell", "wait_dip", "wait_regime"):
+            if pos is not None and signal in ("long_setup", "short_setup", "wait_dip", "wait_regime"):
                 signal = "hold"
 
             # 실시간 가격으로 exit_warning 보정
@@ -239,10 +239,10 @@ class CandleLoopMixin:
                 cur_pos = self._position.get(pair)
                 if cur_pos is not None and cur_pos.extra.get("preview_entry"):
                     self._ema_slope_last_key[pair] = latest_candle_key
-                    if signal == "entry_ok":
+                    if signal == "long_setup":
                         cur_pos.extra.pop("preview_entry")
                         logger.info(
-                            f"{self._log_prefix} {pair}: 프리뷰 진입 확인 — signal=entry_ok → 정상 포지션 전환"
+                            f"{self._log_prefix} {pair}: 프리뷰 진입 확인 — signal=long_setup → 정상 포지션 전환"
                         )
                     else:
                         logger.warning(
@@ -342,15 +342,6 @@ class CandleLoopMixin:
             )
             if should_continue:
                 continue
-
-            # ── JUDGE 발의 → PUNISHER 실행: 프리뷰 진입 시도 ──
-            if (
-                self._position.get(pair) is None
-                and pair not in self._pending_limit_orders
-                and signal not in ("entry_ok", "entry_sell")
-                and params.get("preview_entry_enabled", False)
-            ):
-                await self._try_preview_entry(pair, basis_tf, params)
 
     # ──────────────────────────────────────────
     # 서브클래스 훅 (기본 구현 제공)

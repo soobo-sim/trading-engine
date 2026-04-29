@@ -203,13 +203,11 @@ class ExecutionMixin:
                 return False
 
         if action == "entry_long":
-            is_preview = getattr(snapshot, "is_preview", False)
-            entry_signal = "entry_preview" if is_preview else "entry_ok"
             # approved_at을 signal_data에 병합 (BUG-031 TTL 체크용)
             if result.decision and result.decision.meta.get("approved_at"):
                 signal_data = {**signal_data, "approved_at": result.decision.meta["approved_at"]}
             await self._on_entry_signal(
-                pair, entry_signal, current_price, atr, params, signal_data
+                pair, "long_setup", current_price, atr, params, signal_data
             )
             # 진입 성공 시 학습 루프 연결: judgment_id / entry_time / confidence 기록
             new_pos = self._position.get(pair)
@@ -225,8 +223,6 @@ class ExecutionMixin:
                     f"확신도={new_pos.extra.get('confidence', 0.0):.0%}, "
                     f"side={new_pos.extra.get('side', 'long')}"
                 )
-            if is_preview and new_pos is not None:
-                new_pos.extra["preview_entry"] = True
             return False
 
         if action == "entry_short":
@@ -236,13 +232,11 @@ class ExecutionMixin:
                     f"롱 전용 매니저. 숏이 필요하면 cfd_trend_following 사용"
                 )
                 return False
-            is_preview = getattr(snapshot, "is_preview", False)
-            entry_signal = "entry_preview" if is_preview else "entry_sell"
             # approved_at을 signal_data에 병합 (BUG-031 TTL 체크용)
             if result.decision and result.decision.meta.get("approved_at"):
                 signal_data = {**signal_data, "approved_at": result.decision.meta["approved_at"]}
             await self._on_entry_signal(
-                pair, entry_signal, current_price, atr, params, signal_data
+                pair, "short_setup", current_price, atr, params, signal_data
             )
             # 진입 성공 시 학습 루프 연결: judgment_id / entry_time / confidence 기록
             new_pos = self._position.get(pair)
@@ -258,8 +252,6 @@ class ExecutionMixin:
                     f"확신도={new_pos.extra.get('confidence', 0.0):.0%}, "
                     f"side={new_pos.extra.get('side', 'short')}"
                 )
-            if is_preview and new_pos is not None:
-                new_pos.extra["preview_entry"] = True
             return False
 
         if action == "blocked":
@@ -393,12 +385,11 @@ class ExecutionMixin:
         """진입 시그널 처리.
 
         signal:
-          "entry_ok"      — 4H 완성 시그널, 로직: entry_mode에 따라 market 또는 limit
-          "entry_preview" — 미완성 캔들 프리뷰 시그널, 동일하게 entry_mode 디스패치
-          "entry_sell"    — 숏 진입 (CFD 전용)
+          "long_setup"   — 4H 완성 롱 진입 시그널, entry_mode에 따라 market 또는 limit
+          "short_setup" — 숏 진입 (CFD 전용)
         """
-        is_long_entry = signal in ("entry_ok", "entry_preview")
-        is_short_entry = signal == "entry_sell"
+        is_long_entry = signal == "long_setup"
+        is_short_entry = signal == "short_setup"
 
         if not (is_long_entry or is_short_entry):
             return
@@ -420,13 +411,11 @@ class ExecutionMixin:
 
         # ── entry_mode 디스패치: market / limit / limit_then_market ──
         entry_mode = str(params.get("entry_mode", "market"))
-        is_preview_signal = (signal == "entry_preview")
 
         if entry_mode in ("limit", "limit_then_market"):
             pending = await self._open_position_limit(
                 pair, current_price, atr, params,
                 signal_data=signal_data,
-                is_preview=is_preview_signal,
             )
             if pending is not None:
                 self._pending_limit_orders[pair] = pending
@@ -483,7 +472,7 @@ class ExecutionMixin:
             return True  # 포지션 등록 완료 → continue
 
         # OPEN 상태: 시그널 변경 감지 → 즉시 취소 (추세 이탈 보호)
-        if current_signal not in ("entry_ok", "entry_preview"):
+        if current_signal != "long_setup":
             logger.info(
                 f"{self._log_prefix} {pair}: 시그널 변경 ({current_signal}) → limit order 취소"
             )
@@ -504,7 +493,7 @@ class ExecutionMixin:
             except Exception as e:
                 logger.warning(f"{self._log_prefix} {pair}: limit order 타임아웃 취소 실패 — {e}")
             del self._pending_limit_orders[pair]
-            # 타임아웃 후 시그널이 여전히 entry_ok면 다음 사이클에서 market fallback 시도
+            # 타임아웃 후 시그널이 여전히 long_setup면 다음 사이클에서 market fallback 시도
             return False
 
         # 대기 중
@@ -516,7 +505,7 @@ class ExecutionMixin:
 
     async def _open_position_limit(
         self, pair: str, price: float, atr: Optional[float], params: Dict,
-        *, signal_data: dict | None = None, is_preview: bool = False,
+        *, signal_data: dict | None = None,
     ) -> Optional[Any]:
         """Limit order 진입 시도. None 반환 → market fallback.
 

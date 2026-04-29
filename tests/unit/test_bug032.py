@@ -29,7 +29,7 @@ def _make_result(advisory_id=None, action="add_position"):
         action=action, pair="btc_jpy", exchange="gmo_coin",
         confidence=0.8, size_pct=0.35, stop_loss=None, take_profit=None,
         reasoning="test", risk_factors=(), source="rachel_advisory",
-        trigger="regular_4h", raw_signal="entry_ok", meta=meta,
+        trigger="regular_4h", raw_signal="long_setup", meta=meta,
     )
     result = MagicMock()
     result.action = action
@@ -181,7 +181,7 @@ async def test_c05_rachel_advisory_records_advisory_id():
     snapshot = MagicMock(spec=SignalSnapshot)
     snapshot.pair = "btc_jpy"
     snapshot.exchange = "gmo_coin"
-    snapshot.signal = "entry_ok"
+    snapshot.signal = "long_setup"
     snapshot.position = None
     snapshot.current_price = 12_500_000.0
     snapshot.rsi = 55.0

@@ -114,14 +114,14 @@ def calculate_trend_readiness(
     """
     추세추종 readiness: 진입 시그널 상태 + RSI 위치.
 
-    entry_ok / entry_sell → 1.0
+    long_setup / short_setup → 1.0
     wait_dip              → 0.5 × (1 - RSI 오버슈팅 정도)
     exit_warning          → 0.0
     기타                  → 0.2
 
     Returns: 0.0 ~ 1.0
     """
-    if signal in ("entry_ok", "entry_sell"):
+    if signal in ("long_setup", "short_setup"):
         return 1.0
     if signal == "exit_warning":
         return 0.0
@@ -242,7 +242,7 @@ def calculate_trend_score(
     추세추종 전략 전체 Score 계산.
 
     Args:
-        signal: "entry_ok" | "entry_sell" | "wait_dip" | "exit_warning" | "no_signal" 등
+        signal: "long_setup" | "short_setup" | "wait_dip" | "exit_warning" | "no_signal" 등
         rsi: 현재 RSI (wait_dip 시 사용)
         entry_rsi_min: 진입 허용 RSI 하한
         entry_rsi_max: 진입 허용 RSI 상한

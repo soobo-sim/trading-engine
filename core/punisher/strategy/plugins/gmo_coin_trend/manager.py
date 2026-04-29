@@ -97,7 +97,7 @@ class GmoCoinTrendManager(CfdTrendFollowingManager):
                         logger.warning(f"[GmocMgr] {product_code}: 재평가 시그널 계산 실패 → 진입 차단")
                         return
                     sig = fresh_signal.get("signal", "no_signal")
-                    if sig not in ("entry_ok", "entry_sell", "entry_preview"):
+                    if sig not in ("long_setup", "short_setup", "entry_preview"):
                         logger.info(
                             f"[GmocMgr] {product_code}: 시그널 소멸 (approve 후 재평가={sig}) → 진입 차단"
                         )

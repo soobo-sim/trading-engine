@@ -181,7 +181,7 @@ class RachelAdvisoryDecision:
         take_profit = advisory.take_profit
 
         # ── 청산 시그널 항상 존중 (advisory와 무관) ────────────
-        if has_position and exit_action in ("exit_warning", "full_exit"):
+        if has_position and exit_action in ("long_caution", "short_caution", "full_exit"):
             return self._decision(
                 action="exit",
                 snapshot=snapshot,
@@ -219,12 +219,12 @@ class RachelAdvisoryDecision:
         if advisory_action == "hold":
             override_policy = getattr(advisory, "hold_override_policy", "none") or "none"
 
-            if override_policy == "signal_entry_ok" and not has_position:
+            if override_policy == "signal_long_setup" and not has_position:
                 # 진입 시그널이 있으면 Rachel의 위임으로 자율 진입
                 entry_action = None
-                if signal == "entry_ok":
+                if signal == "long_setup":
                     entry_action = "entry_long"
-                elif signal == "entry_sell":
+                elif signal == "short_setup":
                     entry_action = "entry_short"
 
                 if entry_action is not None:
@@ -330,7 +330,7 @@ class RachelAdvisoryDecision:
 
         # ── 진입: advisory + signal 합의 필요 ───────────────────
         if advisory_action == "entry_long" and not has_position:
-            if signal == "entry_ok":
+            if signal == "long_setup":
                 return self._decision(
                     action="entry_long",
                     snapshot=snapshot,
@@ -338,23 +338,7 @@ class RachelAdvisoryDecision:
                     size_pct=size_pct,
                     stop_loss=stop_loss,
                     take_profit=take_profit,
-                    reasoning=f"레이첼 entry_long × signal entry_ok: {advisory.reasoning}",
-                )
-            if signal == "entry_preview":
-                # 프리뷰 시그널: confidence × 0.85, size_pct × 0.7 (미확인 진입 리스크 반영)
-                preview_confidence = round(confidence * 0.85, 4)
-                preview_size = round((size_pct or 0.0) * 0.7, 4)
-                return self._decision(
-                    action="entry_long",
-                    snapshot=snapshot,
-                    confidence=preview_confidence,
-                    size_pct=preview_size,
-                    stop_loss=stop_loss,
-                    take_profit=take_profit,
-                    reasoning=(
-                        f"레이첼 entry_long × entry_preview (confidence={preview_confidence:.2f}, "
-                        f"size={preview_size:.0%}): {advisory.reasoning}"
-                    ),
+                    reasoning=f"레이첼 entry_long × signal long_setup: {advisory.reasoning}",
                 )
             return self._decision(
                 action="hold",
@@ -370,7 +354,7 @@ class RachelAdvisoryDecision:
             )
 
         if advisory_action == "entry_short" and not has_position:
-            if signal == "entry_sell":
+            if signal == "short_setup":
                 return self._decision(
                     action="entry_short",
                     snapshot=snapshot,
@@ -378,7 +362,7 @@ class RachelAdvisoryDecision:
                     size_pct=size_pct,
                     stop_loss=stop_loss,
                     take_profit=take_profit,
-                    reasoning=f"레이첼 entry_short × signal entry_sell: {advisory.reasoning}",
+                    reasoning=f"레이첼 entry_short × signal short_setup: {advisory.reasoning}",
                 )
             return self._decision(
                 action="hold",
@@ -454,7 +438,7 @@ class RachelAdvisoryDecision:
                 )
 
             # 조건 3: 청산 시그널 활성 시 차단
-            if signal in ("exit_warning",) or exit_action in ("full_exit", "tighten_stop"):
+            if signal in ("long_caution", "short_caution") or exit_action in ("full_exit", "tighten_stop"):
                 logger.info(
                     f"[RachelAdvisory] {snapshot.pair}: add_position 차단 — "
                     f"청산 시그널 활성 (signal={signal}, exit={exit_action})"

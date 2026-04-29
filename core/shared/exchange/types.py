@@ -116,7 +116,6 @@ class PendingLimitOrder:
     params: dict
     atr: Optional[float] = None
     signal_data: dict = field(default_factory=dict)
-    is_preview: bool = False
 
 
 # ──────────────────────────────────────────

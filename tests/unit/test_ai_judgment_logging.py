@@ -28,7 +28,7 @@ def _snapshot() -> SignalSnapshot:
         pair="USD_JPY",
         exchange="gmo_fx",
         timestamp=datetime(2026, 4, 1, 12, 0, 0, tzinfo=timezone.utc),
-        signal="entry_ok",
+        signal="long_setup",
         current_price=150.50,
         exit_signal={"action": "hold"},
     )
@@ -51,7 +51,7 @@ def _decision(
         risk_factors=("뉴스 없음",),
         source=source,
         trigger="regular_4h",
-        raw_signal="entry_ok",
+        raw_signal="long_setup",
         timestamp=datetime(2026, 4, 1, 12, 0, 0, tzinfo=timezone.utc),
         meta=meta or {},
     )

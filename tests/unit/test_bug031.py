@@ -72,7 +72,7 @@ async def test_t01_ttl_within_executes():
     approved_at = (datetime.now(timezone.utc) - timedelta(seconds=10)).isoformat()
     signal_data = {"approved_at": approved_at}
 
-    fresh_signal = {"signal": "entry_ok", "current_price": 5_000_000.0, "atr": None,
+    fresh_signal = {"signal": "long_setup", "current_price": 5_000_000.0, "atr": None,
                     "ema_slope_pct": 0.5, "rsi": 50.0}
     with patch.object(mgr, "_compute_signal", AsyncMock(return_value=fresh_signal)), \
          patch.object(mgr, "_record_open", AsyncMock()):
@@ -153,7 +153,7 @@ async def test_t05_no_approved_at_skips_reeval():
     compute_called = []
     async def fake_compute(*a, **kw):
         compute_called.append(True)
-        return {"signal": "entry_ok"}
+        return {"signal": "long_setup"}
 
     with patch.object(mgr, "_compute_signal", fake_compute), \
          patch.object(mgr, "_record_open", AsyncMock()):
@@ -211,7 +211,7 @@ async def test_t07_approval_gate_records_approved_at():
         action="entry_long", pair="btc_jpy", exchange="gmo_coin",
         confidence=0.8, size_pct=0.1, stop_loss=None, take_profit=None,
         reasoning="test", risk_factors=(), source="rule_based_v1",
-        trigger="regular_4h", raw_signal="entry_ok", meta={},
+        trigger="regular_4h", raw_signal="long_setup", meta={},
     )
 
     with patch.object(gate, "_send_message", AsyncMock(return_value=1)), \
