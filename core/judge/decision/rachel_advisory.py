@@ -75,7 +75,7 @@ class RachelAdvisoryDecision:
 
         if advisory is None:
             logger.warning(
-                f"[RachelAdvisory] {snapshot.pair}: advisory 없음 → v1 폴백"
+                f"[RachelAdvisory] {snapshot.pair}[{trading_style}]: advisory 없음 → v1 폴백"
             )
             decision = await self._fallback.decide(snapshot)
             return _replace_source(decision, _SOURCE_FALLBACK)
@@ -87,7 +87,7 @@ class RachelAdvisoryDecision:
 
         if now >= expires_at:
             logger.warning(
-                f"[RachelAdvisory] {snapshot.pair}: advisory 만료됨 "
+                f"[RachelAdvisory] {snapshot.pair}[{trading_style}]: advisory 만료됨 "
                 f"(expires={expires_at.isoformat()}) → v1 폴백"
             )
             decision = await self._fallback.decide(snapshot)
