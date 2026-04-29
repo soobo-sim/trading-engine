@@ -32,6 +32,9 @@ ENV/
 htmlcov/
 .mypy_cache/
 
+# Runtime cache directories
+**/.cache/
+
 # Docker
 *.log
 

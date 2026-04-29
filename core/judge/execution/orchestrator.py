@@ -17,14 +17,162 @@ v2 확장 시:
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
 from core.data.dto import Decision, ExecutionResult, GuardrailResult, SignalSnapshot
 from core.judge.decision.base import IDecisionMaker
 from core.judge.safety.guardrails import IGuardrail
 
 logger = logging.getLogger(__name__)
+
+# ── 트랜잭션 ID 생성기 ─────────────────────────────────────────────
+_JST = ZoneInfo("Asia/Tokyo")
+_tx_lock = threading.Lock()
+_tx_minute_key: str = ""
+_tx_counter: int = 0
+
+
+def _new_tx_id() -> str:
+    """JST 기준 트랜잭션 ID를 생성한다.
+
+    형식: MM/DD HH:MM NN  (예: 04/29 16:39 01)
+    동일 분 내에서 순번(NN)이 01부터 증가하며, 분이 바뀌면 01로 리셋된다.
+    """
+    global _tx_minute_key, _tx_counter
+    now_jst = datetime.now(_JST)
+    minute_key = now_jst.strftime("%m/%d %H:%M")
+    with _tx_lock:
+        if minute_key != _tx_minute_key:
+            _tx_minute_key = minute_key
+            _tx_counter = 0
+        _tx_counter += 1
+        seq = _tx_counter
+    return f"{minute_key} {seq:02d}"
+
+
+# ── 서술형 판단 로그 빌더 ──────────────────────────────────────────
+
+_SIGNAL_KO: dict[str, str] = {
+    "long_setup":      "롱 진입 조건 충족",
+    "short_setup":     "숏 진입 조건 충족",
+    "long_caution":    "롱 추세 이탈 경고",
+    "short_caution":   "숏 추세 이탈 경고",
+    "long_overheated": "롱 RSI 과열",
+    "short_oversold":  "숏 RSI 과매도",
+    "wait_regime":     "횡보 체제 대기",
+    "no_signal":       "진입 조건 없음",
+    "hold":            "대기",
+}
+
+_REGIME_KO: dict[str, str] = {
+    "trending":  "추세",
+    "ranging":   "횡보",
+    "volatile":  "변동성",
+}
+
+_ACTION_KO: dict[str, str] = {
+    "entry_long":   "진입 롱",
+    "entry_short":  "진입 숏",
+    "add_position": "피라미딩 추가",
+    "exit":         "전량 청산",
+    "tighten_stop": "스탑 타이트닝",
+    "hold":         "홀드",
+    "blocked":      "안전장치 차단",
+}
+
+
+def _build_narrative(
+    snapshot: SignalSnapshot,
+    decision: Decision,
+    final_action: str,
+    guardrail_result: Optional[GuardrailResult] = None,
+) -> str:
+    """SignalSnapshot + Decision + 결과를 바탕으로 서술형 로그 문장을 반환한다.
+
+    목적: 판단 레이어가 어떤 신호를 받아, 어떤 조건 때문에, 어떤 결론을 냈는지
+         운영자가 한 문장으로 이해할 수 있도록 자연어로 서술한다.
+    """
+    pair = snapshot.pair
+    sig = snapshot.signal
+    sig_ko = _SIGNAL_KO.get(sig, sig)
+    pos = snapshot.position
+    pos_label = "포지션 보유 중" if pos else "포지션 없음"
+    price_str = f"¥{snapshot.current_price:,.0f}"
+
+    # ── 지표 컨텍스트 ───────────────────────────────────────────────
+    ctx_parts: list[str] = []
+    if snapshot.rsi is not None:
+        ctx_parts.append(f"RSI {snapshot.rsi:.1f}")
+    if snapshot.ema is not None:
+        if snapshot.ema_slope_pct is not None:
+            arrow = "↑" if snapshot.ema_slope_pct >= 0 else "↓"
+            ctx_parts.append(
+                f"EMA ¥{snapshot.ema:,.0f}({snapshot.ema_slope_pct:+.3f}%{arrow})"
+            )
+        else:
+            ctx_parts.append(f"EMA ¥{snapshot.ema:,.0f}")
+    if snapshot.regime:
+        ctx_parts.append(_REGIME_KO.get(snapshot.regime, snapshot.regime) + " 체제")
+    ctx_str = ", ".join(ctx_parts) if ctx_parts else ""
+
+    # ── 홀드 ────────────────────────────────────────────────────────
+    if final_action == "hold":
+        base = f"{pair}: {sig_ko}({sig}), {pos_label}"
+        if ctx_str:
+            base += f" [{ctx_str}]"
+        return base + " → 홀드."
+
+    # ── 전량 청산 ────────────────────────────────────────────────────
+    if final_action == "exit":
+        reason = decision.reasoning or sig_ko
+        base = f"{pair}: {sig_ko}({sig}), {pos_label}, 현재가 {price_str}"
+        if ctx_str:
+            base += f" [{ctx_str}]"
+        return base + f" → 전량 청산 결정. 이유: {reason}."
+
+    # ── 스탑 타이트닝 ────────────────────────────────────────────────
+    if final_action == "tighten_stop":
+        sl_str = f" 새 SL ¥{decision.stop_loss:,.0f}." if decision.stop_loss else ""
+        reason = decision.reasoning or sig_ko
+        return f"{pair}: 수익 구간 도달로 스탑 조정({sig}).{sl_str} 이유: {reason}."
+
+    # ── 진입 (entry_long / entry_short / add_position) ───────────────
+    if final_action in ("entry_long", "entry_short", "add_position"):
+        final_dec = guardrail_result.final_decision if guardrail_result else decision
+        action_ko = _ACTION_KO.get(final_action, final_action)
+        sl_str = f", SL ¥{final_dec.stop_loss:,.0f}" if final_dec.stop_loss else ""
+        ctx_block = f" [{ctx_str}]" if ctx_str else ""
+        return (
+            f"{pair}: {sig_ko}({sig}){ctx_block}, {pos_label}, 현재가 {price_str}"
+            f" → {action_ko} 결정."
+            f" 사이즈 {final_dec.size_pct * 100:.0f}%, 확신도 {final_dec.confidence:.2f}{sl_str}."
+            f" 안전장치 통과, 실행 대기."
+        )
+
+    # ── 안전장치 차단 ────────────────────────────────────────────────
+    if final_action == "blocked":
+        action_ko = _ACTION_KO.get(decision.action, decision.action)
+        reason = (guardrail_result.rejection_reason if guardrail_result else None) or "unknown"
+        ctx_block = f" [{ctx_str}]" if ctx_str else ""
+        return (
+            f"{pair}: {sig_ko}({sig}){ctx_block} → {action_ko} 결정 → 안전장치 차단."
+            f" 위반: {reason}."
+        )
+
+    # ── 승인 거부 ────────────────────────────────────────────────────
+    if final_action == "rejected_by_user":
+        action_ko = _ACTION_KO.get(decision.action, decision.action)
+        return (
+            f"{pair}: {sig_ko}({sig}) → {action_ko} 결정, 안전장치 통과 → 수보오빠 승인 거부."
+        )
+
+    # ── 기타 ─────────────────────────────────────────────────────────
+    return (
+        f"{pair}: 신호='{sig}' 액션={final_action}. {decision.reasoning[:80]}"
+    )
 
 
 class ExecutionOrchestrator:
@@ -60,11 +208,14 @@ class ExecutionOrchestrator:
         BaseTrendManager._candle_monitor()에서 호출된다.
         결과를 받아 실제 주문 실행(open/close)은 매니저가 한다.
         """
+        tx_id = _new_tx_id()
+        prefix = f"[Judge-Layer][{tx_id}]"
+
         # Step 1: 판단
         try:
             decision: Decision = await self._decision_maker.decide(snapshot)
         except Exception as e:
-            logger.error(f"[Orchestrator] {snapshot.pair} 판단 실패 — {e}")
+            logger.error(f"{prefix} {snapshot.pair} 판단 실패 — {e}")
             return ExecutionResult(
                 action="hold",
                 executed=False,
@@ -74,16 +225,11 @@ class ExecutionOrchestrator:
         # 즉시 통과: hold / 청산 계열은 안전장치 체크 불필요
         if decision.action in {"hold", "exit", "tighten_stop"}:
             judgment_id = await self._save_judgment(snapshot, decision, guardrail_result=None)
+            msg = _build_narrative(snapshot, decision, decision.action)
             if decision.action == "hold":
-                logger.debug(
-                    f"[Orchestrator] {snapshot.pair}: 판단=hold "
-                    f"\u2192 안전장치 생략 (비진입). 근거: {decision.reasoning[:60]}"
-                )
+                logger.debug(f"{prefix} {msg}")
             else:
-                logger.info(
-                    f"[Orchestrator] {snapshot.pair}: 판단={decision.action} "
-                    f"\u2192 안전장치 생략 (비진입). 근거: {decision.reasoning[:60]}"
-                )
+                logger.info(f"{prefix} {msg}")
             return ExecutionResult(
                 action=decision.action,
                 executed=False,   # 실제 실행은 매니저가 함
@@ -96,7 +242,7 @@ class ExecutionOrchestrator:
         try:
             result: GuardrailResult = await self._guardrail.check(decision, snapshot)
         except Exception as e:
-            logger.error(f"[Orchestrator] {snapshot.pair} 안전장치 오류 — {e}")
+            logger.error(f"{prefix} {snapshot.pair} 안전장치 오류 — {e}")
             return ExecutionResult(
                 action="hold",
                 executed=False,
@@ -105,10 +251,8 @@ class ExecutionOrchestrator:
 
         if not result.approved:
             judgment_id = await self._save_judgment(snapshot, decision, guardrail_result=result)
-            logger.info(
-                f"[Orchestrator] {snapshot.pair}: 판단={decision.action} "
-                f"→ 안전장치 거부 → 진입 차단. 위반: {result.rejection_reason}"
-            )
+            msg = _build_narrative(snapshot, decision, "blocked", result)
+            logger.info(f"{prefix} {msg}")
             return ExecutionResult(
                 action="blocked",
                 executed=False,
@@ -127,15 +271,13 @@ class ExecutionOrchestrator:
                     result.final_decision
                 )
             except Exception as e:
-                logger.error(f"[Orchestrator] {snapshot.pair} 승인 게이트 오류 — {e}")
+                logger.error(f"{prefix} {snapshot.pair} 승인 게이트 오류 — {e}")
                 approved = False
 
             if not approved:
                 judgment_id = await self._save_judgment(snapshot, decision, guardrail_result=result)
-                logger.info(
-                    f"[Orchestrator] {snapshot.pair}: 판단={decision.action} "
-                    f"→ 안전장치 통과 → 수보오빠 승인 거부/타임아웃"
-                )
+                msg = _build_narrative(snapshot, decision, "rejected_by_user", result)
+                logger.info(f"{prefix} {msg}")
                 return ExecutionResult(
                     action="rejected_by_user",
                     executed=False,
@@ -147,21 +289,8 @@ class ExecutionOrchestrator:
         # 최종 승인: 매니저에서 실행할 것
         judgment_id = await self._save_judgment(snapshot, decision, guardrail_result=result)
         final = result.final_decision
-        if final.action in {"entry_long", "entry_short", "add_position"}:
-            pos_label = "포지션 있음" if snapshot.position else "포지션 없음"
-            pyramid = snapshot.position.extra.get("pyramid_count", 0) if snapshot.position else 0
-            logger.info(
-                f"[Orchestrator] {snapshot.pair}: 판단={final.action} "
-                f"→ 안전장치 통과 → 실행 대기\n"
-                f"  확신도={final.confidence:.2f} 사이즈={final.size_pct} "
-                f"{pos_label} pyramid={pyramid}\n"
-                f"  근거: {final.reasoning[:120]}"
-            )
-        else:
-            logger.info(
-                f"[Orchestrator] {snapshot.pair}: 판단={final.action} "
-                f"→ 안전장치 통과 → 실행 대기 (매니저에게 위임)"
-            )
+        msg = _build_narrative(snapshot, final, final.action, result)
+        logger.info(f"{prefix} {msg}")
         return ExecutionResult(
             action=result.final_decision.action,
             executed=False,  # 실제 실행은 매니저가 함

@@ -375,13 +375,13 @@ class TestOrchestratorLogging:
         """
         import logging
         orch = _make_orchestrator(decision=_decision("hold"), guardrail_approved=True)
-        with caplog.at_level(logging.DEBUG, logger="core.execution.orchestrator"):
+        with caplog.at_level(logging.DEBUG, logger="core.judge.execution.orchestrator"):
             await orch.process(_snapshot())
-        info = [r for r in caplog.records if "Orchestrator" in r.message and r.levelname == "INFO"]
+        info = [r for r in caplog.records if "Judge-Layer" in r.message and r.levelname == "INFO"]
         assert len(info) == 0
-        debug = [r for r in caplog.records if "Orchestrator" in r.message and r.levelname == "DEBUG"]
+        debug = [r for r in caplog.records if "Judge-Layer" in r.message and r.levelname == "DEBUG"]
         assert len(debug) == 1
-        assert "안전장치 생략" in debug[0].message
+        assert "홀드" in debug[0].message
 
     @pytest.mark.asyncio
     async def test_exit_path_logs_info(self, caplog):
@@ -392,11 +392,11 @@ class TestOrchestratorLogging:
         """
         import logging
         orch = _make_orchestrator(decision=_decision("exit"), guardrail_approved=True)
-        with caplog.at_level(logging.INFO, logger="core.execution.orchestrator"):
+        with caplog.at_level(logging.INFO, logger="core.judge.execution.orchestrator"):
             await orch.process(_snapshot())
-        info = [r for r in caplog.records if "Orchestrator" in r.message and r.levelname == "INFO"]
+        info = [r for r in caplog.records if "Judge-Layer" in r.message and r.levelname == "INFO"]
         assert len(info) == 1
-        assert "안전장치 생략" in info[0].message
+        assert "전량 청산" in info[0].message
 
     @pytest.mark.asyncio
     async def test_blocked_path_logs_info(self, caplog):
@@ -407,11 +407,11 @@ class TestOrchestratorLogging:
         """
         import logging
         orch = _make_orchestrator(decision=_decision("entry_long"), guardrail_approved=False)
-        with caplog.at_level(logging.INFO, logger="core.execution.orchestrator"):
+        with caplog.at_level(logging.INFO, logger="core.judge.execution.orchestrator"):
             await orch.process(_snapshot())
-        info = [r for r in caplog.records if "Orchestrator" in r.message and r.levelname == "INFO"]
+        info = [r for r in caplog.records if "Judge-Layer" in r.message and r.levelname == "INFO"]
         assert len(info) == 1
-        assert "\uc9c4\uc785 \ucc28\ub2e8" in info[0].message
+        assert "안전장치 차단" in info[0].message
 
     @pytest.mark.asyncio
     async def test_approved_path_logs_info(self, caplog):
@@ -422,11 +422,11 @@ class TestOrchestratorLogging:
         """
         import logging
         orch = _make_orchestrator(decision=_decision("entry_long"), guardrail_approved=True)
-        with caplog.at_level(logging.INFO, logger="core.execution.orchestrator"):
+        with caplog.at_level(logging.INFO, logger="core.judge.execution.orchestrator"):
             await orch.process(_snapshot())
-        info = [r for r in caplog.records if "Orchestrator" in r.message and r.levelname == "INFO"]
+        info = [r for r in caplog.records if "Judge-Layer" in r.message and r.levelname == "INFO"]
         assert len(info) == 1
-        assert "\uc2e4\ud589 \ub300\uae30" in info[0].message
+        assert "실행 대기" in info[0].message
 
     @pytest.mark.asyncio
     async def test_tighten_stop_path_logs_info_not_debug(self, caplog):
@@ -437,12 +437,12 @@ class TestOrchestratorLogging:
         """
         import logging
         orch = _make_orchestrator(decision=_decision("tighten_stop"), guardrail_approved=True)
-        with caplog.at_level(logging.DEBUG, logger="core.execution.orchestrator"):
+        with caplog.at_level(logging.DEBUG, logger="core.judge.execution.orchestrator"):
             await orch.process(_snapshot())
-        info = [r for r in caplog.records if "Orchestrator" in r.message and r.levelname == "INFO"]
+        info = [r for r in caplog.records if "Judge-Layer" in r.message and r.levelname == "INFO"]
         assert len(info) == 1
-        assert "안전장치 생략" in info[0].message
-        debug = [r for r in caplog.records if "Orchestrator" in r.message and r.levelname == "DEBUG"]
+        assert "스탑 조정" in info[0].message
+        debug = [r for r in caplog.records if "Judge-Layer" in r.message and r.levelname == "DEBUG"]
         assert len(debug) == 0
 
 
