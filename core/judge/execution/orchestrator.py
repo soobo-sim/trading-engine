@@ -17,40 +17,15 @@ v2 확장 시:
 from __future__ import annotations
 
 import logging
-import threading
 from datetime import datetime, timezone
 from typing import Any, Optional
-from zoneinfo import ZoneInfo
 
 from core.data.dto import Decision, ExecutionResult, GuardrailResult, SignalSnapshot
 from core.judge.decision.base import IDecisionMaker
 from core.judge.safety.guardrails import IGuardrail
+from core.shared.logging.context import get_judge_cycle_id
 
 logger = logging.getLogger(__name__)
-
-# ── 트랜잭션 ID 생성기 ─────────────────────────────────────────────
-_JST = ZoneInfo("Asia/Tokyo")
-_tx_lock = threading.Lock()
-_tx_minute_key: str = ""
-_tx_counter: int = 0
-
-
-def _new_tx_id() -> str:
-    """JST 기준 트랜잭션 ID를 생성한다.
-
-    형식: MM/DD HH:MM NN  (예: 04/29 16:39 01)
-    동일 분 내에서 순번(NN)이 01부터 증가하며, 분이 바뀌면 01로 리셋된다.
-    """
-    global _tx_minute_key, _tx_counter
-    now_jst = datetime.now(_JST)
-    minute_key = now_jst.strftime("%m/%d %H:%M")
-    with _tx_lock:
-        if minute_key != _tx_minute_key:
-            _tx_minute_key = minute_key
-            _tx_counter = 0
-        _tx_counter += 1
-        seq = _tx_counter
-    return f"{minute_key} {seq:02d}"
 
 
 # ── 서술형 판단 로그 빌더 ──────────────────────────────────────────
@@ -209,7 +184,7 @@ class ExecutionOrchestrator:
         BaseTrendManager._candle_monitor()에서 호출된다.
         결과를 받아 실제 주문 실행(open/close)은 매니저가 한다.
         """
-        tx_id = _new_tx_id()
+        tx_id = get_judge_cycle_id() or "????"
         prefix = f"[Judge-Layer][{tx_id}]"
 
         # Step 1: 판단

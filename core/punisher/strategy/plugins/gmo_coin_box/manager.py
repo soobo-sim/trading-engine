@@ -147,7 +147,7 @@ class GmoCoinBoxManager(GmoCoinTrendManager):
 
         # ③ 시그널 결정
         _cid = get_judge_cycle_id()
-        _cid_prefix = f"[{_cid}][JUDGE]" if _cid else "[JUDGE]"
+        _cid_prefix = f"[Judge-Layer][{_cid}]" if _cid else "[Judge-Layer]"
         if not box_result.box_detected:
             signal = "no_signal"
             box_upper: Optional[float] = None
