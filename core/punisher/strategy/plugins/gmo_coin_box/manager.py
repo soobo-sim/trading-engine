@@ -103,7 +103,6 @@ class GmoCoinBoxManager(GmoCoinTrendManager):
         entry_price: Optional[float] = None,
         params: Optional[dict] = None,
         side: Optional[str] = None,
-        include_incomplete: bool = False,
     ) -> Optional[dict]:
         """
         박스 감지 + 가격 위치 분류 기반 시그널.
@@ -121,7 +120,6 @@ class GmoCoinBoxManager(GmoCoinTrendManager):
             entry_price=entry_price,
             params=p,
             side=side,
-            include_incomplete=include_incomplete,
         )
         if base is None:
             return None
