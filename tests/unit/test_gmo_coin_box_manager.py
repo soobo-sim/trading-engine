@@ -5,7 +5,7 @@ GmoCoinBoxManager 단위 테스트.
   BX-01: _get_strategy_type() == "box_mean_reversion"
   BX-02: 박스 감지 성공 + near_lower → "long_setup"
   BX-03: 박스 감지 성공 + near_upper → "short_setup"
-  BX-04: 박스 감지 성공 + outside → "exit_warning"
+  BX-04: 박스 감지 성공 + outside → "box_outside"
   BX-05: 박스 감지 성공 + middle → "no_signal"
   BX-06: 박스 미감지 → "no_signal"
   BX-07: RegimeGate 차단 시 long_setup 진입 스킵
@@ -163,7 +163,7 @@ class TestComputeSignalMapping:
         _MAP = {
             "near_lower": "long_setup",
             "near_upper": "short_setup",
-            "outside": "exit_warning",
+            "outside": "box_outside",
             "middle": "no_signal",
         }
         return {"signal": _MAP[location], "box_detected": True, "location": location}
@@ -178,10 +178,10 @@ class TestComputeSignalMapping:
         result = self._run(current_price=10950000, near_bound_pct=1.0)
         assert result["signal"] == "short_setup"
 
-    def test_outside_yields_exit_warning(self):
-        """박스 이탈 → exit_warning."""
+    def test_outside_yields_box_outside(self):
+        """박스 이탈 → box_outside."""
         result = self._run(current_price=9000000, near_bound_pct=0.5)
-        assert result["signal"] == "exit_warning"
+        assert result["signal"] == "box_outside"
 
     def test_middle_yields_no_signal(self):
         """박스 중간 → no_signal."""

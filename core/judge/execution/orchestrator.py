@@ -63,6 +63,7 @@ _SIGNAL_KO: dict[str, str] = {
     "long_overheated": "롱 RSI 과열",
     "short_oversold":  "숏 RSI 과매도",
     "wait_regime":     "횡보 체제 대기",
+    "box_outside":     "박스 이탈",
     "no_signal":       "진입 조건 없음",
     "hold":            "대기",
 }
