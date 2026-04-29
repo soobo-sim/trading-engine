@@ -36,8 +36,9 @@ from core.judge.analysis.box_detector import detect_box
 from core.strategy.box_signals import classify_price_in_box
 from core.strategy.plugins.gmo_coin_trend.manager import GmoCoinTrendManager
 from core.exchange.types import Position
+from core.shared.logging.context import get_judge_cycle_id
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("core.judge.box_signal")
 
 _LOG_PREFIX = "[BoxMgr]"
 
@@ -145,12 +146,14 @@ class GmoCoinBoxManager(GmoCoinTrendManager):
         )
 
         # ③ 시그널 결정
+        _cid = get_judge_cycle_id()
+        _cid_prefix = f"[{_cid}][JUDGE]" if _cid else "[JUDGE]"
         if not box_result.box_detected:
             signal = "no_signal"
             box_upper: Optional[float] = None
             box_lower: Optional[float] = None
             logger.debug(
-                f"{_LOG_PREFIX} {pair}: 박스 미감지 "
+                f"{_cid_prefix}{_LOG_PREFIX} {pair}: 박스 미감지 "
                 f"(reason={box_result.reason}) → no_signal"
             )
         else:
@@ -167,7 +170,7 @@ class GmoCoinBoxManager(GmoCoinTrendManager):
             signal = _LOCATION_TO_SIGNAL[location]
 
             logger.debug(
-                f"{_LOG_PREFIX} {pair}: "
+                f"{_cid_prefix}{_LOG_PREFIX} {pair}: "
                 f"박스 ¥{box_lower:,.0f}~¥{box_upper:,.0f} "
                 f"(폭 {box_result.width_pct:.2f}%) "
                 f"현재가 ¥{current_price:,.0f} → {location} → {signal}"

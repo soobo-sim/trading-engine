@@ -23,6 +23,7 @@ from sqlalchemy import desc, select
 from core.data.dto import Decision, SignalSnapshot
 from core.judge.decision.advisory_bypass import advisory_bypass
 from core.pair import normalize_pair
+from core.shared.logging.context import get_judge_cycle_id
 
 logger = logging.getLogger("core.judge.decision.rachel_advisory")  # 구 경로 유지
 
@@ -165,8 +166,10 @@ class RachelAdvisoryDecision:
             _extra_lines += f"\n  사만다: {_samantha_str}"
         if _risk_str:
             _extra_lines += f"\n  리스크: {_risk_str}"
+        _cid = get_judge_cycle_id()
+        _cid_prefix = f"[{_cid}][JUDGE]" if _cid else "[JUDGE]"
         logger.info(
-            f"[RachelAdvisory:{style}] {snapshot.pair}: advisory 읽음 — "
+            f"{_cid_prefix}[RachelAdvisory:{style}] {snapshot.pair}: advisory 읽음 — "
             f"id={advisory.id} action={advisory.action} confidence={advisory.confidence:.2f} "
             f"size_pct={advisory.size_pct} 잔여={remaining_h:.1f}H "
             f"signal={snapshot.signal} {pos_label} pyramid={pyramid_count_log}\n"
