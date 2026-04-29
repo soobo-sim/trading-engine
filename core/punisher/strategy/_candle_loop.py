@@ -21,8 +21,9 @@ from typing import TYPE_CHECKING, Dict
 
 from core.strategy.signals import detect_bearish_divergences
 from core.shared.signals import compute_exit_signal
+from core.shared.logging.context import set_judge_cycle_id, get_judge_cycle_id
 
-logger = logging.getLogger("core.strategy.base_trend")
+logger = logging.getLogger("core.judge.candle_loop")
 
 _CANDLE_POLL_INTERVAL = 60   # 초
 _SYNC_INTERVAL_CYCLES = 30   # 잔고/포지션 정합성 검사 주기 (사이클 단위, 30사이클=30분)
@@ -105,6 +106,9 @@ class CandleLoopMixin:
         """60초마다 시그널 재계산 → 진입/청산/트레일링."""
         while True:
             await asyncio.sleep(_CANDLE_POLL_INTERVAL)
+
+            # ── Judge 사이클 ID 설정 (이 태스크 내 모든 로그에 전파) ──
+            cycle_id = set_judge_cycle_id()
 
             params = self._params.get(pair, {})
             basis_tf = params.get("basis_timeframe", "4h")
@@ -213,7 +217,7 @@ class CandleLoopMixin:
             _rsi_str = f"{rsi:.1f}" if rsi is not None else "N/A"
             _ema_str = f"{ema:.0f}" if ema is not None else "N/A"
             _sig_log(
-                f"{self._log_prefix} {pair}: {self._describe_signal(signal, pos)} "
+                f"[{cycle_id}][JUDGE]{self._log_prefix} {pair}: {self._describe_signal(signal, pos)} "
                 f"signal={signal} ema_slope_pct={_slope_str} rsi={_rsi_str} ema={_ema_str} "
                 f"price={current_price:.0f}{_pos_label}"
             )
