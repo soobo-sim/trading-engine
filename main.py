@@ -477,6 +477,7 @@ async def lifespan(app: FastAPI):
         proposed_count = 0
         _PAPER_TRADING_HARDCAP = 3  # proposed 동시 실행 최대 수
         _strategy_start_count = 0   # 전략 기동 순서 카운터 (오프셋 계산용)
+        _CANDLE_POLL_SEC = 60       # candle_monitor 폴링 주기
         _CANDLE_START_OFFSET_SEC = 30  # 전략 간 candle_monitor 기동 오프셋 (초)
 
         for strategy in all_strategies:
@@ -509,7 +510,7 @@ async def lifespan(app: FastAPI):
 
             if not await strategy_registry.start_strategy(
                 style, pair, start_params,
-                initial_delay_sec=_strategy_start_count * _CANDLE_START_OFFSET_SEC,
+                initial_delay_sec=(_strategy_start_count * _CANDLE_START_OFFSET_SEC) % _CANDLE_POLL_SEC,
             ):
                 logger.warning(f"미등록 전략 스타일: {style} (pair={pair})")
             else:
