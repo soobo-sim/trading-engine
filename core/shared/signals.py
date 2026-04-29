@@ -285,7 +285,7 @@ def compute_trend_signal(
     _, regime_trending, regime_ranging = classify_regime(bb_width_pct, range_pct, params)
 
     # trending_score: bb/range/ATR/slope 4가지 지표 가중합 (0~6)
-    # entry_ok 조건: trending_score >= 1 (최소 1개 지표라도 추세 확인)
+    # long_setup 조건: trending_score >= 1 (최소 1개 지표라도 추세 확인)
     _atr_pct = (atr / current_price * 100) if (atr and current_price > 0) else 0
     _bb_trending_threshold = float(params.get("bb_width_trending_min", 3.0))
     _range_trending_min = float(params.get("range_pct_trending_min", 6.0))
@@ -301,23 +301,36 @@ def compute_trend_signal(
     if ema_slope_pct is not None and abs(ema_slope_pct) >= 4.0:
         trending_score += 1
 
+    rsi_oversold = (rsi is not None and rsi < short_rsi_low)
+
     # BUG-042: not regime_ranging → regime_trending (unclear 체제 진입 차단)
     # ① RegimeGate 수정: trending_score >= 1 추가 조건 (score=0 → 추세 미확인 → 차단)
+    # ② 숏도 롱과 동일하게 regime_trending + trending_score >= 1 적용 (비대칭 수정)
     if price_above_ema and ema_slope_positive and rsi_in_range and regime_trending and trending_score >= 1:
-        signal = "entry_ok"
+        signal = "long_setup"
     elif (
         price_above_ema is False
         and ema_slope_strong_down
         and rsi_in_short_range
-        and not regime_ranging
+        and regime_trending
+        and trending_score >= 1
     ):
-        signal = "entry_sell"
-    elif price_above_ema is False:
-        signal = "exit_warning"
+        signal = "short_setup"
     elif price_above_ema and ema_slope_positive and rsi_overbought:
-        signal = "wait_dip"
-    elif price_above_ema and ema_slope_positive and regime_ranging:
+        # 롱 과열: RSI 과매수, 눌림 대기
+        signal = "long_overheated"
+    elif price_above_ema is False and ema_slope_negative and rsi_oversold:
+        # 숏 과매도: RSI 과매도, 반등 위험 대기
+        signal = "short_oversold"
+    elif regime_ranging:
+        # 박스권: 방향 무관 대기
         signal = "wait_regime"
+    elif price_above_ema is False:
+        # 롱 경고: EMA 아래 (롱에 불리)
+        signal = "long_caution"
+    elif price_above_ema and ema_slope_negative:
+        # 숏 경고: EMA 위 + 기울기 하락 (숏에 불리)
+        signal = "short_caution"
     else:
         signal = "no_signal"
 

@@ -61,7 +61,7 @@ def guardrail_with_balance(session_factory):
     )
 
 
-def _make_snapshot(signal: str = "entry_ok") -> SignalSnapshot:
+def _make_snapshot(signal: str = "long_setup") -> SignalSnapshot:
     ts = datetime(2026, 4, 1, 12, 0, 0, tzinfo=timezone.utc)
     return SignalSnapshot(
         pair="BTC_JPY",
@@ -86,7 +86,7 @@ def _make_decision(action: str = "entry_long", size_pct: float = 1.0) -> Decisio
         risk_factors=(),
         source="rule_based_v1",
         trigger="regular_4h",
-        raw_signal="entry_ok",
+        raw_signal="long_setup",
     )
 
 
@@ -230,7 +230,7 @@ async def test_gr01_also_blocks_entry_short(session_factory):
         settings={"max_trades_per_day": 3, "max_daily_loss_pct": 5.0},
     )
     d = _make_decision("entry_short")
-    result = await g.check(d, _make_snapshot("entry_sell"))
+    result = await g.check(d, _make_snapshot("short_setup"))
     assert result.approved is False
     assert any("GR-01" in v for v in result.violations)
 
@@ -653,7 +653,7 @@ def _make_pyramid_snapshot(
         pair="BTC_JPY",
         exchange="gmo_coin",
         timestamp=ts,
-        signal="entry_ok",
+        signal="long_setup",
         current_price=10_000_000.0,
         exit_signal={"action": "hold"},
         position=pos,

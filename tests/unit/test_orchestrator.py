@@ -23,7 +23,7 @@ from core.execution.orchestrator import ExecutionOrchestrator
 # ── 공통 헬퍼 ──────────────────────────────────────────────────
 
 
-def _snapshot(signal: str = "entry_ok") -> SignalSnapshot:
+def _snapshot(signal: str = "long_setup") -> SignalSnapshot:
     return SignalSnapshot(
         pair="BTC_JPY",
         exchange="bitflyer",
@@ -47,7 +47,7 @@ def _decision(action: str = "entry_long") -> Decision:
         risk_factors=(),
         source="rule_based_v1",
         trigger="regular_4h",
-        raw_signal="entry_ok",
+        raw_signal="long_setup",
         timestamp=datetime(2026, 4, 1, 12, 0, 0, tzinfo=timezone.utc),
     )
 

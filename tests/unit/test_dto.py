@@ -68,7 +68,7 @@ def _make_decision(**overrides) -> Decision:
         risk_factors=(),
         source="rule_based_v1",
         trigger="regular_4h",
-        raw_signal="entry_ok",
+        raw_signal="long_setup",
     )
     defaults.update(overrides)
     return Decision(**defaults)
@@ -102,7 +102,7 @@ def _make_snapshot(**overrides) -> SignalSnapshot:
         pair="BTC_JPY",
         exchange="bitflyer",
         timestamp=ts,
-        signal="entry_ok",
+        signal="long_setup",
         current_price=5_000_000.0,
         exit_signal={"action": "hold", "reason": "추세 유지"},
     )

@@ -52,8 +52,10 @@ def get_market_summary(ema_slope_pct: Optional[float], rsi: Optional[float], sig
     """포지션 미보유 시 한줄 요약."""
     if ema_slope_pct is None or rsi is None:
         return "데이터 부족"
-    if signal == "exit_warning":
+    if signal == "long_caution":
         return "🔻 하락 전환·전략 유효성 점검"
+    if signal == "short_caution":
+        return "🔺 상승 전환·숏 전략 유효성 점검"
     if ema_slope_pct > 0.1 and 40 <= rsi <= 65:
         return "✅ 진입 임박"
     if ema_slope_pct > 0 and (rsi < 40 or rsi > 65):
@@ -228,9 +230,11 @@ def get_wait_direction(
         return "long"
     if ema is None or ema_slope_pct is None:
         return "neutral"
-    # wait_dip/wait_regime는 이미 롱 조건 부분 충족
-    if signal in ("wait_dip", "wait_regime", "entry_ok"):
+    # long_overheated/wait_regime는 이미 롱 조건 부분 충족, short_caution/short_oversold는 숏 방향
+    if signal in ("long_overheated", "wait_regime", "long_setup"):
         return "long"
+    if signal in ("short_caution", "short_oversold", "short_setup"):
+        return "short"
     if current_price < ema and ema_slope_pct < 0:
         return "short"
     if current_price > ema and ema_slope_pct > 0:

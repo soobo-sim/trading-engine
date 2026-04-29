@@ -3,7 +3,7 @@ BUG-040 / BUG-041 / BUG-042 회귀 테스트
 
 BUG-040: range_pct를 bb_period 윈도우로 제한 → 긴 캔들 리스트에서도 ranging 올바르게 감지
 BUG-041: RegimeGate 갱신이 _on_candle_extra_checks 이전에 실행 → extra_checks=False 때도 갱신
-BUG-042: entry_ok 조건이 regime_trending 요구 → unclear 체제 진입 차단
+BUG-042: long_setup 조건이 regime_trending 요구 → unclear 체제 진입 차단
 """
 import asyncio
 from typing import Optional
@@ -95,10 +95,10 @@ class TestBug040RangePctWindow:
         assert full_range_pct > 3.0, "테스트 캔들 설계 오류 — 과거 변동이 충분히 커야 함"
 
 
-# ── BUG-042: entry_ok가 regime_trending 요구 ─────────────────
+# ── BUG-042: long_setup가 regime_trending 요구 ─────────────────
 
 class TestBug042EntryOkRequiresTrending:
-    """BUG-042: unclear 체제에서 entry_ok 차단 (not regime_ranging → regime_trending)"""
+    """BUG-042: unclear 체제에서 long_setup 차단 (not regime_ranging → regime_trending)"""
 
     def _make_unclear_candles(self, n: int = 30) -> list:
         """bb_width가 trending 임계값(3%) 미만, ranging 임계값 근방인 캔들."""
@@ -120,8 +120,8 @@ class TestBug042EntryOkRequiresTrending:
             candles.append(_FakeCandle(c, c + 150_000, c - 150_000, c))
         return candles
 
-    def test_unclear_regime_blocks_entry_ok(self):
-        """unclear 체제(trending=False, ranging=False)에서 entry_ok 발동 안 됨."""
+    def test_unclear_regime_blocks_long_setup(self):
+        """unclear 체제(trending=False, ranging=False)에서 long_setup 발동 안 됨."""
         # 강제로 unclear 상황을 만드는 파라미터
         params = {
             "bb_width_trending_min": 99.0,   # trending 불가
@@ -131,14 +131,14 @@ class TestBug042EntryOkRequiresTrending:
         }
         candles = self._make_unclear_candles(30)
         result = compute_trend_signal(candles, params=params)
-        # unclear 체제 → regime_trending=False → entry_ok 불가
+        # unclear 체제 → regime_trending=False → long_setup 불가
         assert result["regime"] == "unclear"
-        assert result["signal"] != "entry_ok", (
-            f"unclear 체제에서 entry_ok 발동! (BUG-042 미수정)"
+        assert result["signal"] != "long_setup", (
+            f"unclear 체제에서 long_setup 발동! (BUG-042 미수정)"
         )
 
-    def test_trending_regime_allows_entry_ok(self):
-        """trending 체제 + price>EMA + slope양수 + RSI 범위 → entry_ok 허용."""
+    def test_trending_regime_allows_long_setup(self):
+        """trending 체제 + price>EMA + slope양수 + RSI 범위 → long_setup 허용."""
         params = {
             "bb_width_trending_min": 0.01,  # trending 쉽게 달성
             "entry_rsi_min": 0.0,
@@ -146,18 +146,18 @@ class TestBug042EntryOkRequiresTrending:
         }
         candles = self._make_trending_candles(30)
         result = compute_trend_signal(candles, params=params)
-        # trending 체제이면 entry_ok 가능 (price>ema, slope>0 조건도 맞아야 함)
+        # trending 체제이면 long_setup 가능 (price>ema, slope>0 조건도 맞아야 함)
         if result["regime"] == "trending":
-            # slope와 price>ema 조건이 맞으면 entry_ok
+            # slope와 price>ema 조건이 맞으면 long_setup
             price_above_ema = result.get("current_price", 0) > (result.get("ema") or 0)
             slope_ok = (result.get("ema_slope_pct") or 0) >= 0
             if price_above_ema and slope_ok:
-                assert result["signal"] == "entry_ok", (
-                    f"trending 체제 + 진입 조건 충족인데 entry_ok 아님: {result['signal']}"
+                assert result["signal"] == "long_setup", (
+                    f"trending 체제 + 진입 조건 충족인데 long_setup 아님: {result['signal']}"
                 )
 
-    def test_ranging_regime_gives_wait_regime_not_entry_ok(self):
-        """ranging 체제에서 price>EMA + slope양수여도 entry_ok 아닌 wait_regime."""
+    def test_ranging_regime_gives_wait_regime_not_long_setup(self):
+        """ranging 체제에서 price>EMA + slope양수여도 long_setup 아닌 wait_regime."""
         params = {
             "bb_width_trending_min": 99.0,   # trending 불가
             "bb_width_ranging_max": 99.0,    # 항상 ranging
@@ -168,14 +168,14 @@ class TestBug042EntryOkRequiresTrending:
         from tests.unit.test_signals import _make_uptrend_candles
         candles = _make_uptrend_candles(30)
         result = compute_trend_signal(candles, params=params)
-        # ranging이면 entry_ok 불가
+        # ranging이면 long_setup 불가
         if result["regime"] == "ranging":
-            assert result["signal"] != "entry_ok"
+            assert result["signal"] != "long_setup"
 
-    def test_entry_ok_requires_regime_trending_not_just_not_ranging(self):
+    def test_long_setup_requires_regime_trending_not_just_not_ranging(self):
         """
         핵심: regime_trending=False, regime_ranging=False (= unclear) 시
-        not regime_ranging = True 이지만 entry_ok가 발동되면 안 된다.
+        not regime_ranging = True 이지만 long_setup가 발동되면 안 된다.
         수정 후: regime_trending 필수 → unclear 차단.
         """
         # classify_regime으로 unclear 조건 확인
@@ -204,8 +204,8 @@ class TestBug042EntryOkRequiresTrending:
 
         result = compute_trend_signal(candles, params=params)
         if result["regime"] == "unclear":
-            assert result["signal"] != "entry_ok", (
-                "unclear 체제에서 entry_ok 발동 — BUG-042 미수정"
+            assert result["signal"] != "long_setup", (
+                "unclear 체제에서 long_setup 발동 — BUG-042 미수정"
             )
 
 

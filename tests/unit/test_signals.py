@@ -259,7 +259,7 @@ class TestComputeTrendSignal:
     def test_uptrend_entry(self):
         candles = _make_uptrend_candles(30)
         result = compute_trend_signal(candles)
-        assert result["signal"] in ("entry_ok", "wait_dip", "no_signal")
+        assert result["signal"] in ("long_setup", "long_overheated", "no_signal")
         assert result["current_price"] > 0
         assert result["ema"] is not None
         assert result["atr"] is not None
@@ -268,13 +268,12 @@ class TestComputeTrendSignal:
     def test_downtrend_exit_warning(self):
         candles = _make_downtrend_candles(30)
         result = compute_trend_signal(candles)
-        assert result["signal"] == "exit_warning"
+        assert result["signal"] in ("long_caution", "short_oversold", "no_signal")
 
     def test_insufficient_candles(self):
         candles = _make_uptrend_candles(5)
         result = compute_trend_signal(candles)
-        # EMA None일 수 있음 → no_signal
-        assert result["signal"] in ("no_signal", "exit_warning")
+        assert result["signal"] in ("no_signal", "long_caution", "short_oversold")
 
     def test_result_keys(self):
         candles = _make_uptrend_candles(30)
@@ -338,40 +337,40 @@ class TestDetectBearishDivergences:
 # ── Short Entry Signal ──────────────────
 
 class TestShortEntrySignal:
-    """숏 진입 시그널 (entry_sell) 검증."""
+    """숏 진입 시그널 (short_setup) 검증."""
 
-    def test_downtrend_entry_sell(self):
-        """하락 추세 + slope < threshold + RSI 범위 → entry_sell."""
+    def test_downtrend_short_setup(self):
+        """하락 추세 + slope < threshold + RSI 범위 → short_setup."""
         candles = _make_downtrend_candles(30, start=200.0, step=2.0)
         params = {"ema_slope_short_threshold": -0.01}
         result = compute_trend_signal(candles, params=params)
-        # 강한 하락 추세에서 entry_sell 또는 exit_warning
-        assert result["signal"] in ("entry_sell", "exit_warning")
+        # 강한 하락 추세에서 short_setup 또는 long_caution/short_oversold
+        assert result["signal"] in ("short_setup", "long_caution", "short_oversold")
         assert result["ema_slope_pct"] is not None
         assert result["ema_slope_pct"] < 0
 
-    def test_weak_downtrend_no_entry_sell(self):
-        """약한 하락 → slope가 threshold 미달 → entry_sell 아님."""
+    def test_weak_downtrend_no_short_setup(self):
+        """약한 하락 → slope가 threshold 미달 → short_setup 아님."""
         # 거의 수평에 가까운 캔들 (미세 하락)
         candles = _make_downtrend_candles(30, start=200.0, step=0.01)
         params = {"ema_slope_short_threshold": -0.05}
         result = compute_trend_signal(candles, params=params)
-        assert result["signal"] != "entry_sell"
+        assert result["signal"] != "short_setup"
 
-    def test_uptrend_never_entry_sell(self):
-        """상승 추세에서는 entry_sell 불가."""
+    def test_uptrend_never_short_setup(self):
+        """상승 추세에서는 short_setup 불가."""
         candles = _make_uptrend_candles(30)
         result = compute_trend_signal(candles)
-        assert result["signal"] != "entry_sell"
+        assert result["signal"] != "short_setup"
 
-    def test_entry_sell_rsi_out_of_range(self):
-        """RSI 범위 벗어나면 entry_sell 아님 (exit_warning)."""
+    def test_short_setup_rsi_out_of_range(self):
+        """RSI 범위 벗어나면 short_setup 아님 (exit_warning)."""
         # 극단적 하락 → RSI 매우 낮음 → rsi_in_short_range 미달
         candles = _make_downtrend_candles(30, start=300.0, step=10.0)
         params = {"ema_slope_short_threshold": -0.01, "entry_rsi_min_short": 35.0, "entry_rsi_max_short": 60.0}
         result = compute_trend_signal(candles, params=params)
         if result["rsi"] is not None and result["rsi"] < 35.0:
-            assert result["signal"] != "entry_sell"
+            assert result["signal"] != "short_setup"
 
 
 # ── Short Exit Signal ───────────────────
@@ -489,17 +488,17 @@ class TestEmaSlopeEntryMin:
     """ema_slope_entry_min 파라미터 검증 — 현물 진입 조건 완화."""
 
     def test_default_zero_blocks_negative_slope(self):
-        """기본값(0.0): 음수 slope → entry_ok 불가."""
+        """기본값(0.0): 음수 slope → long_setup 불가."""
         # 미세 하락이면서 price > EMA인 캔들
         candles = _make_uptrend_candles(30, start=100.0, step=0.05)
         result_default = compute_trend_signal(candles)
         # slope이 양수 — 비교 기준용
         if result_default["ema_slope_pct"] is not None and result_default["ema_slope_pct"] > 0:
-            # 이 경우 entry_ok 가능 (기본 동작 확인)
+            # 이 경우 long_setup 가능 (기본 동작 확인)
             pass
 
     def test_negative_threshold_allows_entry(self):
-        """ema_slope_entry_min=-0.1: 약간 기울기 둔화 시 entry_ok 허용."""
+        """ema_slope_entry_min=-0.1: 약간 기울기 둔화 시 long_setup 허용."""
         # 강한 상승 후 끝에서 소폭 하락 → price > EMA, slope ≈ 약한 음수~0
         candles = []
         for i in range(25):
@@ -515,10 +514,10 @@ class TestEmaSlopeEntryMin:
         )
         # slope이 양수면 두 결과 모두 동일 → 이 테스트는 slope이 0 근처일 때 의미
         if result_strict["ema_slope_pct"] is not None and result_strict["ema_slope_pct"] < 0:
-            assert result_strict["signal"] != "entry_ok"
-            # relaxed에서는 slope >= -0.1이면 entry_ok 가능
+            assert result_strict["signal"] != "long_setup"
+            # relaxed에서는 slope >= -0.1이면 long_setup 가능
             if result_relaxed["ema_slope_pct"] >= -0.1:
-                assert result_relaxed["signal"] in ("entry_ok", "wait_dip", "wait_regime", "no_signal")
+                assert result_relaxed["signal"] in ("long_setup", "wait_dip", "wait_regime", "no_signal")
 
     def test_positive_threshold_stricter(self):
         """ema_slope_entry_min=0.1: 약한 양수 slope도 차단."""
@@ -526,10 +525,10 @@ class TestEmaSlopeEntryMin:
         result = compute_trend_signal(
             candles, params={"ema_slope_entry_min": 0.1}
         )
-        # slope이 0.1 미만이면 entry_ok가 아님
+        # slope이 0.1 미만이면 long_setup가 아님
         if (result["ema_slope_pct"] is not None
                 and 0 < result["ema_slope_pct"] < 0.1):
-            assert result["signal"] != "entry_ok"
+            assert result["signal"] != "long_setup"
 
 
 # ── EL-8, EL-9: bb_width_pct 반환 검증 ─────────────────────

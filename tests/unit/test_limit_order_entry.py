@@ -8,7 +8,7 @@ Limit Order 진입 단위 테스트.
   - _check_pending_limit_order(): 시그널 변경 → cancel_order
   - _check_pending_limit_order(): 타임아웃 → cancel_order
   - _open_position_limit() 미구현(base) → None 반환
-  - entry_ok + pending 존재 → 진입 블록 (중복 방지)
+  - long_setup + pending 존재 → 진입 블록 (중복 방지)
   - entry_mode=limit_then_market: limit 실패 시 다음 사이클 market fallback
 """
 from __future__ import annotations
@@ -96,7 +96,6 @@ def _pending(
     pair: str = "btc_jpy",
     order_id: str = "FAKE-001",
     limit_price: float = 9_985_000.0,
-    is_preview: bool = False,
     placed_at: float | None = None,
 ) -> PendingLimitOrder:
     return PendingLimitOrder(
@@ -106,11 +105,10 @@ def _pending(
         amount=0.001,
         invest_jpy=10_000.0,
         placed_at=placed_at or time.time(),
-        signal_at_placement="entry_preview" if is_preview else "entry_ok",
+        signal_at_placement="long_setup",
         params={"atr_multiplier_stop": 2.0, "strategy_id": None},
         atr=50_000.0,
         signal_data={},
-        is_preview=is_preview,
     )
 
 
@@ -137,7 +135,7 @@ def _order(
 
 
 @pytest.mark.asyncio
-async def test_limit_order_placed_on_entry_ok(manager, fake_adapter):
+async def test_limit_order_placed_on_long_setup(manager, fake_adapter):
     """
     Given: entry_mode=limit, ATR 있음, JPY 잔고 충분
     When:  _open_position_limit() 호출
@@ -155,41 +153,13 @@ async def test_limit_order_placed_on_entry_ok(manager, fake_adapter):
         atr=50_000.0,
         params=params,
         signal_data={},
-        is_preview=False,
     )
 
     assert result is not None
     assert isinstance(result, PendingLimitOrder)
     # limit_price = 10_000_000 - 50_000 × 0.15 = 9_992_500
     assert result.limit_price == pytest.approx(9_992_500.0, rel=0.001)
-    assert result.is_preview is False
-    assert result.signal_at_placement == "entry_ok"
-
-
-@pytest.mark.asyncio
-async def test_limit_order_placed_for_preview(manager, fake_adapter):
-    """
-    Given: is_preview=True
-    When:  _open_position_limit() 호출
-    Then:  PendingLimitOrder.is_preview=True, signal_at_placement="entry_preview"
-    """
-    params = {
-        "position_size_pct": 1.0,
-        "min_order_jpy": 500,
-        "limit_offset_atr_ratio": 0.15,
-    }
-    result = await manager._open_position_limit(
-        pair="btc_jpy",
-        price=10_000_000.0,
-        atr=50_000.0,
-        params=params,
-        signal_data={},
-        is_preview=True,
-    )
-
-    assert result is not None
-    assert result.is_preview is True
-    assert result.signal_at_placement == "entry_preview"
+    assert result.signal_at_placement == "long_setup"
 
 
 @pytest.mark.asyncio
@@ -246,7 +216,7 @@ async def test_pending_limit_order_completed_calls_finalize(manager):
     manager._finalize_limit_entry = AsyncMock()
 
     result = await manager._check_pending_limit_order(
-        "btc_jpy", pending, "entry_ok", {"limit_timeout_sec": 300}
+        "btc_jpy", pending, "long_setup", {"limit_timeout_sec": 300}
     )
 
     assert result is True
@@ -268,7 +238,7 @@ async def test_pending_limit_order_cancelled_removes_pending(manager):
     manager._adapter.get_order = AsyncMock(return_value=cancelled_order)
 
     result = await manager._check_pending_limit_order(
-        "btc_jpy", pending, "entry_ok", {"limit_timeout_sec": 300}
+        "btc_jpy", pending, "long_setup", {"limit_timeout_sec": 300}
     )
 
     assert result is False
@@ -314,7 +284,7 @@ async def test_pending_limit_order_timeout_cancels_order(manager):
     manager._adapter.cancel_order = AsyncMock(return_value=True)
 
     result = await manager._check_pending_limit_order(
-        "btc_jpy", pending, "entry_ok", {"limit_timeout_sec": 300}
+        "btc_jpy", pending, "long_setup", {"limit_timeout_sec": 300}
     )
 
     assert result is False
@@ -336,7 +306,7 @@ async def test_pending_limit_order_open_waits(manager):
     manager._adapter.get_order = AsyncMock(return_value=open_order)
 
     result = await manager._check_pending_limit_order(
-        "btc_jpy", pending, "entry_ok", {"limit_timeout_sec": 300}
+        "btc_jpy", pending, "long_setup", {"limit_timeout_sec": 300}
     )
 
     assert result is True
@@ -344,7 +314,7 @@ async def test_pending_limit_order_open_waits(manager):
 
 
 # ──────────────────────────────────────────────────────────────
-# _finalize_limit_entry() — preview vs non-preview
+# _finalize_limit_entry()
 # ──────────────────────────────────────────────────────────────
 
 
@@ -355,7 +325,7 @@ async def test_finalize_limit_entry_registers_position(manager):
     When:  _finalize_limit_entry()
     Then:  manager._position[pair] 설정됨 (entry_price, stop_loss)
     """
-    pending = _pending(is_preview=False)
+    pending = _pending()
     completed_order = _order(status=OrderStatus.COMPLETED, price=9_985_000.0)
 
     # _record_open mocking
@@ -367,26 +337,6 @@ async def test_finalize_limit_entry_registers_position(manager):
     assert pos is not None
     assert pos.entry_price == pytest.approx(9_985_000.0)
     assert pos.stop_loss_price is not None  # ATR × multiplier 로 계산됨
-    assert pos.extra.get("preview_entry") is not True  # preview 아님
-
-
-@pytest.mark.asyncio
-async def test_finalize_limit_entry_preview_sets_flag(manager):
-    """
-    Given: is_preview=True인 pending limit order 체결
-    When:  _finalize_limit_entry()
-    Then:  pos.extra["preview_entry"] = True
-    """
-    pending = _pending(is_preview=True)
-    completed_order = _order(status=OrderStatus.COMPLETED, price=9_985_000.0)
-
-    manager._record_open = AsyncMock(return_value=99)
-
-    await manager._finalize_limit_entry("btc_jpy", completed_order, pending)
-
-    pos = manager._position.get("btc_jpy")
-    assert pos is not None
-    assert pos.extra.get("preview_entry") is True
 
 
 # ──────────────────────────────────────────────────────────────
@@ -410,7 +360,7 @@ async def test_pending_limit_order_blocks_duplicate_entry(manager):
     manager._open_position = AsyncMock()
 
     result = await manager._check_pending_limit_order(
-        "btc_jpy", pending, "entry_ok", {"limit_timeout_sec": 300}
+        "btc_jpy", pending, "long_setup", {"limit_timeout_sec": 300}
     )
 
     assert result is True
@@ -459,7 +409,7 @@ async def test_check_pending_get_order_exception_returns_true(manager):
     manager._adapter.get_order = AsyncMock(side_effect=RuntimeError("network error"))
 
     result = await manager._check_pending_limit_order(
-        "btc_jpy", pending, "entry_ok", {"limit_timeout_sec": 300}
+        "btc_jpy", pending, "long_setup", {"limit_timeout_sec": 300}
     )
 
     assert result is True
@@ -478,7 +428,7 @@ async def test_check_pending_none_order_treated_as_cancelled(manager):
     manager._adapter.get_order = AsyncMock(return_value=None)
 
     result = await manager._check_pending_limit_order(
-        "btc_jpy", pending, "entry_ok", {"limit_timeout_sec": 300}
+        "btc_jpy", pending, "long_setup", {"limit_timeout_sec": 300}
     )
 
     assert result is False
@@ -492,7 +442,7 @@ async def test_open_position_limit_stop_loss_based_on_atr(manager, fake_adapter)
     When:  _finalize_limit_entry() 후 포지션 확인
     Then:  stop_loss_price = exec_price - ATR × multiplier
     """
-    pending = _pending(is_preview=False)  # atr=50_000, params multiplier=2.0
+    pending = _pending()  # atr=50_000, params multiplier=2.0
     completed_order = _order(status=OrderStatus.COMPLETED, price=9_985_000.0)
     manager._record_open = AsyncMock(return_value=1)
 
@@ -502,24 +452,3 @@ async def test_open_position_limit_stop_loss_based_on_atr(manager, fake_adapter)
     expected_sl = round(9_985_000.0 - 50_000.0 * 2.0, 6)  # 9_885_000
     assert pos is not None
     assert pos.stop_loss_price == pytest.approx(expected_sl)
-
-
-@pytest.mark.asyncio
-async def test_pending_limit_order_no_signal_change_entry_preview_ok(manager):
-    """
-    Given: limit order OPEN 상태, 시그널 entry_preview (프리뷰 유지)
-    When:  _check_pending_limit_order()
-    Then:  entry_preview도 entry_ok와 동일하게 대기 (취소 안 함)
-    """
-    pending = _pending(is_preview=True)
-    manager._pending_limit_orders["btc_jpy"] = pending
-
-    open_order = _order(status=OrderStatus.OPEN)
-    manager._adapter.get_order = AsyncMock(return_value=open_order)
-
-    result = await manager._check_pending_limit_order(
-        "btc_jpy", pending, "entry_preview", {"limit_timeout_sec": 300}
-    )
-
-    assert result is True
-    assert "btc_jpy" in manager._pending_limit_orders

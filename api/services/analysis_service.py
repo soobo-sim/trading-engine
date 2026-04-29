@@ -694,13 +694,13 @@ async def get_trend_signal(
 
     # 시그널 결정
     if price_above_ema is False:
-        signal = "exit_warning"
+        signal = "long_caution"
         reason = "현재가가 EMA 아래 이탈 — 포지션 보유 중이라면 청산 검토"
     elif price_above_ema and ema_slope_positive and rsi_in_entry_range and not regime_ranging:
-        signal = "entry_ok"
+        signal = "long_setup"
         reason = "모든 진입 조건 충족 — EMA 위, EMA 기울기 양수, RSI 눌림목, 체제 trending/unclear"
     elif price_above_ema and ema_slope_positive and rsi_overbought:
-        signal = "wait_dip"
+        signal = "long_overheated"
         reason = f"RSI {rsi} 과매수 — 눌림목(RSI {rsi_entry_low}~{rsi_entry_high}) 대기"
     elif price_above_ema and ema_slope_positive and regime_ranging:
         signal = "wait_regime"

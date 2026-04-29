@@ -92,7 +92,6 @@ class TestRegimeGateNoBlock:
         mock_snapshot.atr = 100000.0
         mock_snapshot.ema_slope_pct = 0.1
         mock_snapshot.rsi = 55.0
-        mock_snapshot.is_preview = False
         mock_snapshot.pair = "btc_jpy"
 
         mgr._on_entry_signal = AsyncMock()
@@ -129,7 +128,6 @@ class TestRegimeGateBlocks:
         mock_snapshot.atr = 100000.0
         mock_snapshot.ema_slope_pct = 0.1
         mock_snapshot.rsi = 55.0
-        mock_snapshot.is_preview = False
         mock_snapshot.pair = "btc_jpy"
 
         mgr._on_entry_signal = AsyncMock()
@@ -161,7 +159,6 @@ class TestRegimeGateBlocks:
         mock_snapshot.atr = 100000.0
         mock_snapshot.ema_slope_pct = -0.1
         mock_snapshot.rsi = 45.0
-        mock_snapshot.is_preview = False
         mock_snapshot.pair = "btc_jpy"
 
         mgr._on_entry_signal = AsyncMock()
@@ -199,7 +196,6 @@ class TestRegimeGateAllows:
         mock_snapshot.atr = 100000.0
         mock_snapshot.ema_slope_pct = 0.1
         mock_snapshot.rsi = 55.0
-        mock_snapshot.is_preview = False
         mock_snapshot.pair = "btc_jpy"
 
         mgr._on_entry_signal = AsyncMock()
@@ -322,7 +318,6 @@ class TestIT01RangingBoxAllowsTrendBlocks:
         mock_snap.atr = 100_000.0
         mock_snap.ema_slope_pct = 0.1
         mock_snap.rsi = 50.0
-        mock_snap.is_preview = False
         mock_snap.pair = "btc_jpy"
 
         box_mgr._on_entry_signal = AsyncMock()
@@ -349,7 +344,6 @@ class TestIT01RangingBoxAllowsTrendBlocks:
         mock_snap.atr = 100_000.0
         mock_snap.ema_slope_pct = 0.1
         mock_snap.rsi = 50.0
-        mock_snap.is_preview = False
         mock_snap.pair = "btc_jpy"
 
         trend_mgr._on_entry_signal = AsyncMock()
@@ -383,7 +377,6 @@ class TestIT02TrendingTrendAllowsBoxBlocks:
         mock_snap.atr = 100_000.0
         mock_snap.ema_slope_pct = 0.1
         mock_snap.rsi = 50.0
-        mock_snap.is_preview = False
         mock_snap.pair = "btc_jpy"
 
         trend_mgr._on_entry_signal = AsyncMock()
@@ -410,7 +403,6 @@ class TestIT02TrendingTrendAllowsBoxBlocks:
         mock_snap.atr = 100_000.0
         mock_snap.ema_slope_pct = 0.1
         mock_snap.rsi = 50.0
-        mock_snap.is_preview = False
         mock_snap.pair = "btc_jpy"
 
         box_mgr._on_entry_signal = AsyncMock()
@@ -479,7 +471,6 @@ class TestIT04UnclearBlocksBoth:
         mock_snap.atr = 100_000.0
         mock_snap.ema_slope_pct = 0.1
         mock_snap.rsi = 50.0
-        mock_snap.is_preview = False
         mock_snap.pair = "btc_jpy"
 
         trend_mgr._on_entry_signal = AsyncMock()
@@ -512,7 +503,6 @@ class TestIT04UnclearBlocksBoth:
         mock_snap.atr = 100_000.0
         mock_snap.ema_slope_pct = 0.1
         mock_snap.rsi = 50.0
-        mock_snap.is_preview = False
         mock_snap.pair = "btc_jpy"
 
         box_mgr._on_entry_signal = AsyncMock()
@@ -555,7 +545,6 @@ class TestIT05WarmUpBlocksBoth:
         mock_snap.atr = 100_000.0
         mock_snap.ema_slope_pct = 0.1
         mock_snap.rsi = 50.0
-        mock_snap.is_preview = False
         mock_snap.pair = "btc_jpy"
 
         trend_mgr._on_entry_signal = AsyncMock()
@@ -586,7 +575,6 @@ class TestIT05WarmUpBlocksBoth:
         mock_snap.atr = 100_000.0
         mock_snap.ema_slope_pct = 0.1
         mock_snap.rsi = 50.0
-        mock_snap.is_preview = False
         mock_snap.pair = "btc_jpy"
 
         box_mgr._on_entry_signal = AsyncMock()

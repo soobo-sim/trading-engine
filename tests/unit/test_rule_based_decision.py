@@ -52,32 +52,32 @@ def _pos(stop_tightened: bool = False) -> PositionDTO:
 
 
 @pytest.mark.asyncio
-async def test_entry_long_when_entry_ok_no_position():
+async def test_entry_long_when_long_setup_no_position():
     """
-    Given: signal=entry_ok, 포지션 없음
+    Given: signal=long_setup, 포지션 없음
     When:  decide() 호출
     Then:  action=entry_long, source=rule_based_v1
     """
     dec = RuleBasedDecision()
-    snapshot = _make_snapshot("entry_ok", position=None)
+    snapshot = _make_snapshot("long_setup", position=None)
     result = await dec.decide(snapshot)
 
     assert result.action == "entry_long"
     assert result.source == "rule_based_v1"
     assert result.trigger == "regular_4h"
-    assert result.raw_signal == "entry_ok"
+    assert result.raw_signal == "long_setup"
     assert result.stop_loss == 4_900_000.0
 
 
 @pytest.mark.asyncio
-async def test_entry_short_when_entry_sell_no_position():
+async def test_entry_short_when_short_setup_no_position():
     """
-    Given: signal=entry_sell, 포지션 없음
+    Given: signal=short_setup, 포지션 없음
     When:  decide() 호출
     Then:  action=entry_short
     """
     dec = RuleBasedDecision()
-    snapshot = _make_snapshot("entry_sell", position=None)
+    snapshot = _make_snapshot("short_setup", position=None)
     result = await dec.decide(snapshot)
 
     assert result.action == "entry_short"
@@ -103,16 +103,16 @@ async def test_hold_when_no_signal_no_position():
 @pytest.mark.asyncio
 async def test_exit_when_exit_warning_with_position():
     """
-    Given: signal=exit_warning, 포지션 있음
+    Given: signal=long_caution, 포지션 있음
     When:  decide() 호출
-    Then:  action=exit, trigger=exit_warning
+    Then:  action=exit, trigger=long_caution
     """
     dec = RuleBasedDecision()
-    snapshot = _make_snapshot("exit_warning", position=_pos())
+    snapshot = _make_snapshot("long_caution", position=_pos())
     result = await dec.decide(snapshot)
 
     assert result.action == "exit"
-    assert result.trigger == "exit_warning"
+    assert result.trigger == "long_caution"
     assert result.size_pct == 1.0  # 전량 청산
 
 
@@ -207,7 +207,7 @@ async def test_size_pct_comes_from_params():
     Then:  size_pct=0.5
     """
     dec = RuleBasedDecision()
-    snapshot = _make_snapshot("entry_ok", position=None, params={"position_size_pct": 0.5})
+    snapshot = _make_snapshot("long_setup", position=None, params={"position_size_pct": 0.5})
     result = await dec.decide(snapshot)
 
     assert result.size_pct == 0.5
@@ -221,7 +221,7 @@ async def test_rsi_risk_factor_added_when_high():
     Then:  risk_factors에 RSI 경고 포함
     """
     dec = RuleBasedDecision()
-    snapshot = _make_snapshot("entry_ok", position=None, rsi=62.0)
+    snapshot = _make_snapshot("long_setup", position=None, rsi=62.0)
     result = await dec.decide(snapshot)
 
     assert result.action == "entry_long"
@@ -246,15 +246,15 @@ async def test_exit_warning_with_no_position_returns_hold():
 
 
 @pytest.mark.asyncio
-async def test_entry_ok_with_existing_position_returns_hold():
+async def test_long_setup_with_existing_position_returns_hold():
     """
-    Given: signal=entry_ok, 포지션 이미 있음
+    Given: signal=long_setup, 포지션 이미 있음
     When:  decide() 호출
     Then:  action=hold — 이중 진입 방지
     """
     dec = RuleBasedDecision()
     snapshot = _make_snapshot(
-        "entry_ok",
+        "long_setup",
         position=_pos(),
         exit_action="hold",
     )
@@ -287,7 +287,7 @@ async def test_full_exit_with_no_triggers_uses_generic_trigger():
 async def test_decision_has_timestamp():
     """모든 Decision에 timestamp가 설정됨."""
     dec = RuleBasedDecision()
-    snapshot = _make_snapshot("entry_ok", position=None)
+    snapshot = _make_snapshot("long_setup", position=None)
     result = await dec.decide(snapshot)
 
     assert result.timestamp is not None
@@ -297,7 +297,7 @@ async def test_decision_has_timestamp():
 async def test_source_is_always_rule_based_v1():
     """source는 항상 rule_based_v1."""
     dec = RuleBasedDecision()
-    for signal, pos in [("entry_ok", None), ("exit_warning", _pos()), ("no_signal", None)]:
+    for signal, pos in [("long_setup", None), ("exit_warning", _pos()), ("no_signal", None)]:
         snapshot = _make_snapshot(signal, position=pos)
         result = await dec.decide(snapshot)
         assert result.source == "rule_based_v1", f"signal={signal}: source={result.source}"
@@ -313,13 +313,13 @@ class TestRuleBasedDecisionLogging:
     @pytest.mark.asyncio
     async def test_entry_long_logs_info(self, caplog):
         """
-        Given: signal=entry_ok, 포지션 없음
+        Given: signal=long_setup, 포지션 없음
         When:  decide()
         Then:  INFO 로그 1건 — action=entry_long 포함
         """
         import logging
         dec = RuleBasedDecision()
-        snapshot = _make_snapshot("entry_ok", position=None)
+        snapshot = _make_snapshot("long_setup", position=None)
         with caplog.at_level(logging.INFO, logger="core.judge.decision.rule_based"):
             result = await dec.decide(snapshot)
         assert result.action == "entry_long"
@@ -349,13 +349,13 @@ class TestRuleBasedDecisionLogging:
     @pytest.mark.asyncio
     async def test_exit_warning_logs_info(self, caplog):
         """
-        Given: signal=exit_warning, 포지션 있음
+        Given: signal=long_caution, 포지션 있음
         When:  decide()
         Then:  INFO 로그 1건 — action=exit 포함
         """
         import logging
         dec = RuleBasedDecision()
-        snapshot = _make_snapshot("exit_warning", position=_pos())
+        snapshot = _make_snapshot("long_caution", position=_pos())
         with caplog.at_level(logging.INFO, logger="core.judge.decision.rule_based"):
             result = await dec.decide(snapshot)
         assert result.action == "exit"

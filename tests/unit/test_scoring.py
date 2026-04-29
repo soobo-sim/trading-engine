@@ -83,12 +83,12 @@ def test_v13_box_mid_readiness_zero_when_far():
 
 
 # ══════════════════════════════════════════════
-# V-14: 추세 entry_ok → readiness = 1.0
+# V-14: 추세 long_setup → readiness = 1.0
 # ══════════════════════════════════════════════
 
-def test_v14_trend_entry_ok_readiness_one():
+def test_v14_trend_long_setup_readiness_one():
     readiness = calculate_trend_readiness(
-        signal="entry_ok",
+        signal="long_setup",
         rsi=45.0,
         entry_rsi_min=30.0,
         entry_rsi_max=60.0,
@@ -96,9 +96,9 @@ def test_v14_trend_entry_ok_readiness_one():
     assert readiness == 1.0
 
 
-def test_v14_trend_entry_sell_readiness_one():
+def test_v14_trend_short_setup_readiness_one():
     readiness = calculate_trend_readiness(
-        signal="entry_sell",
+        signal="short_setup",
         rsi=55.0,
         entry_rsi_min=35.0,
         entry_rsi_max=60.0,
@@ -222,7 +222,7 @@ def test_v19_no_paper_trades_detail_has_win_rate():
 
 def test_v20_paper_20_wf_passed_confidence_high():
     result = calculate_trend_score(
-        signal="entry_ok",
+        signal="long_setup",
         rsi=45.0,
         entry_rsi_min=30.0,
         entry_rsi_max=60.0,
@@ -238,7 +238,7 @@ def test_v20_paper_20_wf_passed_confidence_high():
 def test_v20_paper_20_no_wf_confidence_medium():
     """20건이지만 WF 미통과 → medium."""
     result = calculate_trend_score(
-        signal="entry_ok",
+        signal="long_setup",
         rsi=45.0,
         entry_rsi_min=30.0,
         entry_rsi_max=60.0,
@@ -489,7 +489,7 @@ class TestEdgeCases:
     def test_trend_score_extra_detail_merged(self):
         """추세 extra_detail 병합."""
         result = calculate_trend_score(
-            signal="entry_ok",
+            signal="long_setup",
             rsi=45.0,
             entry_rsi_min=30.0,
             entry_rsi_max=60.0,

@@ -257,11 +257,11 @@ def test_base_trend_signal_changed_logs_info(caplog):
     mgr._last_signal["BTC_JPY"] = "hold"
 
     with caplog.at_level(logging.DEBUG, logger="core.strategy.base_trend"):
-        # 시그널 변경: hold → entry_ok
-        signal_changed = "entry_ok" != mgr._last_signal.get("BTC_JPY", "")
+        # 시그널 변경: hold → long_setup
+        signal_changed = "long_setup" != mgr._last_signal.get("BTC_JPY", "")
         if signal_changed:
-            mgr._last_signal["BTC_JPY"] = "entry_ok"
-        _sig_level = "entry_ok" == "hold" or not signal_changed
+            mgr._last_signal["BTC_JPY"] = "long_setup"
+        _sig_level = "long_setup" == "hold" or not signal_changed
         _sig_log = __import__("logging").getLogger("core.strategy.base_trend")
         level = logging.DEBUG if _sig_level else logging.INFO
         _sig_log.log(level, "[TrendMgr] BTC_JPY: 롱 진입 조건 충족 (¥100)")
@@ -273,14 +273,14 @@ def test_base_trend_signal_changed_logs_info(caplog):
 def test_base_trend_signal_repeated_logs_debug(caplog):
     """동일 시그널 반복 시 DEBUG로 다운그레이드된다."""
     mgr = _make_trend_manager()
-    mgr._last_signal["BTC_JPY"] = "entry_sell"  # 이미 entry_sell 상태
+    mgr._last_signal["BTC_JPY"] = "short_setup"  # 이미 short_setup 상태
 
     with caplog.at_level(logging.DEBUG, logger="core.strategy.base_trend"):
-        # 시그널 동일: entry_sell → entry_sell (변경 없음)
-        signal_changed = "entry_sell" != mgr._last_signal.get("BTC_JPY", "")
+        # 시그널 동일: short_setup → short_setup (변경 없음)
+        signal_changed = "short_setup" != mgr._last_signal.get("BTC_JPY", "")
         if signal_changed:
-            mgr._last_signal["BTC_JPY"] = "entry_sell"
-        _sig_level = "entry_sell" == "hold" or not signal_changed
+            mgr._last_signal["BTC_JPY"] = "short_setup"
+        _sig_level = "short_setup" == "hold" or not signal_changed
         _sig_log = __import__("logging").getLogger("core.strategy.base_trend")
         level = logging.DEBUG if _sig_level else logging.INFO
         _sig_log.log(level, "[TrendMgr] BTC_JPY: 숏 진입 조건 충족 (¥11,420,000)")
@@ -306,7 +306,7 @@ def test_base_trend_last_signal_initialized_empty(caplog):
 async def test_base_trend_start_resets_last_signal(caplog):
     """start() 실제 호출 시 _last_signal[pair]가 빈 문자열로 재초기화된다."""
     mgr = _make_trend_manager()
-    mgr._last_signal["BTC_JPY"] = "entry_sell"  # 이전 상태 잔류
+    mgr._last_signal["BTC_JPY"] = "short_setup"  # 이전 상태 잔류
 
     with (
         patch.object(mgr, "_detect_existing_position", return_value=None),
@@ -321,7 +321,7 @@ async def test_base_trend_start_resets_last_signal(caplog):
 def test_base_trend_signal_to_hold_logs_debug(caplog):
     """비-hold 시그널 → hold 전환: hold는 '시그널 변경'이어도 항상 DEBUG."""
     mgr = _make_trend_manager()
-    mgr._last_signal["BTC_JPY"] = "entry_sell"
+    mgr._last_signal["BTC_JPY"] = "short_setup"
 
     with caplog.at_level(logging.DEBUG, logger="core.strategy.base_trend"):
         signal = "hold"
@@ -340,12 +340,12 @@ def test_base_trend_signal_to_hold_logs_debug(caplog):
 
 
 def test_base_trend_signal_nonhold_transition_logs_info(caplog):
-    """비-hold 시그널 간 전환 (entry_sell → entry_ok): INFO로 출력."""
+    """비-hold 시그널 간 전환 (short_setup → long_setup): INFO로 출력."""
     mgr = _make_trend_manager()
-    mgr._last_signal["BTC_JPY"] = "entry_sell"
+    mgr._last_signal["BTC_JPY"] = "short_setup"
 
     with caplog.at_level(logging.DEBUG, logger="core.strategy.base_trend"):
-        signal = "entry_ok"
+        signal = "long_setup"
         signal_changed = signal != mgr._last_signal.get("BTC_JPY", "")
         if signal_changed:
             mgr._last_signal["BTC_JPY"] = signal
@@ -357,7 +357,7 @@ def test_base_trend_signal_nonhold_transition_logs_info(caplog):
     info_msgs = [r for r in caplog.records if r.levelno == logging.INFO]
     assert any("롱 진입 조건 충족" in r.message for r in info_msgs)
     # _last_signal 상태도 업데이트됩니다
-    assert mgr._last_signal["BTC_JPY"] == "entry_ok"
+    assert mgr._last_signal["BTC_JPY"] == "long_setup"
 
 
 # ──────────────────────────────────────────────────────────────
@@ -372,36 +372,36 @@ def _make_mock_pos(side="buy"):
 
 
 def test_describe_signal_exit_warning_no_position():
-    """DS-01: 포지션 없을 때 exit_warning → 추세 약세, 진입 보류."""
+    """DS-01: 포지션 없을 때 long_caution → 롱 약세, 진입 보류."""
     mgr = _make_trend_manager()
-    assert mgr._describe_signal("exit_warning", None) == "추세 약세, 진입 보류"
+    assert mgr._describe_signal("long_caution", None) == "롱 약세, 진입 보류"
 
 
 def test_describe_signal_exit_warning_with_position():
-    """DS-02: 포지션 있을 때 exit_warning → 추세 이탈, 청산 경고."""
+    """DS-02: 포지션 있을 때 long_caution → 롱 추세 이탈, 청산 경고."""
     mgr = _make_trend_manager()
     pos = _make_mock_pos("buy")
-    assert mgr._describe_signal("exit_warning", pos) == "추세 이탈, 청산 경고"
+    assert mgr._describe_signal("long_caution", pos) == "롱 추세 이탈, 청산 경고"
 
 
-def test_describe_signal_entry_ok_no_position():
-    """DS-03: 포지션 없을 때 entry_ok → 롱 진입 조건 충족."""
+def test_describe_signal_long_setup_no_position():
+    """DS-03: 포지션 없을 때 long_setup → 롱 진입 조건 충족."""
     mgr = _make_trend_manager()
-    assert mgr._describe_signal("entry_ok", None) == "롱 진입 조건 충족"
+    assert mgr._describe_signal("long_setup", None) == "롱 진입 조건 충족"
 
 
-def test_describe_signal_entry_ok_with_position():
-    """DS-04: 포지션 있을 때 entry_ok → 추세 유지 중."""
+def test_describe_signal_long_setup_with_position():
+    """DS-04: 포지션 있을 때 long_setup → 추세 유지 중."""
     mgr = _make_trend_manager()
     pos = _make_mock_pos("buy")
-    assert mgr._describe_signal("entry_ok", pos) == "추세 유지 중"
+    assert mgr._describe_signal("long_setup", pos) == "추세 유지 중"
 
 
 def test_describe_signal_wait_dip():
-    """DS-05: wait_dip → RSI 과매수, 눌림 대기 (포지션 여부 무관)."""
+    """DS-05: long_overheated → 롱 RSI 과열, 눌림 대기 (포지션 여부 무관)."""
     mgr = _make_trend_manager()
-    assert mgr._describe_signal("wait_dip", None) == "RSI 과매수, 눌림 대기"
-    assert mgr._describe_signal("wait_dip", _make_mock_pos()) == "RSI 과매수, 눌림 대기"
+    assert mgr._describe_signal("long_overheated", None) == "롱 RSI 과열, 눌림 대기"
+    assert mgr._describe_signal("long_overheated", _make_mock_pos()) == "롱 RSI 과열, 눌림 대기"
 
 
 def test_describe_signal_fallback_unknown():
@@ -444,21 +444,23 @@ def test_describe_signal_no_signal():
 
 
 def test_describe_signal_exit_warning_short_position():
-    """E3: 숏 포지션(side='sell') + exit_warning → 추세 이탈, 청산 경고."""
+    """E3: 숏 포지션(side='sell') + short_caution → 숏 추세 이탈, 청산 경고."""
     mgr = _make_trend_manager()
     pos = _make_mock_pos(side="sell")
-    assert mgr._describe_signal("exit_warning", pos) == "추세 이탈, 청산 경고"
+    assert mgr._describe_signal("short_caution", pos) == "숏 추세 이탈, 청산 경고"
 
 
 def test_base_trend_check_exit_warning_log_no_old_message(caplog):
     """E4: base_trend._check_exit_warning 로그에 'exit_warning' 변수명이 노출되지 않는다."""
     mgr = _make_trend_manager()
-    # 현재 포지션 존재 + ema보다 낙찰 가격 닮라 → exit_warning 반환 조건
-    mgr._position["BTC_JPY"] = MagicMock()  # 포지션 존재
+    # 현재 포지션 존재 + ema보다 낙찰 가격 → long_caution 반환 조건
+    mock_pos = MagicMock()
+    mock_pos.extra = {"side": "buy"}
+    mgr._position["BTC_JPY"] = mock_pos  # 포지션 존재
     with caplog.at_level(logging.INFO, logger="core.strategy.base_trend"):
-        # ema(200) 밀접한 price(190) 조건으로 exit_warning 유도
-        result = mgr._check_exit_warning("BTC_JPY", "entry_ok", 190.0, 200.0, MagicMock())
-    assert result in ("exit_warning", "entry_ok")  # 실제 SL 로직에 따라 다를 수 있음
+        # ema(200) 밀접한 price(190) 조건으로 long_caution 유도
+        result = mgr._check_exit_warning("BTC_JPY", "long_setup", 190.0, 200.0, mock_pos)
+    assert result in ("long_caution", "long_setup")  # 실제 SL 로직에 따라 다를 수 있음
     info_msgs = [r.message for r in caplog.records if r.levelno == logging.INFO]
     # 신구 메시지 형식("exit_warning 즉각 보정") 없어야 함
     assert not any("exit_warning 즉각 보정" in m for m in info_msgs)
@@ -485,9 +487,9 @@ def test_cfd_check_exit_warning_log_no_old_message(caplog):
     pos.extra = {"side": "buy"}
 
     with caplog.at_level(logging.INFO, logger="core.strategy.plugins.cfd_trend_following.manager"):
-        result = mgr._check_exit_warning("USD_JPY", "wait_dip", 100.0, 200.0, pos)
+        result = mgr._check_exit_warning("USD_JPY", "long_overheated", 100.0, 200.0, pos)
 
-    assert result == "exit_warning"
+    assert result == "long_caution"
     info_msgs = [r.message for r in caplog.records if r.levelno == logging.INFO]
     # 구 메시지("→ exit_warning") 없어야 함
     assert not any("→ exit_warning" in m for m in info_msgs)

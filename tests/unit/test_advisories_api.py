@@ -347,10 +347,10 @@ async def test_get_latest_exchange_isolation(db_factory):
 # ──────────────────────────────────────────────────────────────
 
 
-def test_ec01_post_hold_advisory_with_signal_entry_ok_policy(db_factory):
+def test_ec01_post_hold_advisory_with_signal_long_setup_policy(db_factory):
     """
-    EC-01: action=hold, hold_override_policy=signal_entry_ok
-    → 201 + 응답에 hold_override_policy="signal_entry_ok" 반영
+    EC-01: action=hold, hold_override_policy=signal_long_setup
+    → 201 + 응답에 hold_override_policy="signal_long_setup" 반영
     """
     client = _build_client(db_factory)
     body = {
@@ -358,7 +358,7 @@ def test_ec01_post_hold_advisory_with_signal_entry_ok_policy(db_factory):
         "action": "hold",
         "confidence": 0.65,
         "reasoning": "RSI 65 과매수로 홀드, 시그널 해소 시 진입 허용",
-        "hold_override_policy": "signal_entry_ok",
+        "hold_override_policy": "signal_long_setup",
         "ttl_hours": 5.0,
     }
     resp = client.post("/api/advisories", json=body)
@@ -366,12 +366,12 @@ def test_ec01_post_hold_advisory_with_signal_entry_ok_policy(db_factory):
     assert resp.status_code == 201
     data = resp.json()
     assert data["action"] == "hold"
-    assert data["hold_override_policy"] == "signal_entry_ok"
+    assert data["hold_override_policy"] == "signal_long_setup"
 
 
 def test_ec02_post_entry_long_advisory_override_policy_forced_none(db_factory):
     """
-    EC-02: action=entry_long, hold_override_policy=signal_entry_ok 지정
+    EC-02: action=entry_long, hold_override_policy=signal_long_setup 지정
     → hold 아닌 advisory이므로 DB에 "none" 강제 저장
     → 응답 hold_override_policy="none"
     """
@@ -379,7 +379,7 @@ def test_ec02_post_entry_long_advisory_override_policy_forced_none(db_factory):
     body = {
         **_VALID_BODY,
         "action": "entry_long",
-        "hold_override_policy": "signal_entry_ok",  # 무의미, 강제 none
+        "hold_override_policy": "signal_long_setup",  # 무의미, 강제 none
     }
     resp = client.post("/api/advisories", json=body)
 

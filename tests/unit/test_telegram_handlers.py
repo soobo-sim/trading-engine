@@ -865,7 +865,7 @@ class TestConclusionWithPosition:
             'regime_status': 'trending',
             'regime_consecutive': 5,
             'has_position': has_pos,
-            'signal': 'entry_sell',
+            'signal': 'short_setup',
         })
         if all_met:
             # 숏 4조건 모두 충족
@@ -979,18 +979,18 @@ class TestGateStatusThreeLevel:
         assert "진입 허용" not in text
 
     @pytest.mark.asyncio
-    async def test_gs02_entry_ok_shows_long_signal(self):
-        """GS-02: trending ×3, signal=entry_ok → '신호 발생 (롱)' 표시."""
-        h = self._make_handler('trending', 3, 'entry_ok')
+    async def test_gs02_long_setup_shows_long_signal(self):
+        """GS-02: trending ×3, signal=long_setup → '신호 발생 (롱)' 표시."""
+        h = self._make_handler('trending', 3, 'long_setup')
         with patch("core.shared.logging.telegram_handlers._send_telegram", new_callable=AsyncMock) as m:
             await h._send_periodic_summary()
             text = m.call_args[0][2]
         assert "신호 발생 (롱)" in text
 
     @pytest.mark.asyncio
-    async def test_gs03_entry_sell_shows_short_signal(self):
-        """GS-03: trending ×4, signal=entry_sell → '신호 발생 (숏)' 표시."""
-        h = self._make_handler('trending', 4, 'entry_sell')
+    async def test_gs03_short_setup_shows_short_signal(self):
+        """GS-03: trending ×4, signal=short_setup → '신호 발생 (숏)' 표시."""
+        h = self._make_handler('trending', 4, 'short_setup')
         with patch("core.shared.logging.telegram_handlers._send_telegram", new_callable=AsyncMock) as m:
             await h._send_periodic_summary()
             text = m.call_args[0][2]
@@ -999,7 +999,7 @@ class TestGateStatusThreeLevel:
     @pytest.mark.asyncio
     async def test_gs04_insufficient_consecutive_shows_blocked(self):
         """GS-04: trending ×2 (warm-up 미완료) → '진입 차단 중' 표시."""
-        h = self._make_handler('trending', 2, 'entry_ok')
+        h = self._make_handler('trending', 2, 'long_setup')
         with patch("core.shared.logging.telegram_handlers._send_telegram", new_callable=AsyncMock) as m:
             await h._send_periodic_summary()
             text = m.call_args[0][2]
@@ -1010,14 +1010,14 @@ class TestGateStatusThreeLevel:
 # ─── 승인 줄 동적 표시 ───────────────────────────────────────────────────────
 
 class TestApprovalLineSignal:
-    """AAP-01~AAP-02: entry_ok 신호 있을 때 자동/수동 승인 줄 동적 표시."""
+    """AAP-01~AAP-02: long_setup 신호 있을 때 자동/수동 승인 줄 동적 표시."""
 
     def _make_handler(self, confidence: float, size_pct: float) -> "TelegramTransactionHandler":
         h = TelegramTransactionHandler("tok", "chat", exchange="GMO", domain="judge")
         h._state.update({
             'regime_status': 'trending',
             'regime_consecutive': 4,
-            'signal': 'entry_ok',
+            'signal': 'long_setup',
             'signal_confidence': confidence,
             'signal_size_pct': size_pct,
             'current_price': 12_100_000.0,
@@ -1029,7 +1029,7 @@ class TestApprovalLineSignal:
 
     @pytest.mark.asyncio
     async def test_aap01_auto_approve_when_conditions_met(self):
-        """AAP-01: entry_ok + confidence=0.70, size=0.50 (auto mode, 조건 충족) → '자동 승인 예정' ✅."""
+        """AAP-01: long_setup + confidence=0.70, size=0.50 (auto mode, 조건 충족) → '자동 승인 예정' ✅."""
         h = self._make_handler(confidence=0.70, size_pct=0.50)
         env = {
             "APPROVAL_MODE": "auto",
@@ -1048,7 +1048,7 @@ class TestApprovalLineSignal:
 
     @pytest.mark.asyncio
     async def test_aap02_manual_approve_when_size_exceeds(self):
-        """AAP-02: entry_ok + confidence=0.70, size=0.80 (auto mode, 사이즈 초과) → '수동 승인 필요'."""
+        """AAP-02: long_setup + confidence=0.70, size=0.80 (auto mode, 사이즈 초과) → '수동 승인 필요'."""
         h = self._make_handler(confidence=0.70, size_pct=0.80)
         env = {
             "APPROVAL_MODE": "auto",
@@ -1247,7 +1247,7 @@ class TestBoxMgrSignalFilter:
         h = TelegramTransactionHandler("tok", "cid", exchange="GMO_COIN", domain="judge")
         return h
 
-    def _trend_log(self, signal: str = "entry_ok") -> str:
+    def _trend_log(self, signal: str = "long_setup") -> str:
         return (
             f"[GmocMgr] btc_jpy: 추세 유지 중 "
             f"signal={signal} ema_slope_pct=0.0234 rsi=58.2 ema=12331251 price=12416643"
@@ -1262,25 +1262,25 @@ class TestBoxMgrSignalFilter:
     def test_bx01_box_log_does_not_update_signal_state(self):
         """BX-01: [BoxMgr] signal=exit_warning 로그는 _state['signal']을 바꾸지 않음."""
         h = self._handler()
-        h._state['signal'] = 'entry_ok'
+        h._state['signal'] = 'long_setup'
 
         h._parse_and_update(self._box_log('exit_warning'))
 
-        assert h._state['signal'] == 'entry_ok', (
+        assert h._state['signal'] == 'long_setup', (
             "BoxMgr 로그가 signal 상태를 변경하면 안 됨"
         )
 
     def test_bx02_trend_log_after_box_log_stays_stable(self):
-        """BX-02: 추세 로그(entry_ok) → 박스 로그(exit_warning) 교대 → 상태는 entry_ok 유지."""
+        """BX-02: 추세 로그(long_setup) → 박스 로그(exit_warning) 교대 → 상태는 long_setup 유지."""
         h = self._handler()
         h._state['signal'] = None  # 초기화
 
-        h._parse_and_update(self._trend_log('entry_ok'))
-        assert h._state['signal'] == 'entry_ok'
+        h._parse_and_update(self._trend_log('long_setup'))
+        assert h._state['signal'] == 'long_setup'
 
         # 박스 로그 → 무시
         h._parse_and_update(self._box_log('exit_warning'))
-        assert h._state['signal'] == 'entry_ok', (
+        assert h._state['signal'] == 'long_setup', (
             "BoxMgr 신호가 추세 신호를 덮어쓰면 안 됨"
         )
 
@@ -1304,7 +1304,7 @@ class TestBoxMgrSignalFilter:
             f"  근거: 긴급 차단"
         )
 
-    def _rachel_trend_advisory_log(self, signal: str = "entry_ok") -> str:
+    def _rachel_trend_advisory_log(self, signal: str = "long_setup") -> str:
         """BUG-034: RachelAdvisory:trend_following 로그."""
         return (
             f"[RachelAdvisory:trend_following] btc_jpy: advisory 읽음 — "
@@ -1316,11 +1316,11 @@ class TestBoxMgrSignalFilter:
     def test_bx04_box_advisory_log_does_not_update_signal(self):
         """BX-04 (BUG-034): [RachelAdvisory:box_mean_reversion] 로그는 signal 갱신 안 함."""
         h = self._handler()
-        h._state['signal'] = 'entry_ok'
+        h._state['signal'] = 'long_setup'
 
         h._parse_and_update(self._rachel_box_advisory_log('exit_warning'))
 
-        assert h._state['signal'] == 'entry_ok', \
+        assert h._state['signal'] == 'long_setup', \
             "box_mean_reversion advisory 로그가 signal을 변경하면 안 됨"
 
     def test_bx05_trend_advisory_log_updates_signal(self):
@@ -1328,24 +1328,24 @@ class TestBoxMgrSignalFilter:
         h = self._handler()
         h._state['signal'] = None
 
-        h._parse_and_update(self._rachel_trend_advisory_log('entry_ok'))
+        h._parse_and_update(self._rachel_trend_advisory_log('long_setup'))
 
         # trend_following advisory 로그에 signal= 있으면 갱신돼야 함
         # (상세 포맷 아니라 폴백 정규식으로 처리)
-        assert h._state['signal'] == 'entry_ok', \
+        assert h._state['signal'] == 'long_setup', \
             "trend_following advisory 로그가 signal을 갱신해야 함"
 
     def test_bx06_alternating_advisory_logs_no_spam(self):
         """BX-06 (BUG-034): trend/box advisory 교대 5회 → signal 변경 횟수 0 (초기 제외)."""
         h = self._handler()
-        h._state['signal'] = 'entry_ok'
+        h._state['signal'] = 'long_setup'
         signal_changes = []
         original_signal = h._state['signal']
 
         for _ in range(5):
-            h._parse_and_update(self._rachel_trend_advisory_log('entry_ok'))
+            h._parse_and_update(self._rachel_trend_advisory_log('long_setup'))
             h._parse_and_update(self._rachel_box_advisory_log('exit_warning'))
 
-        # entry_ok 유지 — exit_warning으로 변경되지 않음
-        assert h._state['signal'] == 'entry_ok', \
+        # long_setup 유지 — exit_warning으로 변경되지 않음
+        assert h._state['signal'] == 'long_setup', \
             f"매분 교대 로그 후 signal이 변경됨: {h._state['signal']}"

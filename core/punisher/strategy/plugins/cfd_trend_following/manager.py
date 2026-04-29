@@ -250,7 +250,7 @@ class MarginTrendManager(BaseTrendManager):
             from datetime import datetime, timezone
             elapsed = (datetime.now(timezone.utc) - last_change).total_seconds()
             if elapsed < cooling_sec:
-                if signal == "exit_warning":
+                if signal == "long_caution":
                     logger.debug(
                         f"[MarginMgr] {pair}: 4H 캔들 교체 cooling 중 ({elapsed:.0f}s/{cooling_sec:.0f}s) "
                         "— exit_warning 억제"
@@ -265,22 +265,22 @@ class MarginTrendManager(BaseTrendManager):
 
         if side == "buy":
             if realtime_price < ema - atr_cushion:
-                if signal != "exit_warning":
+                if signal != "long_caution":
                     logger.info(
                         f"[MarginMgr] {pair}: 롱 실시간가 ¥{realtime_price} < EMA ¥{ema:.4f} - cushion → 추세 이탈 감지"
                     )
-                return "exit_warning"
+                return "long_caution"
             else:
-                return "no_signal" if signal == "exit_warning" else signal
+                return "no_signal" if signal == "long_caution" else signal
         elif side == "sell":
             if realtime_price > ema + atr_cushion:
-                if signal != "exit_warning":
+                if signal != "short_caution":
                     logger.info(
                         f"[MarginMgr] {pair}: 숏 실시간가 ¥{realtime_price} > EMA ¥{ema:.4f} + cushion → 추세 이탈 감지"
                     )
-                return "exit_warning"
+                return "short_caution"
             else:
-                return "no_signal" if signal == "exit_warning" else signal
+                return "no_signal" if signal == "short_caution" else signal
 
         return signal
 
@@ -624,7 +624,7 @@ class MarginTrendManager(BaseTrendManager):
         params: Dict,
         *,
         signal_data: dict | None = None,
-        is_preview: bool = False,
+
     ) -> Optional[Any]:
         """지정가(limit) 진입 주문 발주. 성공 시 PendingLimitOrder 반환, 실패 시 None."""
         import time as _time
@@ -673,11 +673,10 @@ class MarginTrendManager(BaseTrendManager):
                 amount=coin_amount,
                 invest_jpy=invest_jpy,
                 placed_at=_time.time(),
-                signal_at_placement="entry_preview" if is_preview else "entry_ok",
+                signal_at_placement="long_setup",
                 params=dict(params),
                 atr=atr,
                 signal_data=signal_data or {},
-                is_preview=is_preview,
             )
         except Exception as e:
             logger.error(f"{self._log_prefix} {pair}: limit 진입 주문 오류 — {e}", exc_info=True)
@@ -703,8 +702,6 @@ class MarginTrendManager(BaseTrendManager):
                 entry_amount=exec_amount,
                 stop_loss_price=initial_sl,
             )
-            if pending.is_preview:
-                pos.extra["preview_entry"] = True
             self._position[pair] = pos
 
             pos.db_record_id = await self._record_open(
@@ -721,7 +718,7 @@ class MarginTrendManager(BaseTrendManager):
             logger.info(
                 f"{self._log_prefix} {pair}: limit 진입 확정 "
                 f"order_id={order.order_id} price=¥{exec_price} amount={exec_amount} "
-                f"stop_loss=¥{initial_sl} preview={pending.is_preview}"
+                f"stop_loss=¥{initial_sl}"
             )
         except Exception as e:
             logger.error(f"{self._log_prefix} {pair}: limit 진입 확정 오류 — {e}", exc_info=True)

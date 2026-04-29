@@ -26,7 +26,7 @@ def _make_score(score: float) -> StrategyScore:
         regime_fit=score,
         regime="ranging",
         confidence="low",
-        detail={"signal": "entry_ok", "box_width_pct": 0.5},
+        detail={"signal": "long_setup", "box_width_pct": 0.5},
     )
 
 

@@ -39,7 +39,7 @@ def _make_decision(
         risk_factors=(),
         source="ai_v2",
         trigger="regular_4h",
-        raw_signal="entry_ok",
+        raw_signal="long_setup",
         timestamp=datetime.now(timezone.utc),
         meta=meta or {},
     )

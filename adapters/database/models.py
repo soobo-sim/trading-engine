@@ -1107,7 +1107,7 @@ class RachelAdvisory(Base):
 
     # hold 시 엔진 자율 진입 허용 정책
     # "none" = 절대 hold 유지 (기본값)
-    # "signal_entry_ok" = entry_ok/entry_sell 시그널이면 진입 허용 (Rachel이 기술적 사유로 hold 시)
+    # "signal_long_setup" = long_setup/short_setup 시그널이면 진입 허용 (Rachel이 기술적 사유로 hold 시)
     hold_override_policy = Column(String(30), nullable=False, server_default="none")
 
     # 매크로 컨텍스트 (AI 판단 추적·학습용)

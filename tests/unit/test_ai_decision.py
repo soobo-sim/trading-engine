@@ -24,7 +24,7 @@ def _ts() -> datetime:
     return datetime(2026, 4, 11, 8, 0, 0, tzinfo=timezone.utc)
 
 
-def _snapshot(signal: str = "entry_ok") -> SignalSnapshot:
+def _snapshot(signal: str = "long_setup") -> SignalSnapshot:
     return SignalSnapshot(
         pair="USD_JPY",
         exchange="gmo",
@@ -258,7 +258,7 @@ async def test_alice_failure_falls_back_to_v1():
     decision = await agent.decide(_snapshot())
 
     assert decision.source == "ai_v2_fallback_v1"
-    # v1은 entry_ok 시그널이면 entry_long 반환
+    # v1은 long_setup 시그널이면 entry_long 반환
     assert decision.action in ("entry_long", "hold")
 
 

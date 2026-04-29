@@ -13,8 +13,8 @@ GmoCoinTrendManager 상속. GMO Coin 어댑터/주문 시맨틱은 그대로 재
     - _task_prefix, _log_prefix: 박스 전용
 
 시그널 매핑:
-    near_lower  → "entry_ok"     — 박스 하단 근처 → 롱 진입
-    near_upper  → "entry_sell"   — 박스 상단 근처 → 숏 진입
+    near_lower  → "long_setup"     — 박스 하단 근처 → 롱 진입
+    near_upper  → "short_setup"   — 박스 상단 근처 → 숏 진입
     outside     → "exit_warning" — 박스 이탈 → 청산유도
     middle      → "no_signal"    — 박스 중간 → 대기
     box_none    → "no_signal"    — 박스 미감지 → 대기
@@ -196,8 +196,8 @@ class GmoCoinBoxManager(GmoCoinTrendManager):
 
 # ── 시그널 매핑 테이블 ─────────────────────────────────────────
 _LOCATION_TO_SIGNAL: dict[str, str] = {
-    "near_lower": "entry_ok",     # 박스 하단 근처 → 롱 진입
-    "near_upper": "entry_sell",   # 박스 상단 근처 → 숏 진입
+    "near_lower": "long_setup",     # 박스 하단 근처 → 롱 진입
+    "near_upper": "short_setup",   # 박스 상단 근처 → 숏 진입
     "outside":    "exit_warning", # 박스 이탈 → 청산 유도
     "middle":     "no_signal",    # 박스 중간 → 대기
 }

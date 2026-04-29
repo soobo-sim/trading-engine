@@ -179,7 +179,7 @@ class TestComputeTrendSignalRegimeCompat:
         result = compute_trend_signal(flat, params={})
         # BB폭이 좁고 range가 작으면 ranging, slope 양수이면 wait_regime
         if result["regime"] == "ranging":
-            assert result["signal"] in ("wait_regime", "no_signal", "wait_dip", "entry_ok")
+            assert result["signal"] in ("wait_regime", "no_signal", "long_overheated", "long_setup")
 
     def test_it06_regime_consistent_with_classify_regime(self):
         """IT-06: compute_trend_signal() regime 값이 classify_regime() 결과와 일치."""

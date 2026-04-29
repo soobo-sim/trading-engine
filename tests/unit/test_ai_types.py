@@ -36,7 +36,7 @@ def _base_snapshot(**kwargs) -> SignalSnapshot:
         pair="USD_JPY",
         exchange="gmo",
         timestamp=_ts(),
-        signal="entry_ok",
+        signal="long_setup",
         current_price=150.25,
         exit_signal={"action": "hold"},
     )

@@ -341,8 +341,8 @@ def evaluate_alert(raw: dict, prev_raw: Optional[dict] = None) -> Optional[dict]
 
 def _is_regime_shift(prev: str, curr: str) -> bool:
     """방향이 반대로 바뀌는 경우만."""
-    bullish = {"entry_ok", "wait_dip"}
-    bearish = {"exit_warning"}
+    bullish = {"long_setup", "long_overheated"}
+    bearish = {"long_caution", "short_caution"}
     return (prev in bullish and curr in bearish) or \
            (prev in bearish and curr in bullish)
 

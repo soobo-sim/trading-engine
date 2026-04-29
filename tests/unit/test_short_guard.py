@@ -8,8 +8,8 @@ MARKET_BUY가 발생하는 버그 수정 검증.
   SG-01: _supports_short 기본값 False (BaseTrendManager)
   SG-02: CfdTrendFollowingManager._supports_short == True
   SG-03: 롱전용 매니저에서 entry_short → WARNING 로그 + _on_entry_signal 미호출
-  SG-04: 롱전용 매니저에서 entry_long → _on_entry_signal("entry_ok") 정상 호출
-  SG-05: CFD 매니저에서 entry_short → _on_entry_signal("entry_sell") 정상 호출
+  SG-04: 롱전용 매니저에서 entry_long → _on_entry_signal("long_setup") 정상 호출
+  SG-05: CFD 매니저에서 entry_short → _on_entry_signal("short_setup") 정상 호출
 """
 from __future__ import annotations
 
@@ -60,7 +60,7 @@ def _make_decision(action: str) -> Decision:
         risk_factors=(),
         source="rule_based_v1",
         trigger="regular_4h",
-        raw_signal="entry_sell",
+        raw_signal="short_setup",
     )
 
 
@@ -73,7 +73,7 @@ def _make_execution_result(action: str) -> ExecutionResult:
     )
 
 
-def _make_snapshot(signal: str = "entry_sell") -> SignalSnapshot:
+def _make_snapshot(signal: str = "short_setup") -> SignalSnapshot:
     return SignalSnapshot(
         pair="BTC_JPY",
         exchange="gmo_coin",
@@ -81,7 +81,6 @@ def _make_snapshot(signal: str = "entry_sell") -> SignalSnapshot:
         signal=signal,
         current_price=11_399_360.0,
         exit_signal={"action": "hold"},
-        is_preview=False,
     )
 
 
@@ -124,10 +123,10 @@ def test_cfd_manager_supports_short_true():
 @pytest.mark.asyncio
 async def test_cfd_manager_allows_entry_short():
     """SG-05: CfdTrendFollowingManager._handle_execution_result(entry_short)
-    → _on_entry_signal("entry_sell") 정상 호출."""
+    → _on_entry_signal("short_setup") 정상 호출."""
     mgr = _make_cfd_manager()
     result = _make_execution_result("entry_short")
-    snapshot = _make_snapshot("entry_sell")
+    snapshot = _make_snapshot("short_setup")
     signal_data: dict = {}
     params: dict = {}
 
@@ -140,7 +139,7 @@ async def test_cfd_manager_allows_entry_short():
     mock_entry.assert_called_once()
     call_args = mock_entry.call_args
     # 두 번째 인자 = signal
-    assert call_args.args[1] == "entry_sell"
+    assert call_args.args[1] == "short_setup"
 
 
 # ──────────────────────────────────────────────────────────────
@@ -158,33 +157,6 @@ async def test_cfd_manager_allows_entry_short():
 # ──────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-
-# ──────────────────────────────────────────────────────────────
-# SG-09: CFD 매니저 entry_short + is_preview=True → "entry_preview" 전달
-# ──────────────────────────────────────────────────────────────
-
-@pytest.mark.asyncio
-async def test_cfd_manager_entry_short_preview_passes_entry_preview():
-    """SG-09: CfdTrendFollowingManager + is_preview=True → _on_entry_signal("entry_preview") 호출."""
-    mgr = _make_cfd_manager()
-    result = _make_execution_result("entry_short")
-    snapshot = SignalSnapshot(
-        pair="BTC_JPY",
-        exchange="bitflyer",
-        timestamp=datetime(2026, 4, 13, 0, 20, 0, tzinfo=timezone.utc),
-        signal="entry_sell",
-        current_price=11_399_360.0,
-        exit_signal={"action": "hold"},
-        is_preview=True,
-    )
-
-    with patch.object(mgr, "_on_entry_signal", new_callable=AsyncMock) as mock_entry:
-        await mgr._handle_execution_result("BTC_JPY", result, snapshot, {}, {})
-
-    mock_entry.assert_called_once()
-    call_args = mock_entry.call_args
-    assert call_args.args[1] == "entry_preview"  # preview 경로
-
 
 # ──────────────────────────────────────────────────────────────
 # SG-10: GmoCoinTrendManager._supports_short == True
@@ -253,7 +225,7 @@ def test_d35_05_gmofx_log_prefix():
 
 @pytest.mark.asyncio
 async def test_d34_02_cfd_pre_entry_checks_ok_calls_open_position():
-    """D34-02: CdfTF + entry_ok → _pre_entry_checks → _open_position(side='buy') 호출."""
+    """D34-02: CdfTF + long_setup → _pre_entry_checks → _open_position(side='buy') 호출."""
     from core.strategy.plugins.cfd_trend_following.manager import CfdTrendFollowingManager
     from unittest.mock import MagicMock, AsyncMock, patch
 
@@ -277,7 +249,7 @@ async def test_d34_02_cfd_pre_entry_checks_ok_calls_open_position():
 
     with patch.object(mgr, "_open_position", side_effect=fake_open):
         with patch.object(mgr, "_try_paper_entry", new_callable=AsyncMock, return_value=False):
-            await mgr._on_entry_signal("fx_btc_jpy", "entry_ok", 5_000_000.0, 50000.0, {}, {})
+            await mgr._on_entry_signal("fx_btc_jpy", "long_setup", 5_000_000.0, 50000.0, {}, {})
 
     assert len(open_calls) == 1
     assert open_calls[0]["side"] == "buy"
@@ -285,7 +257,7 @@ async def test_d34_02_cfd_pre_entry_checks_ok_calls_open_position():
 
 @pytest.mark.asyncio
 async def test_d34_03_cfd_pre_entry_checks_ok_calls_open_position_short():
-    """D34-03: CdfTF + entry_sell → _pre_entry_checks → _open_position(side='sell') 호출."""
+    """D34-03: CdfTF + short_setup → _pre_entry_checks → _open_position(side='sell') 호출."""
     from core.strategy.plugins.cfd_trend_following.manager import CfdTrendFollowingManager
     from unittest.mock import MagicMock, AsyncMock, patch
 
@@ -309,7 +281,7 @@ async def test_d34_03_cfd_pre_entry_checks_ok_calls_open_position_short():
 
     with patch.object(mgr, "_open_position", side_effect=fake_open):
         with patch.object(mgr, "_try_paper_entry", new_callable=AsyncMock, return_value=False):
-            await mgr._on_entry_signal("fx_btc_jpy", "entry_sell", 5_000_000.0, 50000.0, {}, {})
+            await mgr._on_entry_signal("fx_btc_jpy", "short_setup", 5_000_000.0, 50000.0, {}, {})
 
     assert len(open_calls) == 1
     assert open_calls[0]["side"] == "sell"
@@ -344,7 +316,7 @@ async def test_d34_05_cfd_pre_entry_checks_blocks_on_low_keep_rate():
 
     with patch.object(mgr, "_open_position", side_effect=fake_open):
         with patch.object(mgr, "_try_paper_entry", new_callable=AsyncMock, return_value=False):
-            await mgr._on_entry_signal("fx_btc_jpy", "entry_ok", 5_000_000.0, 50000.0, {}, {})
+            await mgr._on_entry_signal("fx_btc_jpy", "long_setup", 5_000_000.0, 50000.0, {}, {})
 
     assert len(open_calls) == 0
 
@@ -399,40 +371,6 @@ async def test_d34_07_try_paper_entry_short_sl_uses_short_formula():
     assert pos.stop_loss_price == pytest.approx(5_100_000.0, abs=1.0)
 
 
-@pytest.mark.asyncio
-async def test_d34_08_cfd_entry_preview_reaches_open_position():
-    """D34-08: CdfTF + entry_preview 시그널 → base 경로 통과 → _open_position 호출 (기존에 미지원)."""
-    from core.strategy.plugins.cfd_trend_following.manager import CfdTrendFollowingManager
-    from unittest.mock import MagicMock, AsyncMock, patch
-
-    adapter = MagicMock()
-    adapter.exchange_name = "bitflyer"
-    adapter.is_margin_trading = True
-
-    supervisor = MagicMock()
-    supervisor.stop = AsyncMock()
-    supervisor.is_running = MagicMock(return_value=False)
-
-    mgr = CfdTrendFollowingManager(
-        adapter=adapter, supervisor=supervisor,
-        session_factory=MagicMock(), candle_model=MagicMock(),
-        cfd_position_model=MagicMock(),
-    )
-
-    open_calls = []
-    async def fake_open(pair, side, price, atr, params, *, signal_data=None):
-        open_calls.append({"pair": pair, "side": side})
-
-    with patch.object(mgr, "_open_position", side_effect=fake_open):
-        with patch.object(mgr, "_try_paper_entry", new_callable=AsyncMock, return_value=False):
-            # entry_preview는 base._on_entry_signal 경로에서만 처리됨
-            await mgr._on_entry_signal("fx_btc_jpy", "entry_preview", 5_000_000.0, 50000.0, {}, {})
-
-    # entry_preview가 CdfTF에 전달됨 (기존에는 무시됐음)
-    assert len(open_calls) == 1
-    assert open_calls[0]["side"] == "buy"
-
-
 # ══════════════════════════════════════════════════════════════
 # 큐니 추가 엣지 케이스 — 세션 필터·GMO Coin·FX 시장 폐장
 # E1~E3
@@ -467,7 +405,7 @@ async def test_e1_gmo_coin_margin_no_session_filter():
     params: dict = {}  # allowed_sessions 없음
     with patch.object(mgr, "_open_position", side_effect=fake_open):
         with patch.object(mgr, "_try_paper_entry", new_callable=AsyncMock, return_value=False):
-            await mgr._on_entry_signal("btc_jpy", "entry_ok", 11_000_000.0, 100000.0, params, {})
+            await mgr._on_entry_signal("btc_jpy", "long_setup", 11_000_000.0, 100000.0, params, {})
 
     # 세션 필터 통과 → _open_position 호출됨
     assert len(open_calls) == 1
