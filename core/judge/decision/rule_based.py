@@ -130,7 +130,8 @@ class RuleBasedDecision:
         confidence_override: Optional[float] = None,
     ) -> Decision:
         params = snapshot.params
-        size_pct = float(params.get("position_size_pct", 1.0))
+        # position_size_pct는 % 단위(0~100)로 저장됨 → 비율(0~1)로 변환
+        size_pct = float(params.get("position_size_pct", 50.0)) / 100.0
         rsi_val = snapshot.rsi
         risk_factors: list[str] = []
         if rsi_val is not None and rsi_val > 60:
