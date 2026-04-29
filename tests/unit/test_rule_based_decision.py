@@ -202,15 +202,15 @@ async def test_hold_when_tighten_stop_already_tightened():
 @pytest.mark.asyncio
 async def test_size_pct_comes_from_params():
     """
-    Given: params.position_size_pct=0.5
+    Given: params.position_size_pct=50.0 (% 단위, DB 저장 형식)
     When:  entry_long 결정
-    Then:  size_pct=0.5
+    Then:  size_pct=0.5 (비율로 변환)
     """
     dec = RuleBasedDecision()
-    snapshot = _make_snapshot("long_setup", position=None, params={"position_size_pct": 0.5})
+    snapshot = _make_snapshot("long_setup", position=None, params={"position_size_pct": 50.0})
     result = await dec.decide(snapshot)
 
-    assert result.size_pct == 0.5
+    assert result.size_pct == pytest.approx(0.5)
 
 
 @pytest.mark.asyncio
