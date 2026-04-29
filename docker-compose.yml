@@ -16,7 +16,7 @@ services:
     environment:
       - EXCHANGE=gmo_coin
       - PORT=8004
-      - LOG_LEVEL=info
+      - LOG_LEVEL=debug
       - TZ=Asia/Tokyo
       - DATABASE_URL=postgresql+asyncpg://trader:trader_password_123@trader-postgres:5432/trader_db
     env_file:
