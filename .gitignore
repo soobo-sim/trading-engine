@@ -31,6 +31,7 @@ ENV/
 .coverage
 htmlcov/
 .mypy_cache/
+test-results.xml
 
 # Runtime cache directories
 **/.cache/
