@@ -304,13 +304,13 @@ def get_entry_condition_lines_long(
     # ③ RSI 범위
     if rsi is not None:
         if rsi_min <= rsi <= rsi_max:
-            lines.append(f" ✅ ③ RSI 범위      {rsi:.0f}  (허용 {rsi_min:.0f}~{rsi_max:.0f})")
+            lines.append(f" ✅ ③ RSI 범위      {rsi:.1f}  (허용 {rsi_min:.0f}~{rsi_max:.0f})")
         elif rsi < rsi_min:
             diff = rsi_min - rsi
-            lines.append(f" ❌ ③ RSI 범위      지금 {rsi:.0f} → {rsi_min:.0f} 이상 필요 ({diff:.0f} 부족)")
+            lines.append(f" ❌ ③ RSI 범위      지금 {rsi:.1f} → {rsi_min:.0f} 이상 필요 ({diff:.1f} 부족)")
         else:
             diff = rsi - rsi_max
-            lines.append(f" ❌ ③ RSI 범위      지금 {rsi:.0f} → {rsi_max:.0f} 이하 필요 ({diff:.0f} 초과, 과열)")
+            lines.append(f" ❌ ③ RSI 범위      지금 {rsi:.1f} → {rsi_max:.0f} 이하 필요 ({diff:.1f} 초과, 과열)")
 
     # ④ 추세장 (regime)
     regime_met = regime_active and signal != "wait_regime"
@@ -360,13 +360,13 @@ def get_entry_condition_lines_short(
     # ③ RSI 범위
     if rsi is not None:
         if rsi_min <= rsi <= rsi_max:
-            lines.append(f" ✅ ③ RSI 범위      {rsi:.0f}  (허용 {rsi_min:.0f}~{rsi_max:.0f})")
+            lines.append(f" ✅ ③ RSI 범위      {rsi:.1f}  (허용 {rsi_min:.0f}~{rsi_max:.0f})")
         elif rsi < rsi_min:
             diff = rsi_min - rsi
-            lines.append(f" ❌ ③ RSI 범위      지금 {rsi:.0f} → {rsi_min:.0f} 이상 필요 (과매도, {diff:.0f} 부족)")
+            lines.append(f" ❌ ③ RSI 범위      지금 {rsi:.1f} → {rsi_min:.0f} 이상 필요 (과매도, {diff:.1f} 부족)")
         else:
             diff = rsi - rsi_max
-            lines.append(f" ❌ ③ RSI 범위      지금 {rsi:.0f} → {rsi_max:.0f} 이하 필요 ({diff:.0f} 초과)")
+            lines.append(f" ❌ ③ RSI 범위      지금 {rsi:.1f} → {rsi_max:.0f} 이하 필요 ({diff:.1f} 초과)")
 
     # ④ 추세장 (regime)
     regime_met = regime_active and signal != "wait_regime"
