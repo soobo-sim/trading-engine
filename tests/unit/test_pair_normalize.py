@@ -135,12 +135,3 @@ class TestCorePairNormalize:
         with open(route_path) as f:
             src = f.read()
         assert "normalize_pair(body.pair)" in src, "POST advisory에서 pair 정규화 누락"
-
-    def test_np10_fetch_advisory_normalizes_pair(self):
-        """NP-10: _fetch_advisory 진입 시 pair 정규화 경로 확인 (소스 검증)."""
-        import os
-        base = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        src_path = os.path.join(base, "core", "judge", "decision", "rachel_advisory.py")
-        with open(src_path) as f:
-            src = f.read()
-        assert "pair = normalize_pair(pair)" in src, "_fetch_advisory에서 pair 정규화 누락"

@@ -372,34 +372,7 @@ async def lifespan(app: FastAPI):
         )
         trend_manager.set_orchestrator(_orchestrator)
         box_manager.set_orchestrator(_orchestrator)
-        logger.debug(f"Execution Layer 초기화: TRADING_MODE={trading_mode} [DEPRECATED: v2/ai는 rachel 모드로 전환 권장]")
-    elif trading_mode == "rachel":
-        from core.judge.decision.rachel_advisory import RachelAdvisoryDecision
-        from core.judge.decision.rule_based import RuleBasedDecision
-        from core.execution.orchestrator import ExecutionOrchestrator
-        from core.judge.safety.guardrails import AiGuardrails
-
-        _fallback = RuleBasedDecision()
-        _rachel_decision = RachelAdvisoryDecision(
-            session_factory=session_factory,
-            advisory_model=RachelAdvisory,
-            fallback=_fallback,
-        )
-        _guardrail = AiGuardrails(
-            session_factory=session_factory,
-            trade_model=models.trade,
-            balance_model=models.balance_entry,
-        )
-        _orchestrator = ExecutionOrchestrator(
-            decision_maker=_rachel_decision,
-            guardrail=_guardrail,
-            session_factory=session_factory,
-            judgment_model=AiJudgment,
-            approval_gate=_approval_gate,
-        )
-        trend_manager.set_orchestrator(_orchestrator)
-        box_manager.set_orchestrator(_orchestrator)
-        logger.debug(f"Execution Layer 초기화: TRADING_MODE={trading_mode} (OpenClaw 레이첼 advisory 연동, 양쪽 매니저 공유)")
+        logger.debug(f"Execution Layer 초기화: TRADING_MODE={trading_mode} [DEPRECATED: v2/ai는 jit 모드로 전환 권장]")
     elif trading_mode == "jit":
         # JIT advisory: 룰엔진 판단 후 진입 직전 LLM 단발 자문
         from core.judge.jit_advisory import JITAdvisoryGate
