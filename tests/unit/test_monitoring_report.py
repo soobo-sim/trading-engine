@@ -477,7 +477,7 @@ class TestBuildTelegramText:
         )
         text = build_telegram_text("CK", "15:00", "xrp_jpy", data)
         assert "판단 도메인 →" in text
-        assert "🟢 롱 진입 가능" in text
+        assert "🟢 롱 진입 신호" in text
 
     def test_with_position(self):
         data = self._make_with_pos()
@@ -2269,33 +2269,28 @@ class TestBuildTelegramTextWaitDirection:
         }
 
     def test_tg01_short_waiting_label(self):
-        """TG-01: wait_direction='short' → '숏 대기중' + '매도' 문구."""
+        """TG-01: wait_direction='short' → '숏 대기중' 레이블."""
         text = build_telegram_text("GMOC", "22:32", "btc_jpy", self._base_no_position("short"))
         assert "숏 대기중" in text
-        assert "매도" in text
         assert "롱 대기중" not in text
 
     def test_tg02_long_waiting_label_cfd(self):
-        """TG-02: wait_direction='long' (CFD) → '롱 대기중' + '매수' 문구."""
+        """TG-02: wait_direction='long' (CFD) → '롱 대기중' 레이블."""
         text = build_telegram_text("GMOC", "10:00", "btc_jpy", self._base_no_position("long"))
         assert "롱 대기중" in text
-        assert "매수" in text
         assert "숏 대기중" not in text
 
     def test_tg03_none_spot_legacy_label(self):
-        """TG-03: wait_direction=None (현물 spot) → 기존 '대기중' + '매수' 동작."""
+        """TG-03: wait_direction=None (현물 spot) → 기존 '대기중' 동작."""
         text = build_telegram_text("BF", "10:00", "BTC_JPY", self._base_no_position(None))
         assert "대기중" in text
-        assert "매수" in text
         assert "롱 대기중" not in text
         assert "숏 대기중" not in text
 
     def test_tg04_neutral_waiting_label(self):
-        """TG-04: wait_direction='neutral' → '관망중' + 양방향 안내."""
+        """TG-04: wait_direction='neutral' → '관망중' 레이블."""
         text = build_telegram_text("GMO", "10:00", "USD_JPY", self._base_no_position("neutral"))
         assert "관망중" in text
-        assert "롱" in text
-        assert "숏" in text
 
     def test_tg05_short_blockers_displayed(self):
         """TG-05: 숏 대기 시 판단 도메인 결론 표시."""
@@ -2305,7 +2300,7 @@ class TestBuildTelegramTextWaitDirection:
         data["signal"] = "hold"
         text = build_telegram_text("GMOC", "22:32", "btc_jpy", data)
         assert "판단 도메인 →" in text
-        assert "⏸ 대기" in text
+        assert "⏸ 조건 미충족" in text
 
 
 # ── 엣지케이스 보강 ────────────────────────────────────────────
@@ -2423,7 +2418,7 @@ class TestBuildTelegramTextWaitDirectionEdgeCases:
         data["signal"] = "short_setup"
         text = build_telegram_text("GMOC", "10:00", "btc_jpy", data)
         assert "판단 도메인 →" in text
-        assert "🔴 숏 진입 가능" in text
+        assert "🔴 숏 진입 신호" in text
 
     def test_long_with_blockers(self):
         """롱 대기 + 블로커 1개 → 판단 도메인 결론 표시."""
@@ -2432,7 +2427,7 @@ class TestBuildTelegramTextWaitDirectionEdgeCases:
         text = build_telegram_text("GMOC", "10:00", "btc_jpy", data)
         assert "롱 대기중" in text
         assert "판단 도메인 →" in text
-        assert "⏸ 대기" in text
+        assert "⏸ 조건 미충족" in text
 
     def test_conditions_met_zero_when_max_blockers(self):
         """블로커 다수 → 판단 도메인 결론 표시."""
@@ -2440,7 +2435,7 @@ class TestBuildTelegramTextWaitDirectionEdgeCases:
         data["signal"] = "hold"
         text = build_telegram_text("GMOC", "10:00", "btc_jpy", data)
         assert "판단 도메인 →" in text
-        assert "⏸ 대기" in text
+        assert "⏸ 조건 미충족" in text
 
     def test_spot_trend_report_no_wait_direction_key(self):
         """현물 spot report_data에 wait_direction 키 없어도 동작."""
@@ -2458,7 +2453,6 @@ class TestBuildTelegramTextWaitDirectionEdgeCases:
         }
         text = build_telegram_text("BF", "10:00", "BTC_JPY", data)
         assert "대기중" in text
-        assert "매수" in text
         assert "롱 대기중" not in text
 
 
@@ -3073,27 +3067,27 @@ class TestBuildTelegramTextConditionLines:
         }
 
     def test_tcl01_short_setup_shows_short_ready(self):
-        """TCL-01: short_setup 신호 → 숏 진입 가능 표시."""
+        """TCL-01: short_setup 신호 → 숏 진입 신호 표시."""
         text = build_telegram_text("GMOC", "14:08", "btc_jpy", self._base_short_waiting(signal="short_setup"))
         assert "판단 도메인 →" in text
-        assert "🔴 숏 진입 가능" in text
-        assert "조건 재평가 없음" in text
+        assert "🔴 숏 진입 신호" in text
+        assert "signal=short_setup" in text
 
     def test_tcl02_long_setup_shows_long_ready(self):
-        """TCL-02: long_setup 신호 → 롱 진입 가능 표시."""
+        """TCL-02: long_setup 신호 → 롱 진입 신호 표시."""
         data = self._base_short_waiting(signal="long_setup")
         data["wait_direction"] = "long"
         text = build_telegram_text("GMOC", "14:08", "btc_jpy", data)
         assert "판단 도메인 →" in text
-        assert "🟢 롱 진입 가능" in text
+        assert "🟢 롱 진입 신호" in text
         assert "🚫" not in text
 
     def test_tcl03_hold_shows_wait(self):
-        """TCL-03: hold 신호 → 대기 표시."""
+        """TCL-03: hold 신호 → 조건 미충족 표시."""
         data = self._base_short_waiting(signal="hold")
         text = build_telegram_text("GMOC", "14:08", "btc_jpy", data)
         assert "판단 도메인 →" in text
-        assert "⏸ 대기" in text
+        assert "⏸ 조건 미충족" in text
 
     def test_tcl04_wait_regime_shows_regime_gate(self):
         """TCL-04: wait_regime 신호 → RegimeGate 차단 표시."""

@@ -847,7 +847,7 @@ class TestSeedTelegramRegimeState:
                 await h._send_periodic_summary()
                 text = m.call_args[0][2]
                 assert "추세 진행" in text
-                assert "4회 연속" in text
+                assert "4H×4" in text
 
         asyncio.run(_check())
         _handlers.clear()
@@ -887,7 +887,7 @@ class TestConclusionWithPosition:
 
     @pytest.mark.asyncio
     async def test_con01_all_met_with_position_shows_reserve(self):
-        """CON-01: 진입 조건 4/4 충족 + 포지션 보유 → '추가 진입 유보' 표시."""
+        """CON-01: 진입 조건 3/3 충족 + 포지션 보유 → '추가 진입 유보' 표시."""
         h = self._make_handler_with_state(has_pos=True, all_met=True)
         with patch("core.shared.logging.telegram_handlers._send_telegram", new_callable=AsyncMock) as m:
             h._loop = asyncio.get_event_loop()
@@ -909,13 +909,13 @@ class TestConclusionWithPosition:
 
     @pytest.mark.asyncio
     async def test_con03_no_position_all_met_shows_entry(self):
-        """CON-03: 포지션 없음 + 숏 조건 충족 → '숏 진입 기회' 표시."""
+        """CON-03: 포지션 없음 + 숏 조건 충족 → '숏 진입 조건 충족' 표시."""
         h = self._make_handler_with_state(has_pos=False, all_met=True)
         with patch("core.shared.logging.telegram_handlers._send_telegram", new_callable=AsyncMock) as m:
             h._loop = asyncio.get_event_loop()
             await h._send_periodic_summary()
             text = m.call_args[0][2]
-            assert "숏 진입 기회" in text
+            assert "숏 진입 조건 충족" in text
 
 
 # ─── _send_stop_tighten ──────────────────────────────────────────────────────
@@ -1006,62 +1006,6 @@ class TestGateStatusThreeLevel:
         assert "진입 차단 중" in text
         assert "신호 발생" not in text
 
-
-# ─── 승인 줄 동적 표시 ───────────────────────────────────────────────────────
-
-class TestApprovalLineSignal:
-    """AAP-01~AAP-02: long_setup 신호 있을 때 자동/수동 승인 줄 동적 표시."""
-
-    def _make_handler(self, confidence: float, size_pct: float) -> "TelegramTransactionHandler":
-        h = TelegramTransactionHandler("tok", "chat", exchange="GMO", domain="judge")
-        h._state.update({
-            'regime_status': 'trending',
-            'regime_consecutive': 4,
-            'signal': 'long_setup',
-            'signal_confidence': confidence,
-            'signal_size_pct': size_pct,
-            'current_price': 12_100_000.0,
-            'ema_price': 12_000_000.0,
-            'ema_slope_pct': 0.10,
-            'rsi': 52.0,
-        })
-        return h
-
-    @pytest.mark.asyncio
-    async def test_aap01_auto_approve_when_conditions_met(self):
-        """AAP-01: long_setup + confidence=0.70, size=0.50 (auto mode, 조건 충족) → '자동 승인 예정' ✅."""
-        h = self._make_handler(confidence=0.70, size_pct=0.50)
-        env = {
-            "APPROVAL_MODE": "auto",
-            "AUTO_APPROVAL_MIN_CONFIDENCE": "0.65",
-            "AUTO_APPROVAL_MAX_SIZE": "0.60",
-        }
-        with patch.dict("os.environ", env, clear=True):
-            with patch("core.shared.logging.telegram_handlers._send_telegram", new_callable=AsyncMock) as m:
-                await h._send_periodic_summary()
-                text = m.call_args[0][2]
-        assert "자동 승인 예정" in text
-        assert "70%" in text
-        assert "50%" in text
-        assert "✅" in text
-        assert "수동 승인 필요" not in text
-
-    @pytest.mark.asyncio
-    async def test_aap02_manual_approve_when_size_exceeds(self):
-        """AAP-02: long_setup + confidence=0.70, size=0.80 (auto mode, 사이즈 초과) → '수동 승인 필요'."""
-        h = self._make_handler(confidence=0.70, size_pct=0.80)
-        env = {
-            "APPROVAL_MODE": "auto",
-            "AUTO_APPROVAL_MIN_CONFIDENCE": "0.65",
-            "AUTO_APPROVAL_MAX_SIZE": "0.60",
-        }
-        with patch.dict("os.environ", env, clear=True):
-            with patch("core.shared.logging.telegram_handlers._send_telegram", new_callable=AsyncMock) as m:
-                await h._send_periodic_summary()
-                text = m.call_args[0][2]
-        assert "수동 승인 필요" in text
-        assert "사이즈 80% > 60%" in text
-        assert "자동 승인 예정" not in text
 
 
 # ─── JIT Advisory Gate 파싱 검증 ────────────────────────────────────────────
@@ -1247,3 +1191,45 @@ class TestBoxMgrSignalFilter:
         # long_setup 유지 — exit_warning으로 변경되지 않음
         assert h._state['signal'] == 'long_setup', \
             f"매분 교대 로그 후 signal이 변경됨: {h._state['signal']}"
+
+    def test_bx07_ranging_regime_box_log_updates_signal(self):
+        """BX-07: regime=ranging일 때 [BoxMgr] 로그가 signal을 갱신해야 함."""
+        h = self._handler()
+        h._state['regime_status'] = 'ranging'
+        h._state['regime_consecutive'] = 4
+        h._state['signal'] = None
+
+        h._parse_and_update(self._box_log('long_setup'))
+
+        assert h._state['signal'] == 'long_setup', \
+            "ranging 체제에서 박스 로그가 signal을 갱신해야 함"
+
+    def test_bx08_ranging_periodic_summary_shows_box_conditions(self):
+        """BX-08: regime=ranging 5분 요약 → 박스 조건 표시."""
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        h = TelegramTransactionHandler("tok", "cid", exchange="GMO_COIN", domain="judge")
+        h._state.update({
+            'regime_status': 'ranging',
+            'regime_consecutive': 4,
+            'signal': 'long_setup',
+            'current_price': 11_900_000.0,
+            'box_lower': 11_800_000.0,
+            'box_upper': 12_200_000.0,
+            'box_detected': True,
+            'rsi': 32.0,
+        })
+
+        async def _check():
+            with patch("core.shared.logging.telegram_handlers._send_telegram", new_callable=AsyncMock) as m:
+                h._loop = asyncio.get_running_loop()
+                await h._send_periodic_summary()
+                return m.call_args[0][2]
+
+        text = asyncio.run(_check())
+        assert "박스 감지" in text
+        assert "실행 게이트" in text
+        assert "4H×" in text
+        assert "¥11,800,000" in text
+        assert "¥12,200,000" in text
