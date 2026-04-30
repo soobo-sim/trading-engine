@@ -138,6 +138,7 @@ def build_telegram_text(prefix: str, time_str: str, pair: str, data: dict) -> st
         exit_sig = data.get("exit_signal")
         if exit_sig:
             action = exit_sig.get("action", "hold")
+            reason = exit_sig.get("reason", "")
             if action == "full_exit":
                 outlook = "즉시 청산 실행 중"
             elif action == "tighten_stop":
@@ -151,6 +152,14 @@ def build_telegram_text(prefix: str, time_str: str, pair: str, data: dict) -> st
             else:
                 outlook = "추세 이어지면 트레일링 스탑 자동 상향"
             lines.append(f"⚡ 전망: {outlook}")
+            _ACTION_KR = {
+                "hold": "보유 유지",
+                "full_exit": "즉시 청산",
+                "tighten_stop": "스탑 조임",
+            }
+            action_kr = _ACTION_KR.get(action, action)
+            reason_str = f", reason={reason}" if reason else ""
+            lines.append(f"판단 도메인 → {action_kr} (action={action}{reason_str})")
 
         _rg = data.get("regime_gate_info")
         if _rg is not None:
@@ -172,39 +181,35 @@ def build_telegram_text(prefix: str, time_str: str, pair: str, data: dict) -> st
         if wait_dir == "short":
             lines.append(f"[{prefix}] {time_str} | {pair} {icon}추세추종 — 숏 대기중")
             lines.append(f"📍 ¥{data['current_price']:,.0f}")
-            lines.append("💡 진입 조건: 가격이 EMA 아래에서 우하향할 때 매도")
         elif wait_dir == "neutral":
             lines.append(f"[{prefix}] {time_str} | {pair} {icon}추세추종 — 관망중")
             lines.append(f"📍 ¥{data['current_price']:,.0f}")
-            lines.append("💡 롱: EMA 위 우상향 매수 / 숏: EMA 아래 우하향 매도")
         elif wait_dir == "long":
             lines.append(f"[{prefix}] {time_str} | {pair} {icon}추세추종 — 롱 대기중")
             lines.append(f"📍 ¥{data['current_price']:,.0f}")
-            lines.append("💡 진입 조건: 가격이 EMA 위에서 우상향할 때 매수")
         else:
             # wait_dir is None (현물 / spot) — 기존 동작 유지
             lines.append(f"[{prefix}] {time_str} | {pair} {icon}추세추종 — 대기중")
             lines.append(f"📍 ¥{data['current_price']:,.0f}")
-            lines.append("💡 진입 조건: 가격이 EMA 위에서 우상향할 때 매수")
 
         situation = data.get("market_summary") or "관망"
         lines.append(f"📊 지금: {_format_situation_with_basis(situation, ema_slope_pct, rsi)}")
 
-        # ── 판단 도메인 결론 표시 (조건 재평가 없음) ────────────────
+        # ── 판단 도메인 결론 표시 ────────────────────────────────────
         _SIGNAL_KR = {
-            'long_setup':      '🟢 롱 진입 가능 — 진입 신호 활성',
-            'short_setup':     '🔴 숏 진입 가능 — 진입 신호 활성',
-            'hold':            '⏸ 대기 — 조건 미충족',
-            'wait_regime':     '⏳ 체제 대기 — RegimeGate 차단 중',
-            'long_caution':    '⚠️ 롱 추세 이탈 경고',
-            'long_overheated': '🌡 롱 RSI 과열',
-            'short_caution':   '⚠️ 숏 추세 이탈 경고',
-            'short_oversold':  '🌡 숏 RSI 과매도',
+            'long_setup':      '🟢 롱 진입 신호 — 조건 충족',
+            'short_setup':     '🔴 숏 진입 신호 — 조건 충족',
+            'hold':            '⏸ 조건 미충족 — 대기',
+            'wait_regime':     '⏳ RegimeGate 차단 — 체제 미충족',
+            'long_caution':    '⚠️ 롱 추세 이탈 경고 — 진입 보류',
+            'long_overheated': '🌡 롱 RSI 과열 — 진입 보류',
+            'short_caution':   '⚠️ 숏 추세 이탈 경고 — 진입 보류',
+            'short_oversold':  '🌡 숏 RSI 과매도 — 진입 보류',
         }
         signal_val = data.get("signal", "")
         signal_display = _SIGNAL_KR.get(signal_val, f"신호: {signal_val}")
-        lines.append(f"판단 도메인 → {signal_display}")
-        lines.append("  (판단 도메인 결론을 받아 실행 중 — 조건 재평가 없음)")
+        signal_suffix = f" (signal={signal_val})" if signal_val else ""
+        lines.append(f"판단 도메인 → {signal_display}{signal_suffix}")
 
         _rg = data.get("regime_gate_info")
         if _rg is not None:

@@ -186,12 +186,17 @@ class TelegramTransactionHandler(logging.Handler):
             'decision_action': None,      # 최종 action (entry_long / hold / tighten_stop 등)
             'decision_size_pct': None,    # 사이즈 (0~1 소수)
             'decision_confidence': None,  # 확신도 (0~1 소수)
+            'decision_stop_loss': None,   # SL 가격 (진입 결정 시)
             # JIT Advisory Gate 결과
             'jit_decision': None,         # 'GO' | 'NO_GO' | 'ADJUST' | None
             'jit_reasoning': None,        # JIT 자문 사유 (NO_GO/ADJUST 시)
             # 승인 게이트용 — 오케스트레이터 로그에서 파싱 (approval mode 표시용)
             'signal_confidence': None,
             'signal_size_pct': None,
+            # 박스 전략 상태 (ranging 체제 시)
+            'box_upper': None,   # 박스 상단가
+            'box_lower': None,   # 박스 하단가
+            'box_detected': False,  # 박스 감지 여부
             # 진입/청산 이벤트 (즉시 전송 후 None으로 클리어)
             'entry_event': None,
             'close_event': None,
@@ -319,7 +324,37 @@ class TelegramTransactionHandler(logging.Handler):
                     if self._domain == "judge" and self._loop and self._state['prev_signal'] is not None:
                         self._loop.create_task(self._send_signal_change())
 
-        # ── 오케스트레이터 판단 결과 파싱 ────────────────────────────────
+        # ── 박스 로그 파싱 (신호 + 박스 범위) ────────────────────────────────
+        # 신호 파싱은 regime=ranging일 때만 — ranging 아닐 때 박스 로그가 추세 신호 덮어쓰는 것 방지
+        if is_box_log:
+            m_box = re.search(
+                r'signal=(\w+) ema_slope_pct=(?:[-\d.]+|N/A) rsi=(?:[\d.]+|N/A) ema=(?:[\d.]+|N/A) price=([\d.]+)',
+                msg,
+            )
+            if m_box:
+                self._state['current_price'] = float(m_box.group(2))
+                # regime=ranging일 때만 박스 신호로 state 갱신
+                if self._state.get('regime_status') == 'ranging':
+                    box_signal = m_box.group(1)
+                    if self._state['signal'] != box_signal:
+                        self._state['prev_signal'] = self._state['signal']
+                        self._state['signal'] = box_signal
+                        if box_signal not in ('long_setup', 'short_setup'):
+                            self._state['signal_confidence'] = None
+                            self._state['signal_size_pct'] = None
+                        if self._domain == "judge" and self._loop and self._state['prev_signal'] is not None:
+                            self._loop.create_task(self._send_signal_change())
+            # 박스 범위 파싱: "박스 ¥11,400,000~¥12,200,000"
+            m_bounds = re.search(r'박스 ¥([\d,]+)~¥([\d,]+)', msg)
+            if m_bounds:
+                self._state['box_lower'] = float(m_bounds.group(1).replace(',', ''))
+                self._state['box_upper'] = float(m_bounds.group(2).replace(',', ''))
+                self._state['box_detected'] = True
+            # 박스 미감지
+            if '박스 미감지' in msg:
+                self._state['box_detected'] = False
+                self._state['box_upper'] = None
+                self._state['box_lower'] = None
         # 구 포맷: "확신도=0.72 사이즈=0.50"
         m = re.search(r'확신도=([\d.]+)\s+사이즈=([\d.]+)', msg)
         if m:
@@ -342,6 +377,10 @@ class TelegramTransactionHandler(logging.Handler):
         m = re.search(r'판단=(entry_\w+|tighten_stop|exit|hold)', msg)
         if m:
             self._state['decision_action'] = m.group(1)
+        # SL 파싱 (진입 결정 로그: "사이즈 50%, 확신도 0.72, SL ¥11,400,000.")
+        m = re.search(r', SL ¥(\d[\d,]*)', msg)
+        if m:
+            self._state['decision_stop_loss'] = float(m.group(1).replace(',', ''))
 
         # ── JIT Advisory Gate 결과 파싱 ──────────────────────────────────
         # GO: "[JIT][xxxx] btc_jpy GO — action=entry_long size=50% conf=0.80. 사유: ..."
@@ -710,15 +749,20 @@ class TelegramTransactionHandler(logging.Handler):
                 regime_kr += " ↑" if _cur > _ema else " ↓"
 
         # gate_status: RegimeGate + 실제 signal 상태를 모두 반영
-        # (RegimeGate만 보고 "진입 허용"을 표시하면 신호 없어도 진입 가능처럼 오해)
         _signal_now = self._state.get('signal')
-        regime_gate_ok = regime == 'trending' and consecutive >= 3
+        regime_gate_ok = (
+            (regime == 'trending' and consecutive >= 3) or
+            (regime == 'ranging' and consecutive >= 3)
+        )
+        gate_icon = "✅" if regime_gate_ok else "❌"
         if not regime_gate_ok:
             gate_status = "진입 차단 중"
         elif _signal_now == 'long_setup':
             gate_status = "신호 발생 (롱)"
         elif _signal_now == 'short_setup':
             gate_status = "신호 발생 (숏)"
+        elif regime == 'ranging':
+            gate_status = "체제OK · 박스 대기"
         else:
             gate_status = "체제OK · 신호 대기"
 
@@ -779,66 +823,127 @@ class TelegramTransactionHandler(logging.Handler):
         else:
             approval_line = "승인: ⚡ 직통 (승인 게이트 없음)"
 
-        # 진입 조건 4개 (state 값 기반)
+        # 진입 조건 — regime에 따라 추세/박스 분기
         current = self._state.get('current_price')
         ema = self._state.get('ema_price')
         ema_slope = self._state.get('ema_slope_pct')
         rsi = self._state.get('rsi')
-
-        # 방향 결정: 현재가 < EMA → 숏 대기, 아니면 롱 대기
-        is_short_setup = (current is not None and ema is not None and current < ema)
-        direction_label = "숏" if is_short_setup else "롱"
+        box_upper = self._state.get('box_upper')
+        box_lower = self._state.get('box_lower')
+        box_detected = self._state.get('box_detected', False)
 
         condition_lines = []
-        if current is not None and ema is not None:
-            if is_short_setup:
-                # 숏 4조건
-                c1 = "✅"
-                condition_lines.append(f" {c1} ① 가격 < EMA    ¥{current:,.0f} (EMA ¥{ema:,.0f})")
+        direction_label = "숏"  # 기본값, 아래에서 결정
 
-                SHORT_SLOPE_TH = -0.05
-                if ema_slope is not None:
-                    c2 = "✅" if ema_slope < SHORT_SLOPE_TH else "❌"
-                    if ema_slope >= SHORT_SLOPE_TH:
-                        gap = abs(ema_slope - SHORT_SLOPE_TH)
-                        condition_lines.append(f" {c2} ② EMA 기울기    지금 {ema_slope:+.2f}% → {SHORT_SLOPE_TH:.2f}% 미만 필요 ({gap:.2f}%p 부족)")
-                    else:
-                        condition_lines.append(f" {c2} ② EMA 기울기    {ema_slope:+.2f}% (충족)")
-                else:
-                    condition_lines.append(" ❓ ② EMA 기울기    데이터 없음")
-
-                SHORT_RSI_MIN = self._state.get('entry_rsi_min_short', 35.0)
-                SHORT_RSI_MAX = self._state.get('entry_rsi_max_short', 60.0)
-                if rsi is not None:
-                    c3 = "✅" if SHORT_RSI_MIN <= rsi <= SHORT_RSI_MAX else "❌"
-                    condition_lines.append(f" {c3} ③ RSI 범위      {rsi:.0f}  (허용 {SHORT_RSI_MIN:.0f}~{SHORT_RSI_MAX:.0f})")
-                else:
-                    condition_lines.append(" ❓ ③ RSI 범위      데이터 없음")
+        if regime == 'ranging':
+            # ── 박스역추세 조건 ─────────────────────────────────────────
+            # 방향: signal 기반 (near_lower→롱, near_upper→숏)
+            _sig = self._state.get('signal')
+            if _sig == 'long_setup':
+                direction_label = "롱"
+            elif _sig == 'short_setup':
+                direction_label = "숏"
+            elif current is not None and box_upper is not None and box_lower is not None:
+                mid = (box_upper + box_lower) / 2
+                direction_label = "롱" if current < mid else "숏"
             else:
-                # 롱 4조건
-                c1 = "✅" if current > ema else "❌"
-                condition_lines.append(f" {c1} ① 가격 > EMA    ¥{current:,.0f} (EMA ¥{ema:,.0f})")
+                direction_label = "박스"
 
-                LONG_SLOPE_TH = 0.0
-                if ema_slope is not None:
-                    c2 = "✅" if ema_slope >= LONG_SLOPE_TH else "❌"
-                    if ema_slope < LONG_SLOPE_TH:
-                        condition_lines.append(f" {c2} ② EMA 기울기    지금 {ema_slope:+.2f}% → {LONG_SLOPE_TH:.2f}% 이상 필요")
-                    else:
-                        condition_lines.append(f" {c2} ② EMA 기울기    {ema_slope:+.2f}% (충족)")
+            c1 = "✅" if box_detected else "❌"
+            if box_detected and box_upper is not None and box_lower is not None:
+                width_pct = (box_upper - box_lower) / box_lower * 100 if box_lower else 0
+                condition_lines.append(
+                    f" {c1} ① 박스 감지    ¥{box_lower:,.0f}~¥{box_upper:,.0f} (폭 {width_pct:.1f}%)"
+                )
+            else:
+                condition_lines.append(" ❌ ① 박스 감지    미감지")
+
+            if box_detected and current is not None and box_upper is not None and box_lower is not None:
+                near_bound_pct = 0.5
+                band = (box_upper - box_lower) * (near_bound_pct / 100)
+                near_lower = current <= box_lower + band
+                near_upper = current >= box_upper - band
+                if near_lower:
+                    c2 = "✅"
+                    condition_lines.append(f" {c2} ② 가격 위치    하단 근처 ¥{current:,.0f} (하단 ¥{box_lower:,.0f})")
+                elif near_upper:
+                    c2 = "✅"
+                    condition_lines.append(f" {c2} ② 가격 위치    상단 근처 ¥{current:,.0f} (상단 ¥{box_upper:,.0f})")
                 else:
-                    condition_lines.append(" ❓ ② EMA 기울기    데이터 없음")
+                    c2 = "❌"
+                    condition_lines.append(f" {c2} ② 가격 위치    박스 중간 ¥{current:,.0f} — 경계 대기")
+            elif current is not None:
+                condition_lines.append(f" ❓ ② 가격 위치    ¥{current:,.0f} (박스 미감지)")
+            else:
+                condition_lines.append(" ❓ ② 가격 위치    데이터 없음")
 
+            if rsi is not None:
+                SHORT_RSI_MAX = self._state.get('entry_rsi_max_short', 60.0)
                 LONG_RSI_MIN = self._state.get('entry_rsi_min', 40.0)
-                LONG_RSI_MAX = self._state.get('entry_rsi_max', 65.0)
-                if rsi is not None:
-                    c3 = "✅" if LONG_RSI_MIN <= rsi <= LONG_RSI_MAX else "❌"
-                    condition_lines.append(f" {c3} ③ RSI 범위      {rsi:.0f}  (허용 {LONG_RSI_MIN:.0f}~{LONG_RSI_MAX:.0f})")
+                if direction_label == "숏":
+                    c3 = "✅" if rsi >= SHORT_RSI_MAX else "❌"
+                    condition_lines.append(f" {c3} ③ RSI          {rsi:.0f}  (과매수 {SHORT_RSI_MAX:.0f}↑ 필요)")
                 else:
-                    condition_lines.append(" ❓ ③ RSI 범위      데이터 없음")
+                    c3 = "✅" if rsi <= LONG_RSI_MIN else "❌"
+                    condition_lines.append(f" {c3} ③ RSI          {rsi:.0f}  (과매도 {LONG_RSI_MIN:.0f}↓ 필요)")
+            else:
+                condition_lines.append(" ❓ ③ RSI          데이터 없음")
 
-            c4 = "✅" if regime == 'trending' and consecutive >= 3 else "❌"
-            condition_lines.append(f" {c4} ④ 추세장        ×{consecutive} 연속")
+    
+
+        else:
+            # ── 추세추종 조건 (trending 또는 unclear) ──────────────────
+            # 방향 결정: 현재가 < EMA → 숏 대기, 아니면 롱 대기
+            is_short_setup = (current is not None and ema is not None and current < ema)
+            direction_label = "숏" if is_short_setup else "롱"
+
+            if current is not None and ema is not None:
+                if is_short_setup:
+                    c1 = "✅"
+                    condition_lines.append(f" {c1} ① 가격 < EMA    ¥{current:,.0f} (EMA ¥{ema:,.0f})")
+
+                    SHORT_SLOPE_TH = -0.05
+                    if ema_slope is not None:
+                        c2 = "✅" if ema_slope < SHORT_SLOPE_TH else "❌"
+                        if ema_slope >= SHORT_SLOPE_TH:
+                            gap = abs(ema_slope - SHORT_SLOPE_TH)
+                            condition_lines.append(f" {c2} ② EMA 기울기    지금 {ema_slope:+.2f}% → {SHORT_SLOPE_TH:.2f}% 미만 필요 ({gap:.2f}%p 부족)")
+                        else:
+                            condition_lines.append(f" {c2} ② EMA 기울기    {ema_slope:+.2f}% (충족)")
+                    else:
+                        condition_lines.append(" ❓ ② EMA 기울기    데이터 없음")
+
+                    SHORT_RSI_MIN = self._state.get('entry_rsi_min_short', 35.0)
+                    SHORT_RSI_MAX = self._state.get('entry_rsi_max_short', 60.0)
+                    if rsi is not None:
+                        c3 = "✅" if SHORT_RSI_MIN <= rsi <= SHORT_RSI_MAX else "❌"
+                        condition_lines.append(f" {c3} ③ RSI 범위      {rsi:.0f}  (허용 {SHORT_RSI_MIN:.0f}~{SHORT_RSI_MAX:.0f})")
+                    else:
+                        condition_lines.append(" ❓ ③ RSI 범위      데이터 없음")
+                else:
+                    c1 = "✅" if current > ema else "❌"
+                    condition_lines.append(f" {c1} ① 가격 > EMA    ¥{current:,.0f} (EMA ¥{ema:,.0f})")
+
+                    LONG_SLOPE_TH = 0.0
+                    if ema_slope is not None:
+                        c2 = "✅" if ema_slope >= LONG_SLOPE_TH else "❌"
+                        if ema_slope < LONG_SLOPE_TH:
+                            condition_lines.append(f" {c2} ② EMA 기울기    지금 {ema_slope:+.2f}% → {LONG_SLOPE_TH:.2f}% 이상 필요")
+                        else:
+                            condition_lines.append(f" {c2} ② EMA 기울기    {ema_slope:+.2f}% (충족)")
+                    else:
+                        condition_lines.append(" ❓ ② EMA 기울기    데이터 없음")
+
+                    LONG_RSI_MIN = self._state.get('entry_rsi_min', 40.0)
+                    LONG_RSI_MAX = self._state.get('entry_rsi_max', 65.0)
+                    if rsi is not None:
+                        c3 = "✅" if LONG_RSI_MIN <= rsi <= LONG_RSI_MAX else "❌"
+                        condition_lines.append(f" {c3} ③ RSI 범위      {rsi:.0f}  (허용 {LONG_RSI_MIN:.0f}~{LONG_RSI_MAX:.0f})")
+                    else:
+                        condition_lines.append(" ❓ ③ RSI 범위      데이터 없음")
+
+
+
 
         met_count = sum(1 for l in condition_lines if "✅" in l)
         total_count = len(condition_lines)
@@ -846,19 +951,46 @@ class TelegramTransactionHandler(logging.Handler):
         signal = self._state.get('signal')
 
         # 결론
+        if regime == 'ranging':
+            _unmet_labels = ['박스감지', '가격위치', 'RSI']
+        else:
+            _unmet_labels = ['가격/EMA', 'EMA기울기', 'RSI']
+        _unmet = [
+            _unmet_labels[i]
+            for i, _l in enumerate(condition_lines)
+            if '❌' in _l and i < len(_unmet_labels)
+        ]
+
         has_pos = self._state.get('has_position')
         if has_pos:
             if not has_unmet and condition_lines:
                 conclusion = "진입 조건 모두 충족 · 포지션 보유 중 — 추가 진입 유보"
             else:
                 conclusion = "포지션 보유 중 — 청산 조건 감시"
+        elif decision_action:
+            # Decision이 내려진 상태 — 실행 도메인에 넘어간 실제 값
+            _dec_action_kr = _ACTION_KR_SUM.get(decision_action, decision_action)
+            _jit_tag = {'GO': ' (JIT ✅)', 'ADJUST': ' (JIT ⚙️ 조정)', 'NO_GO': ' (JIT 🚫 차단)'}.get(jit or '', '')
+            _parts = [_dec_action_kr + _jit_tag]
+            if decision_size is not None:
+                _parts.append(f"사이즈 {decision_size * 100:.0f}%")
+            if decision_conf is not None:
+                _parts.append(f"확신도 {decision_conf * 100:.0f}%")
+            _dec_sl = self._state.get('decision_stop_loss')
+            if _dec_sl is not None:
+                _parts.append(f"SL ¥{_dec_sl:,.0f}")
+            conclusion = ' · '.join(_parts)
+            if jit in ('NO_GO', 'ADJUST') and jit_reasoning:
+                conclusion += f"\n  └ {jit_reasoning[:60]}"
         else:
-            if signal == 'long_setup':
-                conclusion = "롱 진입 기회"
-            elif signal == 'short_setup':
-                conclusion = "숏 진입 기회"
+            # 진입 조건 미충족 — 미충족 항목 명시
+            if condition_lines and not has_unmet:
+                # 조건 모두 충족 (실제론 드물지만 decision 없음)
+                conclusion = f"{direction_label} 진입 조건 충족"
+            elif _unmet:
+                conclusion = f"{direction_label} 진입 조건 미충족 — {'·'.join(_unmet)}"
             else:
-                conclusion = "진입 조건 미충족"
+                conclusion = f"{direction_label} 진입 조건 미충족"
 
         # 시그널 상세 블록 (조건 4개 ✅/❌ 수치 포함)
         if condition_lines:
@@ -873,12 +1005,15 @@ class TelegramTransactionHandler(logging.Handler):
         rng = self._state.get('regime_range_pct')
         regime_detail = f"\n  BB폭 {bb:.1f}% / 범위 {rng:.1f}%" if bb is not None and rng is not None else ""
 
+        # 승인 줄 제거: 신호+판단이 같은 사이클에서 연속 실행되므로 "대기" 상태는 실제로 없음
+        # 승인 정도 정보는 결론에 이미 포함(단 MANUAL모드에서만 의미 있는 도구)
+        _approval_str = ""
+
         text = (
             f"🔮 [{self._exchange}·BTC] {_format_time(time.time())}  (판단 사이클 · 5분 요약)\n"
             f"──────────────────────────\n"
-            f"체제: {regime_kr} · {consecutive}회 연속 ({gate_status}){regime_detail}\n"
-            f"판단 결과: {judge_summary}\n"
-            f"{approval_line}\n"
+            f"체제: {regime_kr}{regime_detail}\n"
+            f"실행 게이트: 4H×{consecutive} {gate_icon} — {gate_status}\n"
             f"──────────────────────────\n"
             f"{sig_block}\n"
             f"결론: {conclusion}"
