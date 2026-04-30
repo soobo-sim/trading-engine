@@ -627,11 +627,10 @@ class TestNarrativeLogging:
                 pair, result, _make_snapshot(), _make_signal_data(), {}
             )
 
-        info = [r for r in caplog.records if "판단→실행 연결" in r.message and r.levelname == "INFO"]
+        info = [r for r in caplog.records if "entry_long 완료" in r.message and r.levelname == "INFO"]
         assert len(info) == 1
         assert "judgment_id=42" in info[0].message
         assert "확신도=70%" in info[0].message
-        assert "side=long" in info[0].message
 
     @pytest.mark.asyncio
     async def test_entry_long_no_judgment_id_no_link_log(self, db_and_factory, caplog):
@@ -659,7 +658,7 @@ class TestNarrativeLogging:
                 pair, result, _make_snapshot(), _make_signal_data(), {}
             )
 
-        info = [r for r in caplog.records if "판단→실행 연결" in r.message]
+        info = [r for r in caplog.records if "entry_long 완료" in r.message]
         assert len(info) == 0
 
     @pytest.mark.asyncio
@@ -696,9 +695,8 @@ class TestNarrativeLogging:
                 {}
             )
 
-        info = [r for r in caplog.records if "판단→실행 연결" in r.message and r.levelname == "INFO"]
+        info = [r for r in caplog.records if "entry_short 완료" in r.message and r.levelname == "INFO"]
         assert len(info) == 1
-        assert "side=short" in info[0].message
         assert "judgment_id=99" in info[0].message
 
     @pytest.mark.asyncio
@@ -869,7 +867,7 @@ class TestNarrativeLogging:
                 pair, result, _make_snapshot(), _make_signal_data(), {}
             )
 
-        info = [r for r in caplog.records if "판단→실행 연결" in r.message and r.levelname == "INFO"]
+        info = [r for r in caplog.records if "entry_long 완료" in r.message and r.levelname == "INFO"]
         assert len(info) == 1
         assert "확신도=0%" in info[0].message
         assert "judgment_id=42" in info[0].message
