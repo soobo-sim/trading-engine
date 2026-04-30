@@ -465,7 +465,7 @@ class TestBuildTelegramText:
         assert "[CK] 21:01" in text
         assert "📉추세추종" in text
         assert "🔻 하락" in text
-        assert "🚫 4/5" in text
+        assert "판단 도메인 →" in text
         assert "대기중" in text
 
     def test_no_position_entry_ready(self):
@@ -473,9 +473,11 @@ class TestBuildTelegramText:
             trend_icon="📈",
             current_price=250.0,
             market_summary="✅ 진입 임박",
+            signal="long_setup",
         )
         text = build_telegram_text("CK", "15:00", "xrp_jpy", data)
-        assert "✅ 5/5 진입 조건 충족" in text
+        assert "판단 도메인 →" in text
+        assert "🟢 롱 진입 가능" in text
 
     def test_with_position(self):
         data = self._make_with_pos()
@@ -2296,13 +2298,14 @@ class TestBuildTelegramTextWaitDirection:
         assert "숏" in text
 
     def test_tg05_short_blockers_displayed(self):
-        """TG-05: 숏 대기 시 블로커 줄 표시."""
+        """TG-05: 숏 대기 시 판단 도메인 결론 표시."""
         data = self._base_no_position("short")
         data["entry_blockers"] = ["RSI 32.7 → 35 이상 필요 (과매도)"]
         data["conditions_met"] = 4
+        data["signal"] = "hold"
         text = build_telegram_text("GMOC", "22:32", "btc_jpy", data)
-        assert "4/5" in text
-        assert "RSI" in text
+        assert "판단 도메인 →" in text
+        assert "⏸ 대기" in text
 
 
 # ── 엣지케이스 보강 ────────────────────────────────────────────
@@ -2415,23 +2418,29 @@ class TestBuildTelegramTextWaitDirectionEdgeCases:
         }
 
     def test_short_no_blockers_shows_all_clear(self):
-        """숏 대기 + 블로커 없음 → ✅ 5/5 표시."""
-        text = build_telegram_text("GMOC", "10:00", "btc_jpy", self._no_pos("short", [], 5))
-        assert "✅" in text
-        assert "5/5" in text
+        """숏 대기 + 블로커 없음 → 판단 도메인 결론 표시."""
+        data = self._no_pos("short", [], 5)
+        data["signal"] = "short_setup"
+        text = build_telegram_text("GMOC", "10:00", "btc_jpy", data)
+        assert "판단 도메인 →" in text
+        assert "🔴 숏 진입 가능" in text
 
     def test_long_with_blockers(self):
-        """롱 대기 + 블로커 1개 → 4/5 표시."""
-        text = build_telegram_text("GMOC", "10:00", "btc_jpy",
-                                   self._no_pos("long", ["EMA slope -0.02% → ≥+0.00% 필요"], 4))
+        """롱 대기 + 블로커 1개 → 판단 도메인 결론 표시."""
+        data = self._no_pos("long", ["EMA slope -0.02% → ≥+0.00% 필요"], 4)
+        data["signal"] = "hold"
+        text = build_telegram_text("GMOC", "10:00", "btc_jpy", data)
         assert "롱 대기중" in text
-        assert "4/5" in text
+        assert "판단 도메인 →" in text
+        assert "⏸ 대기" in text
 
     def test_conditions_met_zero_when_max_blockers(self):
-        """conditions_met=0 → 0/5 표시."""
+        """블로커 다수 → 판단 도메인 결론 표시."""
         data = self._no_pos("short", ["b1", "b2", "b3", "b4", "b5"], 0)
+        data["signal"] = "hold"
         text = build_telegram_text("GMOC", "10:00", "btc_jpy", data)
-        assert "0/5" in text
+        assert "판단 도메인 →" in text
+        assert "⏸ 대기" in text
 
     def test_spot_trend_report_no_wait_direction_key(self):
         """현물 spot report_data에 wait_direction 키 없어도 동작."""
@@ -3046,9 +3055,9 @@ class TestGetEntryConditionLinesShort:
 # ── build_telegram_text entry_condition_lines 렌더링 테스트 ──────────
 
 class TestBuildTelegramTextConditionLines:
-    """TCL-01~TCL-05: entry_condition_lines 기반 렌더링 검증."""
+    """TCL-01~TCL-05: 포지션 없을 때 판단 도메인 결론 표시 검증."""
 
-    def _base_short_waiting(self, condition_lines, signal="no_signal"):
+    def _base_short_waiting(self, condition_lines=None, signal="short_setup"):
         return {
             "trend_icon": "📉",
             "current_price": 12_005_001,
@@ -3057,84 +3066,44 @@ class TestBuildTelegramTextConditionLines:
             "position": None,
             "wait_direction": "short",
             "entry_blockers": [],
-            "entry_condition_lines": condition_lines,
             "conditions_met": 3,
             "conditions_total": 4,
             "jpy_available": 100_000,
+            "signal": signal,
         }
 
-    def test_tcl01_3_of_4_shows_header_and_all_lines(self):
-        """TCL-01: 3/4 충족 → 🚫 3/4 헤더 + 4줄 전체 표시."""
-        lines = [
-            " ✅ ① 가격 < EMA    ¥12,005,001 (EMA ¥12,007,400)",
-            " ❌ ② EMA 기울기    지금 -0.02% → -0.05% 미만 필요 (0.03%p 부족)",
-            " ✅ ③ RSI 범위      50  (허용 35~60)",
-            " ✅ ④ 추세장        ×4 연속",
-        ]
-        text = build_telegram_text("GMOC", "14:08", "btc_jpy", self._base_short_waiting(lines))
-        assert "🚫 3/4 진입까지:" in text
-        assert "✅ ① 가격" in text
-        assert "❌ ② EMA" in text
-        assert "✅ ③ RSI" in text
-        assert "✅ ④ 추세장" in text
+    def test_tcl01_short_setup_shows_short_ready(self):
+        """TCL-01: short_setup 신호 → 숏 진입 가능 표시."""
+        text = build_telegram_text("GMOC", "14:08", "btc_jpy", self._base_short_waiting(signal="short_setup"))
+        assert "판단 도메인 →" in text
+        assert "🔴 숏 진입 가능" in text
+        assert "조건 재평가 없음" in text
 
-    def test_tcl02_4_of_4_shows_all_clear(self):
-        """TCL-02: 4/4 전부 충족 → ✅ 4/4 진입 조건 충족."""
-        all_met = [
-            " ✅ ① 가격 < EMA    ¥12,005,001 (EMA ¥12,007,400)",
-            " ✅ ② EMA 기울기    -0.08%  (≤-0.05% 충족)",
-            " ✅ ③ RSI 범위      48  (허용 35~60)",
-            " ✅ ④ 추세장        ×4 연속",
-        ]
-        text = build_telegram_text("GMOC", "14:08", "btc_jpy", self._base_short_waiting(all_met))
-        assert "✅ 4/4 진입 조건 충족" in text
+    def test_tcl02_long_setup_shows_long_ready(self):
+        """TCL-02: long_setup 신호 → 롱 진입 가능 표시."""
+        data = self._base_short_waiting(signal="long_setup")
+        data["wait_direction"] = "long"
+        text = build_telegram_text("GMOC", "14:08", "btc_jpy", data)
+        assert "판단 도메인 →" in text
+        assert "🟢 롱 진입 가능" in text
         assert "🚫" not in text
 
-    def test_tcl03_empty_condition_lines_falls_back(self):
-        """TCL-03: entry_condition_lines=[] → 기존 blockers 방식 폴백."""
-        data = {
-            "trend_icon": "📉",
-            "current_price": 12_005_001,
-            "market_summary": "관망",
-            "position": None,
-            "wait_direction": "short",
-            "entry_blockers": ["EMA slope -0.02% → ≤-0.05% 필요"],
-            "entry_condition_lines": [],
-            "conditions_met": 4,
-            "conditions_total": 5,
-            "jpy_available": 100_000,
-        }
+    def test_tcl03_hold_shows_wait(self):
+        """TCL-03: hold 신호 → 대기 표시."""
+        data = self._base_short_waiting(signal="hold")
         text = build_telegram_text("GMOC", "14:08", "btc_jpy", data)
-        assert "4/5" in text
-        assert " · EMA slope" in text
+        assert "판단 도메인 →" in text
+        assert "⏸ 대기" in text
 
-    def test_tcl04_long_wait_3_of_4(self):
-        """TCL-04: 롱 대기 3/4 충족 케이스."""
-        cond_lines = [
-            " ✅ ① 가격 > EMA    ¥105 (EMA ¥100)",
-            " ❌ ② EMA 기울기    지금 -0.02% → +0.00% 이상 필요 (0.02%p 부족)",
-            " ✅ ③ RSI 범위      52  (허용 40~65)",
-            " ✅ ④ 추세장        ×3 연속",
-        ]
-        data = {
-            "trend_icon": "➡️",
-            "current_price": 105,
-            "market_summary": "추세 약화 구간",
-            "position": None,
-            "wait_direction": "long",
-            "entry_blockers": [],
-            "entry_condition_lines": cond_lines,
-            "conditions_met": 3,
-            "conditions_total": 4,
-            "jpy_available": 100_000,
-        }
+    def test_tcl04_wait_regime_shows_regime_gate(self):
+        """TCL-04: wait_regime 신호 → RegimeGate 차단 표시."""
+        data = self._base_short_waiting(signal="wait_regime")
         text = build_telegram_text("GMOC", "14:08", "btc_jpy", data)
-        assert "🚫 3/4 진입까지:" in text
-        assert "롱 대기중" in text
-        assert "❌ ② EMA" in text
+        assert "판단 도메인 →" in text
+        assert "RegimeGate" in text
 
-    def test_tcl05_no_condition_lines_key_no_crash(self):
-        """TCL-05: entry_condition_lines 키 없어도 크래시 없음 (구버전 호환)."""
+    def test_tcl05_no_signal_key_no_crash(self):
+        """TCL-05: signal 키 없어도 크래시 없음."""
         data = {
             "trend_icon": "📉",
             "current_price": 12_005_001,
@@ -3145,7 +3114,7 @@ class TestBuildTelegramTextConditionLines:
             "conditions_met": 4,
             "conditions_total": 5,
             "jpy_available": 100_000,
-            # entry_condition_lines 키 없음
+            # signal 키 없음
         }
         text = build_telegram_text("GMOC", "14:08", "btc_jpy", data)
-        assert "4/5" in text
+        assert "판단 도메인 →" in text
