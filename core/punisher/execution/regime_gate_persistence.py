@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from .regime_gate import RegimeGate
 
 logger = logging.getLogger(__name__)
-_LOG_PREFIX = "⚙️ [RegimeGate:Persist]"
+_LOG_PREFIX = "[Punisher-Layer][RegimeGate:Persist]"
 
 _TABLE = "gmoc_regime_gate_state"
 
