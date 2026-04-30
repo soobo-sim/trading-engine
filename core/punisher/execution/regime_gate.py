@@ -4,7 +4,7 @@ RegimeGate — 4H 체제 기반 전략 진입 게이트.
 4H 캔들 경계에서 update_regime()을 호출하면 regime 이력을 관리하고,
 3캔들 연속 동일 regime 시 active_strategy를 전환한다.
 
-로그 프리픽스: ⚙️ [RegimeGate]
+로그 프리픽스: [Punisher-Layer][RegimeGate]
 """
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
-_LOG_PREFIX = "⚙️ [RegimeGate]"
+_LOG_PREFIX = "[Punisher-Layer][RegimeGate]"
 _DEFAULT_STREAK_REQUIRED = 3  # 전환에 필요한 연속 캔들 수
 _DEFAULT_RESTORE_REQUIRED = 2  # unclear 후 복원에 필요한 연속 캔들 수 (< streak_required)
 
