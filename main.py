@@ -400,6 +400,44 @@ async def lifespan(app: FastAPI):
         trend_manager.set_orchestrator(_orchestrator)
         box_manager.set_orchestrator(_orchestrator)
         logger.debug(f"Execution Layer 초기화: TRADING_MODE={trading_mode} (OpenClaw 레이첼 advisory 연동, 양쪽 매니저 공유)")
+    elif trading_mode == "jit":
+        # JIT advisory: 룰엔진 판단 후 진입 직전 LLM 단발 자문
+        from core.judge.jit_advisory import JITAdvisoryGate
+        from core.judge.jit_advisory.client import JITAdvisoryClient
+        from core.execution.orchestrator import ExecutionOrchestrator
+        from core.judge.safety.guardrails import AiGuardrails
+
+        _jit_url = os.environ.get("JIT_ADVISORY_URL", "http://host.docker.internal:18793/v1/responses")
+        _jit_token = os.environ.get("JIT_ADVISORY_TOKEN", "")
+        _jit_timeout = float(os.environ.get("JIT_TIMEOUT_SEC", "20"))
+
+        _jit_client = JITAdvisoryClient(
+            url=_jit_url,
+            token=_jit_token,
+            timeout_sec=_jit_timeout,
+        )
+        _jit_gate = JITAdvisoryGate(
+            session_factory=session_factory,
+            jit_client=_jit_client,
+        )
+        _guardrail = AiGuardrails(
+            session_factory=session_factory,
+            trade_model=models.trade,
+            balance_model=models.balance_entry,
+        )
+        _orchestrator = ExecutionOrchestrator(
+            decision_maker=_jit_gate,
+            guardrail=_guardrail,
+            session_factory=session_factory,
+            judgment_model=AiJudgment,
+            approval_gate=_approval_gate,
+        )
+        trend_manager.set_orchestrator(_orchestrator)
+        box_manager.set_orchestrator(_orchestrator)
+        logger.info(
+            f"Execution Layer 초기화: TRADING_MODE=jit — "
+            f"JIT advisory URL={_jit_url}, timeout={_jit_timeout}s"
+        )
     else:
         logger.warning(
             f"TRADING_MODE={trading_mode!r} 미지원. 기본값 v1을 사용합니다."
