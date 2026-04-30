@@ -163,14 +163,6 @@ class TelegramTransactionHandler(logging.Handler):
             'regime_consecutive': 0,
             'regime_bb_width': None,
             'regime_range_pct': None,
-            'advisory_id': None,
-            'advisory_action': None,
-            'advisory_confidence': None,
-            'advisory_remaining_h': None,
-            'advisory_reasoning': None,
-            'advisory_alice': None,
-            'advisory_samantha': None,
-            'advisory_risk_notes': None,
             'fng_score': None,
             'fng_label': None,
             # 시그널 상세 (candle_loop 로그에서 파싱)
@@ -190,7 +182,14 @@ class TelegramTransactionHandler(logging.Handler):
             'current_price': None,
             'ema_price': None,
             'realized_pnl_today': 0.0,
-            # 승인 게이트용 — 오케스트레이터 로그에서 파싱
+            # 판단 도메인 최종 결정 (orchestrator + JIT gate 로그에서 파싱)
+            'decision_action': None,      # 최종 action (entry_long / hold / tighten_stop 등)
+            'decision_size_pct': None,    # 사이즈 (0~1 소수)
+            'decision_confidence': None,  # 확신도 (0~1 소수)
+            # JIT Advisory Gate 결과
+            'jit_decision': None,         # 'GO' | 'NO_GO' | 'ADJUST' | None
+            'jit_reasoning': None,        # JIT 자문 사유 (NO_GO/ADJUST 시)
+            # 승인 게이트용 — 오케스트레이터 로그에서 파싱 (approval mode 표시용)
             'signal_confidence': None,
             'signal_size_pct': None,
             # 진입/청산 이벤트 (즉시 전송 후 None으로 클리어)
@@ -320,12 +319,57 @@ class TelegramTransactionHandler(logging.Handler):
                     if self._domain == "judge" and self._loop and self._state['prev_signal'] is not None:
                         self._loop.create_task(self._send_signal_change())
 
-        # 오케스트레이터 확신도/사이즈 파싱 (entry 신호 발생 시 자동/수동 승인 판별용)
+        # ── 오케스트레이터 판단 결과 파싱 ────────────────────────────────
+        # 구 포맷: "확신도=0.72 사이즈=0.50"
         m = re.search(r'확신도=([\d.]+)\s+사이즈=([\d.]+)', msg)
         if m:
-            self._state['signal_confidence'] = float(m.group(1))
-            self._state['signal_size_pct'] = float(m.group(2))
-        
+            conf = float(m.group(1))
+            size = float(m.group(2))
+            self._state['signal_confidence'] = conf
+            self._state['signal_size_pct'] = size
+            self._state['decision_confidence'] = conf
+            self._state['decision_size_pct'] = size  # 이미 0~1 소수
+        # 신 포맷(_build_narrative): "사이즈 50%, 확신도 0.72"
+        m = re.search(r'사이즈 (\d+)%, 확신도 ([\d.]+)', msg)
+        if m:
+            size = float(m.group(1)) / 100
+            conf = float(m.group(2))
+            self._state['decision_size_pct'] = size
+            self._state['decision_confidence'] = conf
+            self._state['signal_confidence'] = conf
+            self._state['signal_size_pct'] = size
+        # "판단=entry_long → 안전장치 통과" 포맷에서 action 파싱
+        m = re.search(r'판단=(entry_\w+|tighten_stop|exit|hold)', msg)
+        if m:
+            self._state['decision_action'] = m.group(1)
+
+        # ── JIT Advisory Gate 결과 파싱 ──────────────────────────────────
+        # GO: "[JIT][xxxx] btc_jpy GO — action=entry_long size=50% conf=0.80. 사유: ..."
+        m = re.search(r'\bGO — action=([\w]+) size=(\d+)%', msg)
+        if m:
+            self._state['jit_decision'] = 'GO'
+            self._state['decision_action'] = m.group(1)
+            # size는 GO 시 변경 없음, 기존 decision_size_pct 유지
+        # NO_GO: "[JIT][xxxx] btc_jpy NO_GO — action=entry_long → hold. 사유: ..."
+        m = re.search(r'\bNO_GO — .*사유: (.+)', msg)
+        if m:
+            self._state['jit_decision'] = 'NO_GO'
+            self._state['jit_reasoning'] = m.group(1).strip()[:120]
+            self._state['decision_action'] = 'hold'
+        # fail-soft NO_GO: "[JIT][xxxx] btc_jpy fail-soft NO_GO — ..."
+        m = re.search(r'fail-soft NO_GO — (.+)', msg)
+        if m:
+            self._state['jit_decision'] = 'NO_GO'
+            self._state['jit_reasoning'] = f"타임아웃/오류: {m.group(1).strip()[:80]}"
+            self._state['decision_action'] = 'hold'
+        # ADJUST: "[JIT][xxxx] btc_jpy ADJUST — size 50%→30% action entry_long→entry_long 사유: ..."
+        m = re.search(r'\bADJUST — size \d+%→(\d+)% action [\w]+→([\w]+) 사유: (.+)', msg)
+        if m:
+            self._state['jit_decision'] = 'ADJUST'
+            self._state['decision_size_pct'] = float(m.group(1)) / 100
+            self._state['decision_action'] = m.group(2)
+            self._state['jit_reasoning'] = m.group(3).strip()[:120]
+
         # regime (4H 체제 판정)
         m = re.search(r'regime=(\w+).*BB폭 ([\d.]+)%.*가격범위 ([\d.]+)%.*?(\w+) 연속 (\d+)회', msg)
         if m:
@@ -343,58 +387,6 @@ class TelegramTransactionHandler(logging.Handler):
             
             if self._domain == "judge" and self._loop:
                 self._loop.create_task(self._send_regime_update(regime_changed))
-        
-        # advisory
-        m = re.search(r'id=(\d+) action=(\w+) confidence=([\d.]+).*잔여=([\d.]+)H', msg)
-        if m:
-            adv_id = m.group(1)
-            action = m.group(2)
-            confidence = float(m.group(3))
-            remaining_h = float(m.group(4))
-
-            # 다중 필드 파싱 (로그 포맷: '근거: ...' '앨리스: ...' '사만다: ...' '리스크: ...')
-            # 주의: \s* 대신 [ \t]* 사용 — \s는 \n을 포함해 다음 줄을 잡아버릴 수 있음
-            reasoning_match = re.search(r'근거:[ \t]*([^\n]+)', msg)
-            alice_match = re.search(r'앨리스:[ \t]*([^\n]+)', msg)
-            samantha_match = re.search(r'사만다:[ \t]*([^\n]+)', msg)
-            risk_match = re.search(r'리스크:[ \t]*([^\n]+)', msg)
-
-            reasoning = reasoning_match.group(1).strip() if reasoning_match else None
-            alice = (alice_match.group(1).strip() or None) if alice_match else None
-            samantha = (samantha_match.group(1).strip() or None) if samantha_match else None
-            risk_notes = (risk_match.group(1).strip() or None) if risk_match else None
-
-            # 트리거: advisory ID가 바뀌면 새 advisory 등록 → 즉시 전송
-            # (같은 action이어도 4H 갱신 시 새 id로 전송)
-            prev_id = self._state.get('advisory_id')
-            advisory_new = prev_id != adv_id
-
-            self._state['advisory_id'] = adv_id
-            self._state['advisory_action'] = action
-            self._state['advisory_confidence'] = confidence
-            self._state['advisory_remaining_h'] = remaining_h
-            if reasoning:
-                self._state['advisory_reasoning'] = reasoning
-            if alice is not None:
-                self._state['advisory_alice'] = alice
-            if samantha is not None:
-                self._state['advisory_samantha'] = samantha
-            if risk_notes is not None:
-                self._state['advisory_risk_notes'] = risk_notes
-
-            if advisory_new and self._domain == "judge" and self._loop:
-                self._loop.create_task(self._send_advisory_update())
-        
-        # advisory 없음 (v1 폴백)
-        if 'advisory' in msg and '없음' in msg and 'v1 폴백' in msg:
-            now = time.time()
-            # 1시간에 1번만 전송
-            if now - self._advisory_warn_last > 3600:
-                self._advisory_warn_last = now
-                # WARNING 레벨이므로 TelegramAlertHandler가 처리하지만
-                # 여기서는 상태만 업데이트
-                self._state['advisory_action'] = None
-                self._state['advisory_confidence'] = None
         
         # FNG
         m = re.search(r'FNG.*score=(\d+) \(([^)]+)\)', msg)
@@ -422,23 +414,51 @@ class TelegramTransactionHandler(logging.Handler):
         risk_jpy = abs(entry_price - stop) * size
         risk_pct = abs(entry_price - stop) / entry_price * 100
         
-        # advisory 요약
-        adv = self._state.get('advisory_action')
-        if adv:
-            conf = self._state.get('advisory_confidence', 0) * 100
-            adv_summary = f"{adv} (확신도 {conf:.0f}%)"
+        # ── 판단 도메인으로부터 받은 결과 ──────────────────────────
+        jit = self._state.get('jit_decision')
+        jit_reasoning = self._state.get('jit_reasoning') or ''
+        decision_action = self._state.get('decision_action')
+        decision_size = self._state.get('decision_size_pct')
+        decision_conf = self._state.get('decision_confidence')
+
+        _ACTION_KR = {
+            'entry_long':   '롱 진입',
+            'entry_short':  '숏 진입',
+            'add_position': '피라미딩 추가',
+            'hold':         '진입 보류',
+        }
+        action_kr = _ACTION_KR.get(decision_action or '', decision_action or side_kr + ' 진입')
+
+        # 판단 흐름 요약: 어떤 과정으로 이 결론이 나왔는가
+        if jit == 'GO':
+            judge_flow = f"규칙 기반 판단 → JIT 자문 ✅ GO → {action_kr}"
+        elif jit == 'ADJUST':
+            judge_flow = f"규칙 기반 판단 → JIT 자문 ⚙️ ADJUST → {action_kr}"
+            if jit_reasoning:
+                judge_flow += f"\n  (JIT 조정 사유: {jit_reasoning[:70]})"
         else:
-            adv_summary = "규칙 기반 판단"
+            # JIT 없음 (TRADING_MODE=v1 규칙 기반)
+            judge_flow = f"규칙 기반 판단 → {action_kr}"
+
+        # 판단 도메인 전달값 명시
+        decision_parts = []
+        if decision_size is not None:
+            decision_parts.append(f"사이즈 {decision_size * 100:.0f}%")
+        if decision_conf is not None:
+            decision_parts.append(f"확신도 {decision_conf:.2f}")
+        decision_detail = "  · " + " / ".join(decision_parts) if decision_parts else ""
         
         text = (
             f"⚡ [{self._exchange}·BTC] {_format_time(time.time())}  🟢 진입  (실행 사이클 · {side_kr})\n"
             f"──────────────────────────\n"
             f"진입가 ¥{entry_price:,.0f}  /  {size} BTC\n"
             f"스탑 ¥{stop:,.0f}  (리스크 {risk_pct:.2f}%,  ¥{risk_jpy:,.0f})\n"
-            f"레이첼: {adv_summary}"
+            f"──────────────────────────\n"
+            f"판단 흐름: {judge_flow}\n"
+            + (f"{decision_detail}\n" if decision_detail else "")
         )
         
-        await _send_telegram(self._bot_token, self._chat_id, text)
+        await _send_telegram(self._bot_token, self._chat_id, text.rstrip())
         self._state['entry_event'] = None
 
     async def _send_close(self) -> None:
@@ -545,14 +565,6 @@ class TelegramTransactionHandler(logging.Handler):
         prev_kr = signal_kr.get(prev, prev)
         curr_kr = signal_kr.get(curr, curr)
         
-        # advisory 요약
-        adv = self._state.get('advisory_action')
-        if adv:
-            conf = self._state.get('advisory_confidence', 0) * 100
-            adv_summary = f"{adv} (확신도 {conf:.0f}%)"
-        else:
-            adv_summary = "4H advisory 없음 → 규칙 기반 판단"
-        
         # signal_detail
         current = self._state.get('current_price')
         ema = self._state.get('ema_price')
@@ -576,13 +588,48 @@ class TelegramTransactionHandler(logging.Handler):
             else:
                 conclusion = "진입 조건 미충족"
         
+        # ── 판단 방식 + 실행 도메인 전달값 ─────────────────────────────
+        jit = self._state.get('jit_decision')
+        decision_action = self._state.get('decision_action')
+        decision_size = self._state.get('decision_size_pct')
+        decision_conf = self._state.get('decision_confidence')
+
+        # 판단 방식
+        if jit == 'GO':
+            judge_method = "규칙 기반 판단 → JIT 자문 ✅ GO"
+        elif jit == 'NO_GO':
+            judge_method = "규칙 기반 판단 → JIT 자문 🚫 NO_GO (진입 차단)"
+        elif jit == 'ADJUST':
+            judge_method = "규칙 기반 판단 → JIT 자문 ⚙️ ADJUST (사이즈 조정)"
+        else:
+            judge_method = "규칙 기반 판단"
+
+        # 실행 도메인에 전달하는 값
+        _ACTION_KR = {
+            'entry_long': '롱 진입', 'entry_short': '숏 진입',
+            'add_position': '피라미딩', 'hold': '홀드',
+            'tighten_stop': '스탑 조임', 'exit': '청산',
+        }
+        if decision_action and decision_action not in ('hold', None):
+            action_kr = _ACTION_KR.get(decision_action, decision_action)
+            size_str = f"사이즈 {decision_size * 100:.0f}%" if decision_size is not None else ""
+            conf_str = f"확신도 {decision_conf:.2f}" if decision_conf is not None else ""
+            detail = " / ".join(x for x in [size_str, conf_str] if x)
+            delivery = (
+                f"→ 실행 도메인 전달: {action_kr} ({detail})\n"
+                f"   (실행 도메인은 이 결정대로 주문을 냅니다)"
+            )
+        else:
+            delivery = "→ 실행 도메인 전달: 홀드 (주문 없음)"
+        
         text = (
             f"🔮 [{self._exchange}·BTC] {_format_time(time.time())}  ★ 신호 변경  (판단 사이클)\n"
             f"──────────────────────────\n"
             f"이전: {prev_kr}  →  현재: {curr_kr}\n"
-            f"레이첼: {adv_summary}\n"
-            f"  · {signal_detail}\n"
-            f"결론: {conclusion}"
+            f"판단 방식: {judge_method}\n"
+            + (f"  · {signal_detail}\n" if signal_detail else "")
+            + f"결론: {conclusion}\n"
+            f"{delivery}"
         )
         
         await _send_telegram(self._bot_token, self._chat_id, text)
@@ -628,59 +675,6 @@ class TelegramTransactionHandler(logging.Handler):
             )
         
         await _send_telegram(self._bot_token, self._chat_id, text)
-
-    async def _send_advisory_update(self) -> None:
-        """advisory 갱신 즉시 전송."""
-        action = self._state.get('advisory_action')
-        conf = self._state.get('advisory_confidence', 0) * 100
-        remaining_h = self._state.get('advisory_remaining_h')
-        reasoning = self._state.get('advisory_reasoning') or '(사유 없음)'
-        alice = self._state.get('advisory_alice')
-        samantha = self._state.get('advisory_samantha')
-        risk_notes = self._state.get('advisory_risk_notes')
-
-        action_emoji = {
-            'hold': '⏸',
-            'entry_long': '🟢',
-            'entry_short': '🔴',
-            'add_position': '➕',
-            'exit': '🚪',
-        }.get(action, '❓')
-        action_kr = {
-            'hold': '보류',
-            'entry_long': '롱 진입',
-            'entry_short': '숏 진입',
-            'add_position': '피라미딩',
-            'exit': '청산',
-        }.get(action, action)
-
-        lines = [
-            f"🔮 [{self._exchange}·BTC] {_format_time(time.time())}  (레이첼 advisory 갱신)",
-            f"──────────────────────────",
-            f"결론: {action_emoji} {action_kr}  |  확신도: {conf:.0f}%  |  만료: {remaining_h:.1f}H 후",
-            f"※ 확신도 = 레이첼(LLM) 자체 평가 수치 (룰베이스 아님)",
-        ]
-
-        # 에이전트 의견 블록 (alice/samantha 있을 때만)
-        if alice or samantha:
-            lines.append("")
-            lines.append("👥 에이전트 의견")
-            if alice:
-                lines.append(f"• 앨리스: {alice}")
-            if samantha:
-                lines.append(f"• 사만다: {samantha}")
-
-        # 레이첼 판단 (에이전트 의견을 어떻게 반영했는지)
-        lines.append("")
-        lines.append("🔍 레이첼 판단")
-        lines.append(reasoning)
-
-        # 리스크 노트
-        if risk_notes:
-            lines.append("")
-            lines.append(f"⚠️ 리스크: {risk_notes}")
-
-        await _send_telegram(self._bot_token, self._chat_id, "\n".join(lines))
 
     async def _send_fng_update(self) -> None:
         """FNG 갱신 즉시 전송."""
@@ -728,14 +722,29 @@ class TelegramTransactionHandler(logging.Handler):
         else:
             gate_status = "체제OK · 신호 대기"
 
-        # 레이첼
-        adv = self._state.get('advisory_action')
-        if adv:
-            conf = self._state.get('advisory_confidence', 0) * 100
-            remaining_h = self._state.get('advisory_remaining_h', 0)
-            adv_summary = f"{adv} (확신도 {conf:.0f}%, 만료까지 {remaining_h:.1f}H)"
+        # ── 최근 판단 결과 (실행 도메인에 전달한 값) ────────────────────
+        decision_action = self._state.get('decision_action')
+        decision_size = self._state.get('decision_size_pct')
+        decision_conf = self._state.get('decision_confidence')
+        jit = self._state.get('jit_decision')
+        jit_reasoning = self._state.get('jit_reasoning') or ''
+
+        _ACTION_KR_SUM = {
+            'entry_long': '롱 진입', 'entry_short': '숏 진입',
+            'add_position': '피라미딩', 'hold': '홀드',
+            'tighten_stop': '스탑 조임', 'exit': '청산', 'blocked': '안전장치 차단',
+        }
+        if decision_action:
+            action_kr = _ACTION_KR_SUM.get(decision_action, decision_action)
+            jit_label = {'GO': ' (JIT ✅)', 'ADJUST': ' (JIT ⚙️ 조정)', 'NO_GO': ' (JIT 🚫 차단)'}.get(jit or '', '')
+            size_str = f"사이즈 {decision_size * 100:.0f}%" if decision_size is not None else ""
+            conf_str = f"확신도 {decision_conf:.2f}" if decision_conf is not None else ""
+            detail = " / ".join(x for x in [size_str, conf_str] if x)
+            judge_summary = f"{action_kr}{jit_label}" + (f" ({detail})" if detail else "")
+            if jit in ('NO_GO', 'ADJUST') and jit_reasoning:
+                judge_summary += f"\n  └ {jit_reasoning[:60]}"
         else:
-            adv_summary = "4H advisory 없음 → 규칙 기반 판단"
+            judge_summary = "아직 없음 (신호 대기)"
 
         # 승인 모드
         import os as _os
@@ -868,7 +877,7 @@ class TelegramTransactionHandler(logging.Handler):
             f"🔮 [{self._exchange}·BTC] {_format_time(time.time())}  (판단 사이클 · 5분 요약)\n"
             f"──────────────────────────\n"
             f"체제: {regime_kr} · {consecutive}회 연속 ({gate_status}){regime_detail}\n"
-            f"레이첼: {adv_summary}\n"
+            f"판단 결과: {judge_summary}\n"
             f"{approval_line}\n"
             f"──────────────────────────\n"
             f"{sig_block}\n"

@@ -20,8 +20,6 @@ from .display import (
     get_position_summary,
     get_entry_blockers,
     get_entry_blockers_short,
-    get_entry_condition_lines_long,
-    get_entry_condition_lines_short,
     get_wait_direction,
 )
 from .alerts import (
@@ -192,26 +190,21 @@ def build_telegram_text(prefix: str, time_str: str, pair: str, data: dict) -> st
         situation = data.get("market_summary") or "관망"
         lines.append(f"📊 지금: {_format_situation_with_basis(situation, ema_slope_pct, rsi)}")
 
-        condition_lines = data.get("entry_condition_lines", [])
-        if condition_lines:
-            met_count = sum(1 for l in condition_lines if "✅" in l)
-            total_count = len(condition_lines)
-            has_unmet = any("❌" in l for l in condition_lines)
-            if has_unmet:
-                lines.append(f"🚫 {met_count}/{total_count} 진입까지:")
-            else:
-                lines.append(f"✅ {met_count}/{total_count} 진입 조건 충족")
-            lines.extend(condition_lines)
-        else:
-            met = data.get("conditions_met", 0)
-            total = data.get("conditions_total", 5)
-            blockers = data.get("entry_blockers", [])
-            if blockers:
-                lines.append(f"🚫 {met}/{total} 진입까지:")
-                for b in blockers:
-                    lines.append(f" · {b}")
-            else:
-                lines.append(f"✅ {met}/{total} 진입 조건 충족")
+        # ── 판단 도메인 결론 표시 (조건 재평가 없음) ────────────────
+        _SIGNAL_KR = {
+            'long_setup':      '🟢 롱 진입 가능 — 진입 신호 활성',
+            'short_setup':     '🔴 숏 진입 가능 — 진입 신호 활성',
+            'hold':            '⏸ 대기 — 조건 미충족',
+            'wait_regime':     '⏳ 체제 대기 — RegimeGate 차단 중',
+            'long_caution':    '⚠️ 롱 추세 이탈 경고',
+            'long_overheated': '🌡 롱 RSI 과열',
+            'short_caution':   '⚠️ 숏 추세 이탈 경고',
+            'short_oversold':  '🌡 숏 RSI 과매도',
+        }
+        signal_val = data.get("signal", "")
+        signal_display = _SIGNAL_KR.get(signal_val, f"신호: {signal_val}")
+        lines.append(f"판단 도메인 → {signal_display}")
+        lines.append("  (판단 도메인 결론을 받아 실행 중 — 조건 재평가 없음)")
 
         _rg = data.get("regime_gate_info")
         if _rg is not None:
@@ -451,39 +444,10 @@ async def generate_trend_report(
     else:
         wait_direction = None  # spot (BF 등) — 기존 동작 유지
 
-    # ── 조건 상세 라인 (✅/❌ 전체 4개 조건 표시) ──────────────
-    _rg_info = None
-    try:
-        _rg_ref = getattr(trend_manager, "_regime_gate", None)
-        _rg_info = {
-            "consecutive_count": _rg_ref.consecutive_count if _rg_ref else 0,
-            "active_strategy": _rg_ref.active_strategy if _rg_ref else None,
-        }
-    except Exception:
-        pass
-    _regime_consecutive = (_rg_info or {}).get("consecutive_count", 0)
-    _regime_active = (_rg_info or {}).get("active_strategy") is not None
-    if not position_data:
-        if wait_direction == "short":
-            entry_condition_lines = get_entry_condition_lines_short(
-                signal, current_price, ema, ema_slope_pct, rsi,
-                rsi_min=float(params.get("entry_rsi_min_short", 35.0)),
-                rsi_max=float(params.get("entry_rsi_max_short", 60.0)),
-                slope_threshold=float(params.get("ema_slope_short_threshold", -0.05)),
-                regime_consecutive=_regime_consecutive,
-                regime_active=_regime_active,
-            )
-        else:
-            entry_condition_lines = get_entry_condition_lines_long(
-                signal, current_price, ema, ema_slope_pct, rsi,
-                rsi_min=float(params.get("entry_rsi_min", 40.0)),
-                rsi_max=float(params.get("entry_rsi_max", 65.0)),
-                slope_min=float(params.get("ema_slope_entry_min", 0.0)),
-                regime_consecutive=_regime_consecutive,
-                regime_active=_regime_active,
-            )
-    else:
-        entry_condition_lines = []
+    # ── 판단 도메인 최종 시그널 (실행 도메인에 전달된 값) ──────────
+    # entry_condition_lines는 제거 — 실행 도메인은 판단 도메인 결론만 수행
+    entry_condition_lines: list[str] = []
+
     # 7. 텍스트 조립용 데이터
     regime = sig.get("regime")  # "trending" | "ranging" | "unclear"
     _regime_gate = getattr(trend_manager, "_regime_gate", None)
