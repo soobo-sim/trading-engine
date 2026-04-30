@@ -33,6 +33,7 @@ from core.strategy.signals import (
     compute_profit_based_mult,
     detect_bearish_divergences,
 )
+from core.shared.logging.context import get_judge_cycle_id
 
 if TYPE_CHECKING:
     from core.exchange.types import Position
@@ -125,6 +126,8 @@ class ExecutionMixin:
         atr: float, ema_slope_pct: Optional[float], rsi: Optional[float], params: Dict
     ) -> None:
         """적응형 트레일링 스탑 ratchet. 서브클래스에서 양방향 지원 가능."""
+        _cid = get_judge_cycle_id() or "????"
+        _pfx = f"[Punisher-Layer][{_cid}]{self._log_prefix}"
         side = pos.extra.get("side", "buy")
         profit_mult = compute_profit_based_mult(
             pos.entry_price or 0.0, current_price, atr, params, side=side
@@ -149,7 +152,7 @@ class ExecutionMixin:
             pos.stop_loss_price = new_sl
             await self._update_trailing_stop_in_db(pair, new_sl)
             logger.info(
-                f"{self._log_prefix} {pair}: 트레일링 스탑 갱신 "
+                f"{_pfx} {pair}: 트레일링 스탑 갱신 "
                 f"¥{current_sl} → ¥{new_sl} "
                 f"(x{mult:.1f} {'tight' if pos.stop_tightened else 'adaptive+profit'})"
             )
@@ -172,6 +175,8 @@ class ExecutionMixin:
             True  — 호출자(_candle_monitor)가 continue해야 하는 경우 (청산 후)
             False — 다음 로직 불필요 (hold / entry 등)
         """
+        _cid = get_judge_cycle_id() or "????"
+        _pfx = f"[Punisher-Layer][{_cid}]{self._log_prefix}"
         action = result.action
         pos = self._position.get(pair)
         current_price = snapshot.current_price
@@ -182,7 +187,7 @@ class ExecutionMixin:
         if action == "exit":
             trigger = result.decision.trigger if result.decision else "orchestrator_exit"
             logger.info(
-                f"{self._log_prefix} {pair}: {trigger} @ ¥{current_price} → 전량 청산"
+                f"{_pfx} {pair}: {trigger} @ ¥{current_price} → 전량 청산"
             )
             await self._close_position(pair, trigger)
             return True  # continue
@@ -197,12 +202,18 @@ class ExecutionMixin:
             manager_type = self._get_strategy_type()
             if not self._regime_gate.should_allow_entry(manager_type):
                 logger.debug(
-                    f"{self._log_prefix} {pair}: RegimeGate 진입 차단 "
+                    f"{_pfx} {pair}: RegimeGate 진입 차단 "
                     f"(active={self._regime_gate.active_strategy}, this={manager_type})"
                 )
                 return False
 
         if action == "entry_long":
+            logger.info(
+                f"{_pfx} {pair}: entry_long 실행 시작 — "
+                f"¥{current_price:,.0f} size={result.decision.size_pct:.0%} "
+                f"conf={result.decision.confidence:.2f}"
+                if result.decision else f"{_pfx} {pair}: entry_long 실행 시작 — ¥{current_price:,.0f}"
+            )
             # approved_at을 signal_data에 병합 (BUG-031 TTL 체크용)
             if result.decision and result.decision.meta.get("approved_at"):
                 signal_data = {**signal_data, "approved_at": result.decision.meta["approved_at"]}
@@ -218,10 +229,11 @@ class ExecutionMixin:
                     new_pos.extra["confidence"] = result.decision.confidence
                     new_pos.extra["side"] = new_pos.extra.get("side", "long")
                 logger.info(
-                    f"{self._log_prefix} {pair}: 판단→실행 연결 — "
-                    f"judgment_id={result.judgment_id}, "
-                    f"확신도={new_pos.extra.get('confidence', 0.0):.0%}, "
-                    f"side={new_pos.extra.get('side', 'long')}"
+                    f"{_pfx} {pair}: entry_long 완료 — "
+                    f"진입가=¥{new_pos.entry_price:,.0f} "
+                    f"judgment_id={result.judgment_id} "
+                    f"확신도={new_pos.extra.get('confidence', 0.0):.0%} "
+                    f"SL=¥{new_pos.stop_loss_price}"
                 )
             # 실제 주문 성공 후 텔레그램 보고 (포지션 생성 확인)
             if new_pos is not None and result.decision is not None:
@@ -235,10 +247,16 @@ class ExecutionMixin:
         if action == "entry_short":
             if not self._supports_short:
                 logger.warning(
-                    f"{self._log_prefix} {pair}: entry_short 차단 — "
+                    f"{_pfx} {pair}: entry_short 차단 — "
                     f"롱 전용 매니저. 숏이 필요하면 cfd_trend_following 사용"
                 )
                 return False
+            logger.info(
+                f"{_pfx} {pair}: entry_short 실행 시작 — "
+                f"¥{current_price:,.0f} size={result.decision.size_pct:.0%} "
+                f"conf={result.decision.confidence:.2f}"
+                if result.decision else f"{_pfx} {pair}: entry_short 실행 시작 — ¥{current_price:,.0f}"
+            )
             # approved_at을 signal_data에 병합 (BUG-031 TTL 체크용)
             if result.decision and result.decision.meta.get("approved_at"):
                 signal_data = {**signal_data, "approved_at": result.decision.meta["approved_at"]}
@@ -254,10 +272,11 @@ class ExecutionMixin:
                     new_pos.extra["confidence"] = result.decision.confidence
                     new_pos.extra["side"] = new_pos.extra.get("side", "short")
                 logger.info(
-                    f"{self._log_prefix} {pair}: 판단→실행 연결 — "
-                    f"judgment_id={result.judgment_id}, "
-                    f"확신도={new_pos.extra.get('confidence', 0.0):.0%}, "
-                    f"side={new_pos.extra.get('side', 'short')}"
+                    f"{_pfx} {pair}: entry_short 완료 — "
+                    f"진입가=¥{new_pos.entry_price:,.0f} "
+                    f"judgment_id={result.judgment_id} "
+                    f"확신도={new_pos.extra.get('confidence', 0.0):.0%} "
+                    f"SL=¥{new_pos.stop_loss_price}"
                 )
             # 실제 주문 성공 후 텔레그램 보고 (포지션 생성 확인)
             if new_pos is not None and result.decision is not None:
@@ -270,7 +289,7 @@ class ExecutionMixin:
 
         if action == "blocked":
             logger.info(
-                f"{self._log_prefix} {pair}: 진입 차단 — {result.reason}"
+                f"{_pfx} {pair}: 진입 차단 — {result.reason}"
             )
             return False
 
@@ -279,7 +298,7 @@ class ExecutionMixin:
             pos = self._position.get(pair)
             if pos is None:
                 logger.warning(
-                    f"{self._log_prefix} {pair}: add_position이나 포지션 없음 — 스킵"
+                    f"{_pfx} {pair}: add_position이나 포지션 없음 — 스킵"
                 )
                 return False
 
@@ -287,7 +306,7 @@ class ExecutionMixin:
             _MAX_PYRAMID = 3
             if pyramid_count >= _MAX_PYRAMID:
                 logger.info(
-                    f"{self._log_prefix} {pair}: 피라미딩 상한 {_MAX_PYRAMID} 도달 — "
+                    f"{_pfx} {pair}: 피라미딩 상한 {_MAX_PYRAMID} 도달 — "
                     f"add_position 스킵 (이중 안전)"
                 )
                 return False
@@ -298,13 +317,13 @@ class ExecutionMixin:
                 last_advisory_id = pos.extra.get("last_pyramid_advisory_id")
                 if last_advisory_id == advisory_id:
                     logger.info(
-                        f"{self._log_prefix} {pair}: add_position 스킵 — "
+                        f"{_pfx} {pair}: add_position 스킵 — "
                         f"advisory_id={advisory_id} 이미 피라미딩 실행됨 (쿨다운)"
                     )
                     return False
             side = pos.extra.get("side", "buy")
             logger.info(
-                f"{self._log_prefix} {pair}: add_position 실행 시작 — "
+                f"{_pfx} {pair}: add_position 실행 시작 — "
                 f"피라미딩 #{pyramid_count+1}/{_MAX_PYRAMID} "
                 f"side={side} 현재가=¥{current_price:,.0f} "
                 f"기존 진입가=¥{pos.entry_price:,.0f} "
@@ -319,7 +338,7 @@ class ExecutionMixin:
                 if advisory_id is not None:
                     updated_pos.extra["last_pyramid_advisory_id"] = advisory_id
                 logger.info(
-                    f"{self._log_prefix} {pair}: add_position 완료 — "
+                    f"{_pfx} {pair}: add_position 완료 — "
                     f"피라미딩 #{updated_pos.extra['pyramid_count']}/{_MAX_PYRAMID} "
                     f"평균단가=¥{updated_pos.entry_price:,.0f} "
                     f"합산수량={updated_pos.entry_amount} "
@@ -327,7 +346,7 @@ class ExecutionMixin:
                 )
             else:
                 logger.info(
-                    f"{self._log_prefix} {pair}: add_position 미완료 — "
+                    f"{_pfx} {pair}: add_position 미완료 — "
                     f"Position 미변경 (증거금 부족 또는 주문 실패)"
                 )
 
@@ -346,7 +365,7 @@ class ExecutionMixin:
                 # force_exit 처리: true이면 즉시 전량 청산 (설계서 §7-3, §7-4)
                 if adjustments.get("force_exit", False):
                     logger.warning(
-                        f"{self._log_prefix} {pair}: adjust_risk force_exit=true → 즉시 청산"
+                        f"{_pfx} {pair}: adjust_risk force_exit=true → 즉시 청산"
                     )
                     await self._close_position(pair, "advisory_force_exit")
                     return False
@@ -365,7 +384,7 @@ class ExecutionMixin:
                         applied[k] = v
                 if applied:
                     logger.info(
-                        f"{self._log_prefix} {pair}: adjust_risk 적용 — {applied}"
+                        f"{_pfx} {pair}: adjust_risk 적용 — {applied}"
                     )
                     # 새로운 SL이 있으면 즉시 갱신
                     if pos is not None and atr is not None and "stop_loss_pct" in applied:
@@ -375,7 +394,7 @@ class ExecutionMixin:
                             pos.stop_loss_price = new_sl
                             await self._update_trailing_stop_in_db(pair, new_sl)
                             logger.info(
-                                f"{self._log_prefix} {pair}: adjust_risk SL 갱신 → ¥{new_sl}"
+                                f"{_pfx} {pair}: adjust_risk SL 갱신 → ¥{new_sl}"
                             )
                 # 서브클래스 훅 (GMO FX IFD-OCO 주문 변경 등)
                 await self._on_adjust_risk_hook(pair, adjustments, params)
@@ -415,8 +434,10 @@ class ExecutionMixin:
         if not await self._pre_entry_checks(pair, side, params):
             return
 
+        _cid = get_judge_cycle_id() or "????"
+        _pfx = f"[Punisher-Layer][{_cid}]{self._log_prefix}"
         logger.info(
-            f"{self._log_prefix} {pair}: {signal} @ ¥{current_price} → 진입 시도 (dir={direction})"
+            f"{_pfx} {pair}: {signal} @ ¥{current_price:,.0f} → 진입 시도 (dir={direction})"
         )
 
         # Paper pair는 실주문 스킵
@@ -434,15 +455,15 @@ class ExecutionMixin:
             if pending is not None:
                 self._pending_limit_orders[pair] = pending
                 logger.info(
-                    f"{self._log_prefix} {pair}: limit order 등록 — "
+                    f"{_pfx} {pair}: limit order 등록 — "
                     f"order_id={pending.order_id} price=¥{pending.limit_price:.0f}"
                 )
                 return
             # limit 실패
             if entry_mode == "limit":
-                logger.info(f"{self._log_prefix} {pair}: limit 진입 실패 — market fallback 없음")
+                logger.info(f"{_pfx} {pair}: limit 진입 실패 — market fallback 없음")
                 return
-            logger.info(f"{self._log_prefix} {pair}: limit 실패 — market fallback")
+            logger.info(f"{_pfx} {pair}: limit 실패 — market fallback")
 
         # market order (default 또는 limit_then_market fallback)
         await self._open_position(pair, side, current_price, atr, params, signal_data=signal_data)

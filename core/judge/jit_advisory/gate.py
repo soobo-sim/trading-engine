@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.judge.decision.base import IDecisionMaker
 from core.judge.decision.rule_based import RuleBasedDecision
 from core.shared.data.dto import Decision, SignalSnapshot, modify_decision
+from core.shared.logging.context import get_judge_cycle_id
 
 from .audit import save_jit_audit
 from .client import JITAdvisoryClient
@@ -67,9 +68,16 @@ class JITAdvisoryGate:
             return rule_decision
 
         # ── 진입 액션: JIT 자문 ──────────────────────────────
+        _cid = get_judge_cycle_id() or "????"
+        _pfx = f"[JIT][{_cid}]"
+        _rsi_str = f"{snapshot.rsi:.1f}" if snapshot.rsi is not None else "N/A"
+        _slope_str = f"{snapshot.ema_slope_pct:.4f}" if snapshot.ema_slope_pct is not None else "N/A"
         logger.info(
-            f"[JIT] {snapshot.pair} {rule_decision.action} — JIT 자문 요청 "
-            f"(conf={rule_decision.confidence:.2f}, size={rule_decision.size_pct:.1%})"
+            f"{_pfx} {snapshot.pair} JIT 자문 요청 — "
+            f"action={rule_decision.action} signal={snapshot.signal} "
+            f"regime={snapshot.regime} price=¥{snapshot.current_price:,.0f} "
+            f"rsi={_rsi_str} ema_slope={_slope_str} "
+            f"conf={rule_decision.confidence:.2f} size={rule_decision.size_pct:.0%}"
         )
 
         jit_req = build_jit_request(snapshot, rule_decision)
@@ -87,8 +95,7 @@ class JITAdvisoryGate:
             # 타임아웃/오류 → fail-soft NO_GO
             error_msg = error_msg or "JIT 타임아웃 또는 응답 파싱 실패"
             logger.warning(
-                f"[JIT] fail-soft NO_GO — {snapshot.pair} {rule_decision.action}. "
-                f"사유: {error_msg}"
+                f"{_pfx} {snapshot.pair} fail-soft NO_GO — {error_msg}"
             )
             final_decision = modify_decision(
                 rule_decision,
@@ -98,8 +105,9 @@ class JITAdvisoryGate:
 
         elif jit_resp.decision == "NO_GO":
             logger.info(
-                f"[JIT] NO_GO — {snapshot.pair} {rule_decision.action}. "
-                f"사유: {jit_resp.reasoning[:100]}"
+                f"{_pfx} {snapshot.pair} NO_GO — "
+                f"action={rule_decision.action} → hold. "
+                f"사유: {jit_resp.reasoning[:120]}"
             )
             final_decision = modify_decision(
                 rule_decision,
@@ -115,9 +123,10 @@ class JITAdvisoryGate:
             adjusted_tp = jit_resp.adjusted_take_profit or rule_decision.take_profit
 
             logger.info(
-                f"[JIT] ADJUST — {snapshot.pair}: "
-                f"size {rule_decision.size_pct:.1%}→{adjusted_size:.1%}, "
-                f"action {rule_decision.action}→{adjusted_action}"
+                f"{_pfx} {snapshot.pair} ADJUST — "
+                f"size {rule_decision.size_pct:.0%}→{adjusted_size:.0%} "
+                f"action {rule_decision.action}→{adjusted_action} "
+                f"사유: {jit_resp.reasoning[:80]}"
             )
             final_decision = modify_decision(
                 rule_decision,
@@ -137,8 +146,10 @@ class JITAdvisoryGate:
         else:
             # GO — 룰엔진 결정 그대로, reasoning에 JIT 승인 메모 추가
             logger.info(
-                f"[JIT] GO — {snapshot.pair} {rule_decision.action} 승인. "
-                f"conf={jit_resp.confidence:.2f}"
+                f"{_pfx} {snapshot.pair} GO — "
+                f"action={rule_decision.action} size={rule_decision.size_pct:.0%} "
+                f"conf={jit_resp.confidence:.2f}. "
+                f"사유: {jit_resp.reasoning[:80]}"
             )
             final_decision = modify_decision(
                 rule_decision,
@@ -155,7 +166,7 @@ class JITAdvisoryGate:
         try:
             await self._log_audit(jit_req, jit_resp, final_decision, error_msg)
         except Exception as e:
-            logger.warning(f"[JIT] 감사 로그 실패 (무시): {e}")
+            logger.warning(f"{_pfx} {snapshot.pair} 감사 로그 실패 (무시): {e}")
 
         return final_decision
 
