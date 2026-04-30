@@ -917,7 +917,7 @@ class TelegramTransactionHandler(logging.Handler):
                     SHORT_RSI_MAX = self._state.get('entry_rsi_max_short', 60.0)
                     if rsi is not None:
                         c3 = "✅" if SHORT_RSI_MIN <= rsi <= SHORT_RSI_MAX else "❌"
-                        condition_lines.append(f" {c3} ③ RSI 범위      {rsi:.0f}  (허용 {SHORT_RSI_MIN:.0f}~{SHORT_RSI_MAX:.0f})")
+                        condition_lines.append(f" {c3} ③ RSI 범위      {rsi:.1f}  (허용 {SHORT_RSI_MIN:.0f}~{SHORT_RSI_MAX:.0f})")
                     else:
                         condition_lines.append(" ❓ ③ RSI 범위      데이터 없음")
                 else:
@@ -938,7 +938,7 @@ class TelegramTransactionHandler(logging.Handler):
                     LONG_RSI_MAX = self._state.get('entry_rsi_max', 65.0)
                     if rsi is not None:
                         c3 = "✅" if LONG_RSI_MIN <= rsi <= LONG_RSI_MAX else "❌"
-                        condition_lines.append(f" {c3} ③ RSI 범위      {rsi:.0f}  (허용 {LONG_RSI_MIN:.0f}~{LONG_RSI_MAX:.0f})")
+                        condition_lines.append(f" {c3} ③ RSI 범위      {rsi:.1f}  (허용 {LONG_RSI_MIN:.0f}~{LONG_RSI_MAX:.0f})")
                     else:
                         condition_lines.append(" ❓ ③ RSI 범위      데이터 없음")
 
