@@ -62,6 +62,30 @@ class CandleLoopMixin:
 
                 pos = self._position.get(pair)
                 if pos is None:
+                    # ═ WS armed 트리거 체크 ═
+                    armed_ema = self._armed_entry_ema.get(pair)
+                    if armed_ema is not None:
+                        direction = self._armed_direction.get(pair)
+                        expire_at = self._armed_expire_at.get(pair, 0)
+                        if time.time() > expire_at:
+                            logger.info(f"{self._log_prefix} {pair}: arm 만료 → 해제")
+                            self._armed_entry_ema.pop(pair, None)
+                            self._armed_direction.pop(pair, None)
+                            self._armed_expire_at.pop(pair, None)
+                        elif (
+                            (direction == "short" and price < armed_ema)
+                            or (direction == "long" and price > armed_ema)
+                        ):
+                            logger.info(
+                                f"{self._log_prefix} {pair}: WS EMA 돌파 감지 "
+                                f"direction={direction} price=¥{price:.0f} ema=¥{armed_ema:.0f} → 진입 트리거"
+                            )
+                            self._armed_entry_ema.pop(pair, None)
+                            self._armed_direction.pop(pair, None)
+                            self._armed_expire_at.pop(pair, None)
+                            asyncio.create_task(
+                                self._trigger_ws_entry(pair, price, direction)
+                            )
                     continue
 
                 stop_loss_price = pos.stop_loss_price
@@ -193,6 +217,7 @@ class CandleLoopMixin:
             ema_slope_pct = signal_data.get("ema_slope_pct")
             rsi = signal_data.get("rsi")
             self._last_rsi[pair] = rsi
+            self._last_atr[pair] = atr
             exit_signal = signal_data.get("exit_signal", {})
             exit_action = exit_signal.get("action", "hold")
             latest_candle_key = signal_data.get("latest_candle_open_time")
@@ -342,6 +367,56 @@ class CandleLoopMixin:
                     "— set_orchestrator() 필요. 이번 사이클 스킵."
                 )
                 continue
+
+            # ── ws_cross: armed 상태 갱신 + 포지션 없을 때 오케스트레이터 skip ──
+            _entry_mode = str(params.get("entry_mode", "market"))
+            if _entry_mode == "ws_cross":
+                _armed_expire_sec = float(params.get("armed_expire_sec", 14400))
+                _short_slope_th = float(params.get("ema_slope_short_threshold", -0.05))
+                _short_rsi_low = float(params.get("entry_rsi_min_short", 35.0))
+                _short_rsi_high = float(params.get("entry_rsi_max_short", 60.0))
+                _rsi_entry_low = float(params.get("entry_rsi_min", 40.0))
+                _rsi_entry_high = float(params.get("entry_rsi_max", 65.0))
+                _slope_entry_min = float(params.get("ema_slope_entry_min", 0.0))
+                _regime_trending = signal_data.get("regime") == "trending"
+                _trending_score = signal_data.get("trending_score", 0)
+
+                _short_armed = (
+                    ema_slope_pct is not None and ema_slope_pct < _short_slope_th
+                    and rsi is not None and _short_rsi_low <= rsi <= _short_rsi_high
+                    and _regime_trending and _trending_score >= 1
+                )
+                _long_armed = (
+                    ema_slope_pct is not None and ema_slope_pct >= _slope_entry_min
+                    and rsi is not None and _rsi_entry_low <= rsi <= _rsi_entry_high
+                    and _regime_trending and _trending_score >= 1
+                )
+
+                if pos is None:
+                    if _short_armed and ema is not None:
+                        self._armed_entry_ema[pair] = ema
+                        self._armed_direction[pair] = "short"
+                        self._armed_expire_at[pair] = time.time() + _armed_expire_sec
+                        logger.info(
+                            f"{self._log_prefix} {pair}: short armed @ EMA ¥{ema:.0f} "
+                            f"(slope={ema_slope_pct:.4f}%)"
+                        )
+                    elif _long_armed and ema is not None:
+                        self._armed_entry_ema[pair] = ema
+                        self._armed_direction[pair] = "long"
+                        self._armed_expire_at[pair] = time.time() + _armed_expire_sec
+                        logger.info(
+                            f"{self._log_prefix} {pair}: long armed @ EMA ¥{ema:.0f} "
+                            f"(slope={ema_slope_pct:.4f}%)"
+                        )
+                    else:
+                        if pair in self._armed_direction:
+                            logger.info(f"{self._log_prefix} {pair}: armed 해제 (조건 소멸)")
+                        self._armed_entry_ema.pop(pair, None)
+                        self._armed_direction.pop(pair, None)
+                        self._armed_expire_at.pop(pair, None)
+                    continue  # WS _trigger_ws_entry가 진입 담당
+
             snapshot = await self._build_signal_snapshot(pair, signal_data, params, pos)
             result = await self._orchestrator.process(snapshot)
 
@@ -364,3 +439,30 @@ class CandleLoopMixin:
         기본: 아무것도 하지 않음 (True). CFD에서 keep_rate/보유시간 체크.
         """
         return True
+
+    async def _trigger_ws_entry(self, pair: str, trigger_price: float, direction: str) -> None:
+        """WS EMA 돌파 → 진입 실행. _stop_loss_monitor에서 fire-and-forget.
+
+        entry_mode="ws_cross" 시 limit order 발주. 실패하면 market fallback.
+        """
+        # race condition 방지: task 스케줄 후 포지션이 생겼을 수 있음
+        pos = self._position.get(pair)
+        if pos is not None:
+            logger.debug(f"{self._log_prefix} {pair}: WS 트리거 무시 — 이미 포지션 있음")
+            return
+
+        params = self._params.get(pair, {})
+        atr = self._last_atr.get(pair)
+        signal = "long_setup" if direction == "long" else "short_setup"
+
+        signal_data: Dict = {
+            "signal": signal,
+            "current_price": trigger_price,
+            "approved_at": None,  # TTL 체크 스킵 (WS 트리거 자체가 판단)
+            "ws_trigger": True,
+        }
+
+        try:
+            await self._on_entry_signal(pair, signal, trigger_price, atr, params, signal_data=signal_data)
+        except Exception as e:
+            logger.error(f"{self._log_prefix} {pair}: WS 진입 트리거 오류 — {e}", exc_info=True)

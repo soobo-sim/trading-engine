@@ -737,3 +737,163 @@ class GmoCoinTrendManager(CfdTrendFollowingManager):
                     await self._handle_losscut_sync_failure(pair, new_sl, fx_pos.position_id)
         except Exception as e:
             logger.warning(f"[TrendMgr] {pair}: ロスカットレート 동기화 오류 — {e}")
+
+    # ──────────────────────────────────────────
+    # Limit Order 진입 (ws_cross 전용 — 롱/숏 양방향)
+    # ──────────────────────────────────────────
+
+    async def _open_position_limit(
+        self,
+        pair: str,
+        price: float,
+        atr: Optional[float],
+        params: Dict,
+        *,
+        signal_data: dict | None = None,
+    ) -> Optional[Any]:
+        """Limit order 진입.
+
+        ws_trigger=True 인 경우: EMA 기반 limit price 사용 (롱/숏 양방향).
+        그 외: 부모(MarginTrendManager) 롱 전용 로직 위임.
+        """
+        sd = signal_data or {}
+        if not sd.get("ws_trigger"):
+            return await super()._open_position_limit(pair, price, atr, params, signal_data=signal_data)
+
+        import time as _time
+        from core.exchange.types import PendingLimitOrder
+
+        signal = sd.get("signal", "long_setup")
+        side = "sell" if signal == "short_setup" else "buy"
+
+        offset_atr_mult = float(params.get("entry_limit_offset_atr", 0.05))
+        offset = (atr * offset_atr_mult) if atr else 0.0
+
+        # 숏: EMA 약간 아래 (돌파 직후 반등 눌림 목표)
+        # 롱: EMA 약간 위
+        if side == "sell":
+            limit_price = round(price - offset, 0)
+        else:
+            limit_price = round(price + offset, 0)
+
+        if limit_price <= 0:
+            logger.warning(f"[TrendMgr] {pair}: WS limit_price={limit_price} 유효하지 않음")
+            return None
+
+        if not hasattr(self._adapter, "get_collateral"):
+            logger.error(f"[TrendMgr] {pair}: 어댑터에 get_collateral 없음")
+            return None
+
+        collateral = await self._adapter.get_collateral()
+        available_collateral = collateral.collateral - collateral.require_collateral
+        if available_collateral <= 0:
+            logger.debug(f"[TrendMgr] {pair}: WS limit — 여유 증거금 없음, 스킵")
+            return None
+
+        position_size_pct = float(params.get("position_size_pct", 10.0))
+        invest_jpy = available_collateral * position_size_pct / 100
+        min_jpy = float(params.get("min_order_jpy", 500))
+        if invest_jpy < min_jpy:
+            logger.info(f"[TrendMgr] {pair}: WS limit 투입 JPY({invest_jpy:.0f}) < {min_jpy:.0f}, 스킵")
+            return None
+
+        coin_size = round(invest_jpy / limit_price, 8)
+        min_coin = float(params.get("min_coin_size", 0.001))
+        if coin_size < min_coin:
+            logger.debug(f"[TrendMgr] {pair}: WS limit 수량 부족 ({coin_size} < {min_coin})")
+            return None
+
+        try:
+            # GMO Coin: BUY/SELL (executionType=LIMIT) — amount=BTC 수량, price 필수
+            order_type = OrderType.SELL if side == "sell" else OrderType.BUY
+            order = await self._adapter.place_order(
+                order_type=order_type,
+                pair=pair,
+                amount=coin_size,
+                price=limit_price,
+            )
+            logger.info(
+                f"[TrendMgr] {pair}: WS limit {side} 주문 — "
+                f"price=¥{limit_price:.0f} size={coin_size} order_id={order.order_id}"
+            )
+            return PendingLimitOrder(
+                order_id=order.order_id,
+                pair=pair,
+                limit_price=limit_price,
+                amount=coin_size,
+                invest_jpy=invest_jpy,
+                placed_at=_time.time(),
+                signal_at_placement=signal,
+                params=dict(params),
+                atr=atr,
+                signal_data=sd,
+            )
+        except Exception as e:
+            logger.warning(f"[TrendMgr] {pair}: WS limit 주문 실패 — {e}")
+            return None
+
+    async def _finalize_limit_entry(self, pair: str, order: Any, pending: Any) -> None:
+        """Limit order 체결 후 포지션 등록 (GMO Coin 양방향).
+
+        MarginTrendManager._finalize_limit_entry를 오버라이드하여:
+        - product_code 키 네이밍 수정 (pair → product_code)
+        - side 추출 및 포지션 extra 설정
+        - GMO Coin ロスカットレート 즉시 동기화
+        """
+        try:
+            exec_price = order.price or pending.limit_price
+            exec_amount = order.amount
+            if exec_amount == 0 and exec_price > 0:
+                exec_amount = round(pending.invest_jpy / exec_price, 8)
+
+            signal = pending.signal_at_placement
+            side = "sell" if signal == "short_setup" else "buy"
+
+            atr = pending.atr
+            params = pending.params
+            atr_mult = float(params.get("atr_multiplier_stop", 2.0))
+            if side == "buy":
+                initial_sl = round(exec_price - atr * atr_mult, 6) if atr else None
+            else:
+                initial_sl = round(exec_price + atr * atr_mult, 6) if atr else None
+
+            pos = Position(
+                pair=pair,
+                entry_price=exec_price,
+                entry_amount=exec_amount,
+                stop_loss_price=initial_sl,
+                extra={
+                    "side": side,
+                    "opened_at": datetime.now(timezone.utc),
+                    "pyramid_count": 0,
+                    "pyramid_entries": [],
+                    "total_size_pct": float(params.get("position_size_pct", 10.0)) / 100.0,
+                },
+            )
+            self._position[pair] = pos
+
+            pos.db_record_id = await self._record_open(
+                product_code=pair,
+                side=side,
+                order_id=order.order_id,
+                price=exec_price,
+                size=exec_amount,
+                collateral_jpy=pending.invest_jpy,
+                stop_loss_price=initial_sl,
+                strategy_id=params.get("strategy_id"),
+            )
+
+            # 진입 즉시 거래소 ロスカットレート 설정
+            if initial_sl is not None:
+                try:
+                    await self._sync_losscut_price(pair, initial_sl)
+                except Exception as e:
+                    logger.warning(f"[TrendMgr] {pair}: limit 진입 시 ロスカット 설정 실패 — {e}")
+
+            logger.info(
+                f"[TrendMgr] {pair}: limit {side} 진입 확정 "
+                f"order_id={order.order_id} price=¥{exec_price} size={exec_amount} "
+                f"stop_loss=¥{initial_sl}"
+            )
+        except Exception as e:
+            logger.error(f"[TrendMgr] {pair}: limit 진입 확정 오류 — {e}", exc_info=True)

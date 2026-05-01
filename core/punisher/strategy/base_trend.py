@@ -109,6 +109,14 @@ class BaseTrendManager(CandleLoopMixin, JudgeMixin, ExecutionMixin, ABC):
         # SF-10 RSI 캐시 (pair → 최근 RSI 값)
         self._last_rsi: Dict[str, Optional[float]] = {}
 
+        # ATR 캐시 (WS 트리거 시 사용)
+        self._last_atr: Dict[str, Optional[float]] = {}
+
+        # WS 진입 트리거 armed 상태 (entry_mode="ws_cross" 시 사용)
+        self._armed_entry_ema: Dict[str, Optional[float]] = {}   # arm 시점 EMA
+        self._armed_direction: Dict[str, Optional[str]] = {}     # "long" or "short"
+        self._armed_expire_at: Dict[str, float] = {}             # arm 만료 timestamp
+
         # Execution Layer 연결 (Step 4)
         self._orchestrator: Optional[ExecutionOrchestrator] = None
         # Data Layer 연결 (v1.5)
@@ -174,6 +182,10 @@ class BaseTrendManager(CandleLoopMixin, JudgeMixin, ExecutionMixin, ABC):
 
         self._close_fail_count.pop(pair, None)
         self._close_fail_until.pop(pair, None)
+        self._last_atr.pop(pair, None)
+        self._armed_entry_ema.pop(pair, None)
+        self._armed_direction.pop(pair, None)
+        self._armed_expire_at.pop(pair, None)
         logger.debug(f"{self._log_prefix} {pair}: 추세추종 태스크 종료")
 
     async def stop_all(self) -> None:
