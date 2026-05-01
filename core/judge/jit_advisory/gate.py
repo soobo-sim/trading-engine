@@ -92,15 +92,17 @@ class JITAdvisoryGate:
             logger.error(f"[JIT] {error_msg}")
 
         if jit_resp is None:
-            # 타임아웃/오류 → fail-soft NO_GO
+            # 타임아웃/오류 → fail-soft GO (size * 0.7)
+            # 룰엔진이 이미 기술적 조건 검증 완료 — LLM 장애는 "의견 없음"이지 "하지 마"가 아님
             error_msg = error_msg or "JIT 타임아웃 또는 응답 파싱 실패"
+            timeout_size = rule_decision.size_pct * 0.7
             logger.warning(
-                f"{_pfx} {snapshot.pair} fail-soft NO_GO — {error_msg}"
+                f"{_pfx} {snapshot.pair} fail-soft GO (size {rule_decision.size_pct:.0%}→{timeout_size:.0%}) — {error_msg}"
             )
             final_decision = modify_decision(
                 rule_decision,
-                action="hold",
-                reasoning=f"[JIT fail-soft] {error_msg}",
+                size_pct=timeout_size,
+                reasoning=f"[JIT timeout-GO] {error_msg} — 룰엔진 판단 70% size로 실행",
             )
 
         elif jit_resp.decision == "NO_GO":

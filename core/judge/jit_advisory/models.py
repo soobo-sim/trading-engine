@@ -36,6 +36,7 @@ class JITAdvisoryRequest:
     bb_width_pct: float = 0.0
     range_pct: float = 0.0
     consecutive_count: int = 0
+    regime_history: list[str] = field(default_factory=list)  # 최근 4H 캔들 체제 이력
 
     # ── 기술 지표 ─────────────────────────────────────────
     ema_value: float = 0.0
@@ -135,6 +136,7 @@ class JITAdvisoryRequest:
 ## 시장 컨텍스트
 - 현재가: {self.current_price:,.0f} JPY
 - 체제: {self.regime} (연속: {self.consecutive_count}회)
+- 체제 이력: {' → '.join(self.regime_history) if self.regime_history else '없음'}
 - BB폭: {self.bb_width_pct:.2f}%
 - EMA: {self.ema_value:,.0f} (slope: {self.ema_slope_pct:+.3f}%)
 - RSI: {self.rsi:.1f}

@@ -249,16 +249,17 @@ async def test_tc04_adjust_action_change():
 # ──────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_tc05_timeout_failsoft_hold():
-    """JIT 클라이언트가 None 반환(타임아웃) → fail-soft hold."""
+async def test_tc05_timeout_failsoft_go():
+    """JIT 클라이언트가 None 반환(타임아웃) → fail-soft GO (size * 0.7)."""
     mock_client = AsyncMock(spec=JITAdvisoryClient)
     mock_client.request = AsyncMock(return_value=None)
 
     gate, _ = _make_gate(mock_client=mock_client)
     dec = await gate.decide(_snapshot())
 
-    assert dec.action == "hold"
-    assert "[JIT fail-soft]" in dec.reasoning
+    assert dec.action == "entry_long"  # hold이 아닌 진입
+    assert dec.size_pct == pytest.approx(0.5 * 0.7, rel=1e-3)  # 70% 축소
+    assert "[JIT timeout-GO]" in dec.reasoning
 
 
 # ──────────────────────────────────────────────────────────────
@@ -299,19 +300,19 @@ async def test_tc07_audit_saved_on_go():
 
 
 # ──────────────────────────────────────────────────────────────
-# TC-08: token 미설정 → JIT 스킵 → fail-soft hold
+# TC-08: token 미설정 → JIT 스킵 → fail-soft GO (size * 0.7)
 # ──────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
 async def test_tc08_no_token_skip():
-    """JIT_ADVISORY_TOKEN 미설정 → client.request가 None 반환 → hold."""
+    """JIT_ADVISORY_TOKEN 미설정 → client.request가 None 반환 → fail-soft GO (size * 0.7)."""
     real_client = JITAdvisoryClient(url="http://invalid", token="", timeout_sec=5)
     gate, _ = _make_gate(mock_client=real_client)
 
     dec = await gate.decide(_snapshot())
 
-    assert dec.action == "hold"
-    assert "fail-soft" in dec.reasoning.lower()
+    assert dec.action == "entry_long"  # hold이 아닌 진입
+    assert "timeout-go" in dec.reasoning.lower()
 
 
 # ──────────────────────────────────────────────────────────────

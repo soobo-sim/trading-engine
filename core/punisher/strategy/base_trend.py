@@ -28,6 +28,7 @@ Paper Trading 지원:
 """
 from __future__ import annotations
 
+import os
 import logging
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Type
@@ -116,6 +117,8 @@ class BaseTrendManager(CandleLoopMixin, JudgeMixin, ExecutionMixin, ABC):
         self._post_analyzer: Optional[Any] = None
         # Regime Gate (듀얼 매니저 체제 전환)
         self._regime_gate: Optional[Any] = None  # RegimeGate | None
+        # jit 모드 + warm-up 완료 시 RegimeGate bypass 여부 (TRADING_MODE=jit)
+        self._jit_bypass_gate: bool = os.environ.get("TRADING_MODE", "v1").lower() == "jit"
         # Approval Gate (실제 주문 성공 후 보고용)
         self._approval_gate: Optional[Any] = None  # AutoApprovalGate | None
 

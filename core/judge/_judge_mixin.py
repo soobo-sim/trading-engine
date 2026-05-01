@@ -192,6 +192,16 @@ class JudgeMixin:
             except Exception as e:
                 logger.debug(f"{self._log_prefix} {pair}: DataHub sentiment 조회 실패: {e}")
 
+        # signal_data의 런타임 값들을 params에 병합 (JIT 컨텍스트 보강)
+        # bb_width_pct/range_pct/consecutive_count/regime_history는 매 캔들 갱신됨
+        merged_params = {
+            **params,
+            "bb_width_pct": signal_data.get("bb_width_pct", params.get("bb_width_pct", 0.0)),
+            "range_pct": signal_data.get("range_pct", params.get("range_pct", 0.0)),
+            "consecutive_count": signal_data.get("consecutive_count", params.get("consecutive_count", 0)),
+            "regime_history": signal_data.get("regime_history", params.get("regime_history", [])),
+        }
+
         return SignalSnapshot(
             pair=pair,
             exchange=self._adapter.exchange_name,
@@ -207,7 +217,7 @@ class JudgeMixin:
             position=pos_dto,
             candles=tuple(candles_raw) if candles_raw else None,
             rsi_series=tuple(rsi_series_raw) if rsi_series_raw else None,
-            params=params,
+            params=merged_params,
             macro=macro,
             upcoming_events=upcoming_events,
             relevant_lessons=relevant_lessons,

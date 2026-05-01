@@ -158,6 +158,11 @@ class CandleLoopMixin:
                         from core.execution.regime_gate_persistence import save_regime_gate_state
                         await save_regime_gate_state(self._session_factory, self._regime_gate)
 
+            # ── signal_data에 RegimeGate 런타임 상태 주입 (JIT 컨텍스트 보강) ──
+            if self._regime_gate is not None:
+                signal_data["consecutive_count"] = self._regime_gate.consecutive_count
+                signal_data["regime_history"] = list(self._regime_gate.regime_history)
+
             # 서브클래스 추가 체크 (keep_rate, 보유시간 등)
             should_continue = await self._on_candle_extra_checks(pair, params)
             if not should_continue:
