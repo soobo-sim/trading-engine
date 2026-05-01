@@ -248,10 +248,12 @@ class CandleLoopMixin:
             _slope_str = f"{ema_slope_pct:.4f}" if ema_slope_pct is not None else "N/A"
             _rsi_str = f"{rsi:.1f}" if rsi is not None else "N/A"
             _ema_str = f"{ema:.0f}" if ema is not None else "N/A"
+            _tscore = signal_data.get("trending_score")
+            _tscore_str = str(int(_tscore)) if _tscore is not None else "N/A"
             _sig_log(
                 f"[Judge-Layer][{cycle_id}]{self._log_prefix} {pair}: {self._describe_signal(signal, pos)} "
                 f"signal={signal} ema_slope_pct={_slope_str} rsi={_rsi_str} ema={_ema_str} "
-                f"price={current_price:.0f}{_pos_label}"
+                f"price={current_price:.0f} trending_score={_tscore_str}{_pos_label}"
             )
 
             # ══════════════════════════════════════

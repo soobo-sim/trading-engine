@@ -201,6 +201,16 @@ class TelegramTransactionHandler(logging.Handler):
             'entry_event': None,
             'close_event': None,
             'stop_tighten_event': None,
+            # 추세 강도 (candle_loop 로그에서 파싱)
+            'trending_score': None,         # int 0~6, None=미수신
+            # ws_cross / entry_timeframe 진입 파라미터
+            'entry_mode': 'market',        # 'market' | 'ws_cross'
+            'entry_timeframe': None,       # '1h' | None — None이면 basis_timeframe(4h)
+            # armed 상태 (ws_cross 모드 전용)
+            'armed_direction': None,       # 'short' | 'long' | None
+            'armed_ema': None,             # armed EMA 가격
+            'armed_expire_at': 0.0,        # unix timestamp
+            'armed_expire_sec': 14400.0,   # arm 유효 시간(초) — seed로 주입
         }
         self._advisory_warn_last: float = 0  # v1 폴백 WARNING 마지막 전송 시각
         self._last_periodic_send: float = 0  # 마지막 정기 전송 시각
@@ -292,7 +302,7 @@ class TelegramTransactionHandler(logging.Handler):
             or 'box_mean_reversion' in msg
             or 'BoxMeanReversion' in msg
         )
-        m = re.search(r'signal=(\w+) ema_slope_pct=([-\d.]+|N/A) rsi=([\d.]+|N/A) ema=([\d.]+|N/A) price=([\d.]+)', msg)
+        m = re.search(r'signal=(\w+) ema_slope_pct=([-\d.]+|N/A) rsi=([\d.]+|N/A) ema=([\d.]+|N/A) price=([\d.]+)(?:.*?trending_score=(\d+|N/A))?', msg)
         if m and not is_box_log:
             new_signal = m.group(1)
             if m.group(2) != 'N/A':
@@ -302,6 +312,8 @@ class TelegramTransactionHandler(logging.Handler):
             if m.group(4) != 'N/A':
                 self._state['ema_price'] = float(m.group(4))
             self._state['current_price'] = float(m.group(5))
+            if m.group(6) and m.group(6) != 'N/A':
+                self._state['trending_score'] = int(m.group(6))
             if self._state['signal'] != new_signal:
                 self._state['prev_signal'] = self._state['signal']
                 self._state['signal'] = new_signal
@@ -434,7 +446,30 @@ class TelegramTransactionHandler(logging.Handler):
             label = m.group(2)
             self._state['fng_score'] = score
             self._state['fng_label'] = label
-            
+
+        # ── WS 진입 armed 상태 파싱 ──────────────────────────────────
+        # "short armed @ EMA ¥12,154,770 (slope=-0.0610%)"
+        # "long armed @ EMA ¥12,154,770 (slope=0.0610%)"
+        m = re.search(r'(short|long) armed @ EMA ¥([\d,]+)', msg)
+        if m:
+            self._state['armed_direction'] = m.group(1)
+            self._state['armed_ema'] = float(m.group(2).replace(',', ''))
+            self._state['armed_expire_at'] = time.time() + self._state.get('armed_expire_sec', 14400.0)
+
+        # "armed 해제 (조건 소멸)" or "arm 만료 → 해제"
+        if 'armed 해제' in msg or 'arm 만료' in msg:
+            self._state['armed_direction'] = None
+            self._state['armed_ema'] = None
+            self._state['armed_expire_at'] = 0.0
+
+        # "WS EMA 돌파 감지 direction=short price=¥12,100,000 ema=¥12,154,770 → 진입 트리거"
+        if 'WS EMA 돌파 감지' in msg and '진입 트리거' in msg:
+            # 트리거 후 armed 해제 (manager에서 pop하지만 여기서도 클리어)
+            self._state['armed_direction'] = None
+            self._state['armed_ema'] = None
+            self._state['armed_expire_at'] = 0.0
+
+
             if self._domain == "judge" and self._loop:
                 self._loop.create_task(self._send_fng_update())
 
@@ -835,6 +870,10 @@ class TelegramTransactionHandler(logging.Handler):
         condition_lines = []
         direction_label = "숏"  # 기본값, 아래에서 결정
 
+        # entry_timeframe 라벨 (1H 모드면 조건 옆에 표시)
+        _entry_tf = self._state.get('entry_timeframe')  # '1h' | None
+        _tf_label = " (1H)" if _entry_tf and _entry_tf.lower() in ('1h', '1') else ""
+
         if regime == 'ranging':
             # ── 박스역추세 조건 ─────────────────────────────────────────
             # 방향: signal 기반 (near_lower→롱, near_upper→숏)
@@ -907,11 +946,11 @@ class TelegramTransactionHandler(logging.Handler):
                         c2 = "✅" if ema_slope < SHORT_SLOPE_TH else "❌"
                         if ema_slope >= SHORT_SLOPE_TH:
                             gap = abs(ema_slope - SHORT_SLOPE_TH)
-                            condition_lines.append(f" {c2} ② EMA 기울기    지금 {ema_slope:+.2f}% → {SHORT_SLOPE_TH:.2f}% 미만 필요 ({gap:.2f}%p 부족)")
+                            condition_lines.append(f" {c2} ② EMA 기울기{_tf_label}    지금 {ema_slope:+.2f}% → {SHORT_SLOPE_TH:.2f}% 미만 필요 ({gap:.2f}%p 부족)")
                         else:
-                            condition_lines.append(f" {c2} ② EMA 기울기    {ema_slope:+.2f}% (충족)")
+                            condition_lines.append(f" {c2} ② EMA 기울기{_tf_label}    {ema_slope:+.2f}% (충족)")
                     else:
-                        condition_lines.append(" ❓ ② EMA 기울기    데이터 없음")
+                        condition_lines.append(f" ❓ ② EMA 기울기{_tf_label}    데이터 없음")
 
                     SHORT_RSI_MIN = self._state.get('entry_rsi_min_short', 35.0)
                     SHORT_RSI_MAX = self._state.get('entry_rsi_max_short', 60.0)
@@ -920,6 +959,13 @@ class TelegramTransactionHandler(logging.Handler):
                         condition_lines.append(f" {c3} ③ RSI 범위      {rsi:.1f}  (허용 {SHORT_RSI_MIN:.0f}~{SHORT_RSI_MAX:.0f})")
                     else:
                         condition_lines.append(" ❓ ③ RSI 범위      데이터 없음")
+
+                    _tscore = self._state.get('trending_score')
+                    if _tscore is not None:
+                        c4 = "✅" if _tscore >= 1 else "❌"
+                        condition_lines.append(f" {c4} ④ 추세 강도     score={_tscore} (기준 ≥1)")
+                    else:
+                        condition_lines.append(" ❓ ④ 추세 강도     데이터 없음")
                 else:
                     c1 = "✅" if current > ema else "❌"
                     condition_lines.append(f" {c1} ① 가격 > EMA    ¥{current:,.0f} (EMA ¥{ema:,.0f})")
@@ -928,11 +974,11 @@ class TelegramTransactionHandler(logging.Handler):
                     if ema_slope is not None:
                         c2 = "✅" if ema_slope >= LONG_SLOPE_TH else "❌"
                         if ema_slope < LONG_SLOPE_TH:
-                            condition_lines.append(f" {c2} ② EMA 기울기    지금 {ema_slope:+.2f}% → {LONG_SLOPE_TH:.2f}% 이상 필요")
+                            condition_lines.append(f" {c2} ② EMA 기울기{_tf_label}    지금 {ema_slope:+.2f}% → {LONG_SLOPE_TH:.2f}% 이상 필요")
                         else:
-                            condition_lines.append(f" {c2} ② EMA 기울기    {ema_slope:+.2f}% (충족)")
+                            condition_lines.append(f" {c2} ② EMA 기울기{_tf_label}    {ema_slope:+.2f}% (충족)")
                     else:
-                        condition_lines.append(" ❓ ② EMA 기울기    데이터 없음")
+                        condition_lines.append(f" ❓ ② EMA 기울기{_tf_label}    데이터 없음")
 
                     LONG_RSI_MIN = self._state.get('entry_rsi_min', 40.0)
                     LONG_RSI_MAX = self._state.get('entry_rsi_max', 65.0)
@@ -941,6 +987,13 @@ class TelegramTransactionHandler(logging.Handler):
                         condition_lines.append(f" {c3} ③ RSI 범위      {rsi:.1f}  (허용 {LONG_RSI_MIN:.0f}~{LONG_RSI_MAX:.0f})")
                     else:
                         condition_lines.append(" ❓ ③ RSI 범위      데이터 없음")
+
+                    _tscore = self._state.get('trending_score')
+                    if _tscore is not None:
+                        c4 = "✅" if _tscore >= 1 else "❌"
+                        condition_lines.append(f" {c4} ④ 추세 강도     score={_tscore} (기준 ≥1)")
+                    else:
+                        condition_lines.append(" ❓ ④ 추세 강도     데이터 없음")
 
 
 
@@ -954,7 +1007,7 @@ class TelegramTransactionHandler(logging.Handler):
         if regime == 'ranging':
             _unmet_labels = ['박스감지', '가격위치', 'RSI']
         else:
-            _unmet_labels = ['가격/EMA', 'EMA기울기', 'RSI']
+            _unmet_labels = ['가격/EMA', 'EMA기울기', 'RSI', '추세강도']
         _unmet = [
             _unmet_labels[i]
             for i, _l in enumerate(condition_lines)
@@ -1009,6 +1062,45 @@ class TelegramTransactionHandler(logging.Handler):
         # 승인 정도 정보는 결론에 이미 포함(단 MANUAL모드에서만 의미 있는 도구)
         _approval_str = ""
 
+        # ── entry_mode / entry_timeframe 표시 줄 ──────────────────────
+        _entry_mode_state = self._state.get('entry_mode', 'market')
+        _entry_tf_state = self._state.get('entry_timeframe')  # '1h' | None
+        if _entry_mode_state == 'ws_cross':
+            _tf_desc = " + 1H slope/RSI" if _entry_tf_state and _entry_tf_state.lower() in ('1h', '1') else ""
+            _mode_line = f"진입 모드: ⚡ WS 돌파{_tf_desc} (EMA 실시간 감시)"
+        elif _entry_tf_state and _entry_tf_state.lower() in ('1h', '1'):
+            _mode_line = "진입 모드: 📊 1H slope/RSI + 4H 체제"
+        else:
+            _mode_line = ""  # 기본(market + 4H)은 표시 생략
+
+        # ── armed 상태 줄 (ws_cross 모드 전용) ────────────────────────
+        _armed_dir = self._state.get('armed_direction')   # 'short' | 'long' | None
+        _armed_ema_v = self._state.get('armed_ema')
+        _armed_expire = self._state.get('armed_expire_at', 0.0)
+        if _armed_dir is not None and _armed_ema_v is not None:
+            _remain_sec = max(0.0, _armed_expire - time.time())
+            _remain_h = int(_remain_sec // 3600)
+            _remain_m = int((_remain_sec % 3600) // 60)
+            _dir_kr = '숏' if _armed_dir == 'short' else '롱'
+            _cur_p = self._state.get('current_price')
+            if _cur_p is not None:
+                if _armed_dir == 'short':
+                    _gap = _cur_p - _armed_ema_v
+                    _gap_str = f"¥{_gap:,.0f} 더 내려가야 진입" if _gap > 0 else f"¥{abs(_gap):,.0f} 아래 (WS 신호 대기)"
+                else:
+                    _gap = _armed_ema_v - _cur_p
+                    _gap_str = f"¥{_gap:,.0f} 더 올라가야 진입" if _gap > 0 else f"¥{abs(_gap):,.0f} 위 (WS 신호 대기)"
+                armed_line = (
+                    f"⚡ WS 대기: {_dir_kr} armed | EMA ¥{_armed_ema_v:,.0f} / 현재 ¥{_cur_p:,.0f} → {_gap_str}"
+                    f"  (만료까지 {_remain_h}h {_remain_m:02d}m)"
+                )
+            else:
+                armed_line = f"⚡ WS 대기: {_dir_kr} armed @ ¥{_armed_ema_v:,.0f}  (만료까지 {_remain_h}h {_remain_m:02d}m)"
+        elif _entry_mode_state == 'ws_cross':
+            armed_line = "⏳ WS 대기: armed 조건 미충족"
+        else:
+            armed_line = ""  # ws_cross 아니면 표시 안 함
+
         # 게이트 줄: JIT 모드이면 RegimeGate가 bypass → JIT Advisory 상태 표시
         _trading_mode = _os.environ.get("TRADING_MODE", "v1").lower()
         if _trading_mode == "jit":
@@ -1027,10 +1119,12 @@ class TelegramTransactionHandler(logging.Handler):
             f"🔮 [{self._exchange}·BTC] {_format_time(time.time())}  (판단 사이클 · 5분 요약)\n"
             f"──────────────────────────\n"
             f"체제: {regime_kr}{regime_detail}\n"
-            f"{gate_line}\n"
+            + (f"{_mode_line}\n" if _mode_line else "")
+            + f"{gate_line}\n"
             f"──────────────────────────\n"
             f"{sig_block}\n"
-            f"결론: {conclusion}"
+            + (f"{armed_line}\n" if armed_line else "")
+            + f"결론: {conclusion}"
         )
 
         await _send_telegram(self._bot_token, self._chat_id, text)
@@ -1205,18 +1299,28 @@ def seed_telegram_strategy_params(params: dict) -> None:
     Args:
         params: gmoc_strategies.parameters dict (entry_rsi_min 등 포함)
     """
-    keys = {
+    # 수치형 파라미터 (float 변환)
+    float_keys = {
         'entry_rsi_min': 'entry_rsi_min',
         'entry_rsi_max': 'entry_rsi_max',
         'entry_rsi_min_short': 'entry_rsi_min_short',
         'entry_rsi_max_short': 'entry_rsi_max_short',
+        'armed_expire_sec': 'armed_expire_sec',
     }
-    for param_key, state_key in keys.items():
+    for param_key, state_key in float_keys.items():
         val = params.get(param_key)
         if val is not None:
             for h in _handlers:
                 if isinstance(h, TelegramTransactionHandler):
                     h._state[state_key] = float(val)
+
+    # 문자열 파라미터 (entry_mode, entry_timeframe)
+    for param_key in ('entry_mode', 'entry_timeframe'):
+        val = params.get(param_key)
+        if val is not None:
+            for h in _handlers:
+                if isinstance(h, TelegramTransactionHandler):
+                    h._state[param_key] = str(val)
 
 
 def seed_telegram_regime_state(regime: str | None, consecutive: int) -> None:
