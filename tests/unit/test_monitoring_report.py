@@ -3199,17 +3199,19 @@ class TestEntryModeInReport:
         assert "1H slope/RSI" in text
 
     def test_er05_ws_cross_armed_shows_line(self):
-        """ER-05: ws_cross + armed_direction=short → '⚡ WS 대기: 숏 armed' 표시."""
+        """ER-05: ws_cross + armed_direction=short → EMA/현재가/거리 표시."""
         import time as _time
-        data = self._base_data()
+        data = self._base_data()  # current_price=12_142_312
         data["entry_mode"] = "ws_cross"
         data["armed_direction"] = "short"
-        data["armed_ema"] = 12_000_000.0
+        data["armed_ema"] = 12_000_000.0  # gap=142,312 → 더 내려가야
         data["armed_expire_at"] = _time.time() + 3600 * 3.5
         text = build_telegram_text("GMOC", "22:46", "btc_jpy", data)
         assert "숏 armed" in text
         assert "¥12,000,000" in text
         assert "만료까지" in text
+        assert "현재" in text
+        assert "더 내려가야 진입" in text
 
     def test_er06_ws_cross_no_armed_shows_waiting(self):
         """ER-06: ws_cross + armed 없음 → '⏳ WS 대기: armed 조건 미충족' 표시."""
@@ -3241,14 +3243,16 @@ class TestEntryModeInReport:
         assert "WS 돌파" in text
 
     def test_er08_long_armed_shows_correct_direction(self):
-        """ER-08: armed_direction=long → '롱 armed' 표시."""
+        """ER-08: armed_direction=long → '롱 armed' + 현재가가 이미 EMA 위 표시."""
         import time as _time
-        data = self._base_data()
+        data = self._base_data()  # current_price=12_142_312
         data["entry_mode"] = "ws_cross"
         data["wait_direction"] = "long"
         data["armed_direction"] = "long"
-        data["armed_ema"] = 11_900_000.0
+        data["armed_ema"] = 11_900_000.0  # current_price > ema → 이미 위
         data["armed_expire_at"] = _time.time() + 7200
         text = build_telegram_text("GMOC", "22:46", "btc_jpy", data)
         assert "롱 armed" in text
         assert "¥11,900,000" in text
+        assert "현재" in text
+        assert "WS 신호 대기" in text

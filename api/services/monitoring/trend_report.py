@@ -84,12 +84,26 @@ def _build_entry_mode_lines(data: dict) -> list[str]:
         armed_dir = data.get("armed_direction")
         armed_ema = data.get("armed_ema")
         armed_expire = data.get("armed_expire_at", 0.0) or 0.0
+        current_price = data.get("current_price")
         if armed_dir is not None and armed_ema is not None:
             remain = max(0.0, armed_expire - _time.time())
             h_ = int(remain // 3600)
             m_ = int((remain % 3600) // 60)
             dir_kr = "숏" if armed_dir == "short" else "롱"
-            lines.append(f"⚡ WS 대기: {dir_kr} armed @ ¥{armed_ema:,.0f}  (만료까지 {h_}h {m_:02d}m)")
+            if current_price is not None:
+                # 숏: 현재가가 EMA 아래로 내려가야 진입 (gap>0 = 아직 위에 있음)
+                # 롱: 현재가가 EMA 위로 올라가야 진입 (gap>0 = 아직 아래에 있음)
+                if armed_dir == "short":
+                    gap = current_price - armed_ema
+                    gap_str = f"¥{gap:,.0f} 더 내려가야 진입" if gap > 0 else f"¥{abs(gap):,.0f} 아래 (WS 신호 대기)"
+                else:
+                    gap = armed_ema - current_price
+                    gap_str = f"¥{gap:,.0f} 더 올라가야 진입" if gap > 0 else f"¥{abs(gap):,.0f} 위 (WS 신호 대기)"
+                lines.append(
+                    f"⚡ WS 대기: {dir_kr} armed | EMA ¥{armed_ema:,.0f} / 현재 ¥{current_price:,.0f} → {gap_str}  (만료까지 {h_}h {m_:02d}m)"
+                )
+            else:
+                lines.append(f"⚡ WS 대기: {dir_kr} armed @ ¥{armed_ema:,.0f}  (만료까지 {h_}h {m_:02d}m)")
         else:
             lines.append("⏳ WS 대기: armed 조건 미충족")
 
