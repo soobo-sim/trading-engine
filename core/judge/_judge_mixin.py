@@ -24,7 +24,12 @@ from typing import TYPE_CHECKING, Any, Dict, Optional
 from sqlalchemy import and_, select
 
 from core.data.dto import PositionDTO, SignalSnapshot
-from core.shared.signals import compute_candle_limit, compute_trend_signal
+from core.shared.signals import (
+    classify_regime,
+    compute_candle_limit,
+    compute_trend_signal,
+    compute_trending_score,
+)
 
 if TYPE_CHECKING:
     from core.exchange.types import Position
@@ -47,8 +52,10 @@ class JudgeMixin:
         params: Optional[dict] = None,
         side: Optional[str] = None,
     ) -> Optional[dict]:
-        ema_period = int((params or {}).get("ema_period", 20))
-        limit = compute_candle_limit(params)
+        p = params or {}
+        ema_period = int(p.get("ema_period", 20))
+        limit = compute_candle_limit(p)
+        entry_tf = p.get("entry_timeframe", timeframe)
 
         CandleModel = self._candle_model
         pair_col = getattr(CandleModel, self._pair_column)
@@ -72,14 +79,127 @@ class JudgeMixin:
             logger.debug(f"{self._log_prefix} {pair}: 캔들 부족 ({len(candles)}개)")
             return None
 
-        kwargs: dict[str, Any] = {"params": params or {}, "entry_price": entry_price}
+        kwargs: dict[str, Any] = {"params": p, "entry_price": entry_price}
         if side is not None:
             kwargs["side"] = side
-        result = compute_trend_signal(candles, **kwargs)
-        if result is not None:
-            result["latest_candle_open_time"] = str(candles[-1].open_time)
-            result["candles"] = candles
-        return result
+
+        if entry_tf != timeframe:
+            # entry_timeframe(1H) 캔들 별도 조회
+            async with self._session_factory() as db:
+                result_e = await db.execute(
+                    select(CandleModel)
+                    .where(
+                        and_(
+                            pair_col == pair,
+                            CandleModel.timeframe == entry_tf,
+                            CandleModel.is_complete == True,  # noqa: E712
+                        )
+                    )
+                    .order_by(CandleModel.open_time.desc())
+                    .limit(limit)
+                )
+                entry_candles = list(reversed(result_e.scalars().all()))
+
+            if len(entry_candles) < ema_period + 1:
+                logger.debug(
+                    f"{self._log_prefix} {pair}: entry_tf({entry_tf}) 캔들 부족 "
+                    f"({len(entry_candles)}개), basis_tf({timeframe}) 사용"
+                )
+                entry_candles = candles  # fallback
+
+            # 1H 캔들로 EMA/slope/RSI/ATR 계산
+            signal_result = compute_trend_signal(entry_candles, **kwargs)
+
+            if signal_result is not None:
+                # regime(bb_width/range_pct/trending_score)은 4H 캔들로 override
+                closes_4h = [float(c.close) for c in candles]
+                highs_4h = [float(c.high) for c in candles]
+                lows_4h = [float(c.low) for c in candles]
+                bb_period = min(int(p.get("bb_period", ema_period)), len(closes_4h))
+                bb_window_4h = closes_4h[-bb_period:]
+                sma_4h = sum(bb_window_4h) / bb_period if bb_period > 0 else 0
+                std_4h = (
+                    (sum((c - sma_4h) ** 2 for c in bb_window_4h) / bb_period) ** 0.5
+                    if sma_4h > 0 else 0
+                )
+                bb_width_pct_4h = (4 * std_4h) / sma_4h * 100 if sma_4h > 0 else 0
+                range_pct_4h = (
+                    (max(highs_4h[-bb_period:]) - min(lows_4h[-bb_period:])) / closes_4h[-bb_period] * 100
+                    if closes_4h[-bb_period] > 0 else 0
+                )
+                regime_4h, regime_trending_4h, regime_ranging_4h = classify_regime(
+                    bb_width_pct_4h, range_pct_4h, p
+                )
+
+                # trending_score도 4H 기반으로 재계산 (1H ATR/slope 사용)
+                atr_1h = signal_result.get("atr")
+                current_price = signal_result.get("current_price", 0)
+                atr_pct_1h = (atr_1h / current_price * 100) if (atr_1h and current_price > 0) else 0
+                ema_slope_pct_1h = signal_result.get("ema_slope_pct")
+                trending_score_4h = compute_trending_score(
+                    bb_width_pct_4h, range_pct_4h, atr_pct_1h, ema_slope_pct_1h, p
+                )
+
+                # regime 관련 필드 override (4H 기반)
+                signal_result["bb_width_pct"] = bb_width_pct_4h
+                signal_result["range_pct"] = range_pct_4h
+                signal_result["regime"] = regime_4h
+                signal_result["trending_score"] = trending_score_4h
+
+                # signal 재판정: 1H slope/RSI + 4H regime/trending_score 조합
+                rsi_1h = signal_result.get("rsi")
+                ema_1h = signal_result.get("ema")
+                price_above_ema = (current_price > ema_1h) if ema_1h else None
+
+                rsi_entry_low = float(p.get("entry_rsi_min", 40.0))
+                rsi_entry_high = float(p.get("entry_rsi_max", 65.0))
+                slope_entry_min = float(p.get("ema_slope_entry_min", 0.0))
+                short_slope_th = float(p.get("ema_slope_short_threshold", -0.05))
+                short_rsi_low = float(p.get("entry_rsi_min_short", 35.0))
+                short_rsi_high = float(p.get("entry_rsi_max_short", 60.0))
+
+                ema_slope_positive = (
+                    ema_slope_pct_1h is not None and ema_slope_pct_1h >= slope_entry_min
+                )
+                ema_slope_strong_down = (
+                    ema_slope_pct_1h is not None and ema_slope_pct_1h < short_slope_th
+                )
+                rsi_in_range = (rsi_entry_low <= rsi_1h <= rsi_entry_high) if rsi_1h is not None else None
+                rsi_in_short_range = (short_rsi_low <= rsi_1h <= short_rsi_high) if rsi_1h is not None else None
+
+                if (
+                    price_above_ema
+                    and ema_slope_positive
+                    and rsi_in_range
+                    and regime_trending_4h
+                    and trending_score_4h >= 1
+                ):
+                    signal_result["signal"] = "long_setup"
+                elif (
+                    price_above_ema is False
+                    and ema_slope_strong_down
+                    and rsi_in_short_range
+                    and regime_trending_4h
+                    and trending_score_4h >= 1
+                ):
+                    signal_result["signal"] = "short_setup"
+                elif regime_ranging_4h:
+                    signal_result["signal"] = "wait_regime"
+                # 나머지 signal은 compute_trend_signal 결과 유지 (long_caution 등)
+
+                # 4H candle key 사용 (RegimeGate 멱등성)
+                signal_result["latest_candle_open_time"] = str(candles[-1].open_time)
+                signal_result["candles"] = candles  # 4H 캔들 (divergence 감지용)
+                signal_result["entry_candles"] = entry_candles  # 1H 캔들 (기록용)
+
+            return signal_result
+        else:
+            # 기존 경로 (entry_tf == basis_tf)
+            signal_result = compute_trend_signal(candles, **kwargs)
+            if signal_result is not None:
+                signal_result["latest_candle_open_time"] = str(candles[-1].open_time)
+                signal_result["candles"] = candles
+            return signal_result
 
     # ──────────────────────────────────────────
     # 시그널 후처리 hooks

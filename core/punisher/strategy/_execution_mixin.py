@@ -451,10 +451,10 @@ class ExecutionMixin:
         if await self._try_paper_entry(pair, direction, current_price, atr, params):
             return
 
-        # ── entry_mode 디스패치: market / limit / limit_then_market ──
+        # ── entry_mode 디스패치: market / limit / limit_then_market / ws_cross ──
         entry_mode = str(params.get("entry_mode", "market"))
 
-        if entry_mode in ("limit", "limit_then_market"):
+        if entry_mode in ("limit", "limit_then_market", "ws_cross"):
             pending = await self._open_position_limit(
                 pair, current_price, atr, params,
                 signal_data=signal_data,
@@ -514,7 +514,7 @@ class ExecutionMixin:
             return True  # 포지션 등록 완료 → continue
 
         # OPEN 상태: 시그널 변경 감지 → 즉시 취소 (추세 이탈 보호)
-        if current_signal != "long_setup":
+        if current_signal != pending.signal_at_placement:
             logger.info(
                 f"{self._log_prefix} {pair}: 시그널 변경 ({current_signal}) → limit order 취소"
             )
@@ -535,7 +535,22 @@ class ExecutionMixin:
             except Exception as e:
                 logger.warning(f"{self._log_prefix} {pair}: limit order 타임아웃 취소 실패 — {e}")
             del self._pending_limit_orders[pair]
-            # 타임아웃 후 시그널이 여전히 long_setup면 다음 사이클에서 market fallback 시도
+            # ws_cross 모드: 타임아웃 시 즉시 market fallback
+            if str(params.get("entry_mode", "market")) == "ws_cross":
+                price = self._latest_price.get(pair) or pending.limit_price
+                sd = {
+                    "signal": pending.signal_at_placement,
+                    "current_price": price,
+                    "approved_at": None,
+                    "ws_trigger": True,
+                }
+                try:
+                    await self._on_entry_signal(
+                        pair, pending.signal_at_placement, price,
+                        pending.atr, pending.params, signal_data=sd
+                    )
+                except Exception as e:
+                    logger.warning(f"{self._log_prefix} {pair}: ws_cross market fallback 오류 — {e}")
             return False
 
         # 대기 중
