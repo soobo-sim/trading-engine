@@ -167,16 +167,6 @@ _LAYER_A: list[TunableSpec] = [
 
 _LAYER_B: list[TunableSpec] = [
     TunableSpec(
-        key="gate.regime_streak_required",
-        layer="B", value_type="int", default=3,
-        min=3, max=10,
-        owner="core.execution.regime_gate",
-        risk_level="high", autonomy="auto",
-        description="RegimeGate 체제 streak 임계값. 동일 체제가 연속 N회 이상이어야 진입 허용.",
-        affects=["entry", "regime"],
-        db_table="gmoc_strategies", db_path="parameters.regime_streak_required",
-    ),
-    TunableSpec(
         key="gate.kill_consec_loss_threshold",
         layer="B", value_type="int", default=3,
         min=2, max=6,

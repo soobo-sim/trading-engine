@@ -1007,6 +1007,71 @@ class TestGateStatusThreeLevel:
         assert "신호 발생" not in text
 
 
+# ─── GateSummary JIT 모드 ───────────────────────────────────────────────────
+
+class TestGateSummaryJITMode:
+    """GS-JIT-01~03: TRADING_MODE=jit 시 게이트 줄을 JIT Advisory 상태로 표시."""
+
+    def _make_handler(self, jit_decision=None, jit_reasoning=''):
+        h = TelegramTransactionHandler("tok", "chat", exchange="GMO_COIN", domain="judge")
+        h._state.update({
+            'regime_status': 'trending',
+            'regime_consecutive': 6,
+            'signal': 'hold',
+            'current_price': 12_000_000.0,
+            'ema_price': 12_100_000.0,
+            'ema_slope_pct': -0.01,
+            'rsi': 50.0,
+            'jit_decision': jit_decision,
+            'jit_reasoning': jit_reasoning,
+        })
+        return h
+
+    @pytest.mark.asyncio
+    async def test_gs_jit01_no_prior_jit_shows_waiting(self):
+        """GS-JIT-01: TRADING_MODE=jit, jit_decision=None → 진입 신호 대기 중."""
+        h = self._make_handler(jit_decision=None)
+        with patch.dict('os.environ', {'TRADING_MODE': 'jit'}):
+            with patch("core.shared.logging.telegram_handlers._send_telegram", new_callable=AsyncMock) as m:
+                await h._send_periodic_summary()
+                text = m.call_args[0][2]
+        assert "JIT Advisory" in text
+        assert "진입 신호 대기 중" in text
+        assert "실행 게이트: 4H×" not in text
+
+    @pytest.mark.asyncio
+    async def test_gs_jit02_go_shows_approved(self):
+        """GS-JIT-02: TRADING_MODE=jit, jit_decision='GO' → 최근 진입 승인."""
+        h = self._make_handler(jit_decision='GO')
+        with patch.dict('os.environ', {'TRADING_MODE': 'jit'}):
+            with patch("core.shared.logging.telegram_handlers._send_telegram", new_callable=AsyncMock) as m:
+                await h._send_periodic_summary()
+                text = m.call_args[0][2]
+        assert "JIT Advisory" in text
+        assert "최근 진입 승인" in text
+
+    @pytest.mark.asyncio
+    async def test_gs_jit03_no_go_shows_blocked(self):
+        """GS-JIT-03: TRADING_MODE=jit, jit_decision='NO_GO' → 최근 진입 차단."""
+        h = self._make_handler(jit_decision='NO_GO')
+        with patch.dict('os.environ', {'TRADING_MODE': 'jit'}):
+            with patch("core.shared.logging.telegram_handlers._send_telegram", new_callable=AsyncMock) as m:
+                await h._send_periodic_summary()
+                text = m.call_args[0][2]
+        assert "JIT Advisory" in text
+        assert "최근 진입 차단" in text
+
+    @pytest.mark.asyncio
+    async def test_gs_jit04_v1_mode_keeps_regime_gate(self):
+        """GS-JIT-04: TRADING_MODE=v1 (기본) → 기존 실행 게이트 표시 유지."""
+        h = self._make_handler(jit_decision=None)
+        with patch.dict('os.environ', {'TRADING_MODE': 'v1'}):
+            with patch("core.shared.logging.telegram_handlers._send_telegram", new_callable=AsyncMock) as m:
+                await h._send_periodic_summary()
+                text = m.call_args[0][2]
+        assert "실행 게이트: 4H×" in text
+        assert "JIT Advisory" not in text
+
 
 # ─── JIT Advisory Gate 파싱 검증 ────────────────────────────────────────────
 
