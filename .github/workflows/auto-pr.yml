@@ -18,7 +18,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Skip if [skip ci] commit
+        id: check_skip
+        run: |
+          MSG=$(git log -1 --pretty=%s)
+          if echo "$MSG" | grep -q '\[skip ci\]'; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Create Pull Request
+        if: steps.check_skip.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
