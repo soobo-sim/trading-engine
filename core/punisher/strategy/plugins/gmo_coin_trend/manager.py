@@ -26,7 +26,7 @@ from typing import Any, Dict, Optional
 
 from core.exchange.errors import ExchangeError
 from core.exchange.types import OrderType, Position
-from core.strategy.plugins.cfd_trend_following.manager import MarginTrendManager as CfdTrendFollowingManager
+from core.punisher.strategy.plugins.cfd_trend_following.manager import MarginTrendManager as CfdTrendFollowingManager
 
 logger = logging.getLogger(__name__)
 
@@ -226,6 +226,15 @@ class GmoCoinTrendManager(CfdTrendFollowingManager):
                 stop_loss_price=initial_sl,
                 strategy_id=params.get("strategy_id"),
             )
+
+            # 진입 즉시 거래소 ロスカットレート 설정 (30분 공백 제거)
+            if initial_sl is not None:
+                try:
+                    await self._sync_losscut_price(product_code, initial_sl)
+                except Exception as e:
+                    logger.warning(
+                        f"[TrendMgr] {product_code}: 진입 시 ロスカット 설정 실패 — {e}. 트레일링 시 설정 예정"
+                    )
 
             logger.info(
                 f"[TrendMgr] {product_code}: {side} 진입 완료 "
@@ -501,6 +510,15 @@ class GmoCoinTrendManager(CfdTrendFollowingManager):
                 pyramid_count=pyramid_count + 1,
             )
 
+            # 피라미딩 후 SL 재동기화
+            if new_sl is not None:
+                try:
+                    await self._sync_losscut_price(product_code, new_sl)
+                except Exception as e:
+                    logger.warning(
+                        f"[TrendMgr] {product_code}: 피라미딩 후 ロスカット 재동기화 실패 — {e}"
+                    )
+
         except Exception as e:
             logger.error(f"[TrendMgr] {product_code}: 피라미딩 오류 — {e}", exc_info=True)
 
@@ -541,6 +559,60 @@ class GmoCoinTrendManager(CfdTrendFollowingManager):
             logger.error(f"[TrendMgr] {product_code}: DB 피라미딩 업데이트 실패 — {e}", exc_info=True)
 
     # ──────────────────────────────────────────
+    # 포지션 감지 오버라이드 (DB 우선 복원 + 재동기화)
+    # ──────────────────────────────────────────
+
+    async def _detect_existing_position(self, product_code: str) -> Optional[Position]:
+        """DB 우선 복원 → 거래소 포지션 재확인 → 거래소 ロスカット 재동기화.
+
+        부모(MarginTrendManager)는 거래소 API만 사용 → stop_loss_price=None.
+        GMO Coin은 DB에서 stop_loss_price를 복원하고 거래소에 재동기화한다.
+        """
+        # Step 1: 부모 메서드로 거래소 포지션 확인
+        pos = await super()._detect_existing_position(product_code)
+        if pos is None:
+            return None
+
+        # Step 2: DB에서 stop_loss_price 복원
+        try:
+            from sqlalchemy import select as sa_select
+            Model = self._position_model
+            pair_col = getattr(Model, self._position_pair_column)
+            async with self._session_factory() as db:
+                result = await db.execute(
+                    sa_select(Model)
+                    .where(pair_col == product_code, Model.status == "open")
+                    .order_by(Model.id.desc())
+                    .limit(1)
+                )
+                rec = result.scalars().first()
+            if rec is not None and rec.stop_loss_price is not None:
+                pos.stop_loss_price = float(rec.stop_loss_price)
+                pos.db_record_id = rec.id
+                # extra 정보도 DB에서 보완 (side, opened_at)
+                if not pos.extra.get("side") and hasattr(rec, "side"):
+                    pos.extra["side"] = rec.side
+                logger.info(
+                    f"[TrendMgr] {product_code}: DB에서 SL 복원 "
+                    f"stop_loss_price=¥{pos.stop_loss_price:,.0f}"
+                )
+        except Exception as e:
+            logger.warning(f"[TrendMgr] {product_code}: DB SL 복원 실패 — {e}")
+
+        # Step 3: 거래소 ロスカット 재동기화
+        if pos.stop_loss_price is not None:
+            try:
+                await self._sync_losscut_price(product_code, pos.stop_loss_price)
+                logger.info(
+                    f"[TrendMgr] {product_code}: 재시작 후 거래소 ロスカット 재동기화 완료 "
+                    f"sl=¥{pos.stop_loss_price:,.0f}"
+                )
+            except Exception as e:
+                logger.warning(f"[TrendMgr] {product_code}: 재시작 후 ロスカット 재동기화 실패 — {e}")
+
+        return pos
+
+    # ──────────────────────────────────────────
     # 진입 전 체크 오버라이드
     # ──────────────────────────────────────────
 
@@ -574,11 +646,68 @@ class GmoCoinTrendManager(CfdTrendFollowingManager):
         if sl_after is not None and sl_after != sl_before:
             await self._sync_losscut_price(pair, sl_after)
 
-    async def _sync_losscut_price(self, pair: str, new_sl: float) -> None:
+    async def _handle_losscut_sync_failure(
+        self, pair: str, new_sl: float, position_id: int
+    ) -> None:
+        """ロスカット 동기화 최종 실패 처리: 진단 로그 + 긴급 청산 트리거 (ERR-578)."""
+        logger.warning(
+            f"[TrendMgr] {pair}: ロスカットレート 동기화 실패 "
+            f"(position_id={position_id}, sl=¥{new_sl:.0f}) — "
+            "in-memory stop이 보호 중"
+        )
+        # BUG-045: ERR-578 시 현재가 vs in-memory SL 진단 + 긴급 청산 트리거
+        try:
+            ticker = await self._adapter.get_ticker(pair)
+            pos = self._position.get(pair)
+            side = pos.extra.get("side", "?") if pos else "?"
+            in_mem_sl = pos.stop_loss_price if pos else None
+            if in_mem_sl is not None:
+                if side == "sell":
+                    sl_breached = ticker.last > new_sl
+                elif side == "buy":
+                    sl_breached = ticker.last < new_sl
+                else:
+                    sl_breached = False
+            else:
+                sl_breached = False
+            status_str = "⚠️ SL 초과 — 긴급 청산 발동" if sl_breached else "정상 범위"
+            logger.error(
+                f"[TrendMgr] {pair}: ERR-578 진단 — "
+                f"현재가=¥{ticker.last:,.0f} / in-memory SL=¥{new_sl:,.0f} / "
+                f"side={side} / 상태={status_str}"
+            )
+            if sl_breached:
+                logger.critical(
+                    f"[TrendMgr] {pair}: ERR-578 + SL 초과 확인 — 긴급 청산 태스크 생성"
+                )
+                asyncio.create_task(self._close_position(pair, "stop_loss_err578"))
+        except Exception:
+            pass
+        try:
+            import os
+            from core.shared.logging.telegram_handlers import _send_telegram
+            bot_token = os.getenv("AUTO_REPORT_BOT_TOKEN", "")
+            chat_id = os.getenv("AUTO_REPORT_CHAT_ID", "")
+            asyncio.ensure_future(
+                _send_telegram(
+                    bot_token,
+                    chat_id,
+                    f"⚠️ [TrendMgr] {pair} 로스컷 동기화 실패\n"
+                    f"position_id={position_id}\n"
+                    f"SL=¥{new_sl:,.0f} — 인메모리 SL 보호 중",
+                )
+            )
+        except Exception:
+            pass
+
+    async def _sync_losscut_price(
+        self, pair: str, new_sl: float, max_retries: int = 3
+    ) -> None:
         """현재 보유 중인 모든 건옥의 ロスカットレート를 new_sl로 동기화.
 
         피라미딩으로 복수 건옥이 있을 수 있으므로 get_positions()로 전체 조회.
-        실패해도 인메모리 스탑 로직에 영향 없음 (WARNING 로그만).
+        실패 시 max_retries회 재시도 (0.5s × attempt 간격). 최종 실패 시
+        _handle_losscut_sync_failure 호출.
         """
         if not hasattr(self._adapter, "get_positions") or not hasattr(self._adapter, "change_losscut_price"):
             return
@@ -589,61 +718,22 @@ class GmoCoinTrendManager(CfdTrendFollowingManager):
             for fx_pos in fx_positions:
                 if fx_pos.position_id is None:
                     continue
-                ok = await self._adapter.change_losscut_price(fx_pos.position_id, new_sl)
+                ok = False
+                for attempt in range(1, max_retries + 1):
+                    ok = await self._adapter.change_losscut_price(fx_pos.position_id, new_sl)
+                    if ok:
+                        logger.debug(
+                            f"[TrendMgr] {pair}: ロスカットレート 동기화 완료 "
+                            f"(position_id={fx_pos.position_id}, sl=¥{new_sl})"
+                        )
+                        break
+                    if attempt < max_retries:
+                        await asyncio.sleep(0.5 * attempt)
+                        logger.info(
+                            f"[TrendMgr] {pair}: ロスカット 동기화 재시도 {attempt}/{max_retries} "
+                            f"(position_id={fx_pos.position_id})"
+                        )
                 if not ok:
-                    logger.warning(
-                        f"[TrendMgr] {pair}: ロスカットレート 동기화 실패 "
-                        f"(position_id={fx_pos.position_id}, sl=¥{new_sl:.0f}) — "
-                        "in-memory stop이 보호 중"
-                    )
-                    # BUG-045: ERR-578 시 현재가 vs in-memory SL 진단 + 긴급 청산 트리거
-                    try:
-                        ticker = await self._adapter.get_ticker(pair)
-                        pos = self._position.get(pair)
-                        side = pos.extra.get("side", "?") if pos else "?"
-                        in_mem_sl = pos.stop_loss_price if pos else None
-                        if in_mem_sl is not None:
-                            if side == "sell":
-                                sl_breached = ticker.last > new_sl
-                            elif side == "buy":
-                                sl_breached = ticker.last < new_sl
-                            else:
-                                sl_breached = False
-                        else:
-                            sl_breached = False
-                        status_str = "⚠️ SL 초과 — 긴급 청산 발동" if sl_breached else "정상 범위"
-                        logger.error(
-                            f"[TrendMgr] {pair}: ERR-578 진단 — "
-                            f"현재가=¥{ticker.last:,.0f} / in-memory SL=¥{new_sl:,.0f} / "
-                            f"side={side} / 상태={status_str}"
-                        )
-                        if sl_breached:
-                            logger.critical(
-                                f"[TrendMgr] {pair}: ERR-578 + SL 초과 확인 — 긴급 청산 태스크 생성"
-                            )
-                            asyncio.create_task(self._close_position(pair, "stop_loss_err578"))
-                    except Exception:
-                        pass
-                    try:
-                        import os
-                        from core.shared.logging.telegram_handlers import _send_telegram
-                        bot_token = os.getenv("AUTO_REPORT_BOT_TOKEN", "")
-                        chat_id = os.getenv("AUTO_REPORT_CHAT_ID", "")
-                        asyncio.ensure_future(
-                            _send_telegram(
-                                bot_token,
-                                chat_id,
-                                f"⚠️ [TrendMgr] {pair} 로스컷 동기화 실패\n"
-                                f"position_id={fx_pos.position_id}\n"
-                                f"SL=¥{new_sl:,.0f} — 인메모리 SL 보호 중",
-                            )
-                        )
-                    except Exception:
-                        pass
-                else:
-                    logger.debug(
-                        f"[TrendMgr] {pair}: ロスカットレート 동기화 완료 "
-                        f"(position_id={fx_pos.position_id}, sl=¥{new_sl})"
-                    )
+                    await self._handle_losscut_sync_failure(pair, new_sl, fx_pos.position_id)
         except Exception as e:
             logger.warning(f"[TrendMgr] {pair}: ロスカットレート 동기화 오류 — {e}")

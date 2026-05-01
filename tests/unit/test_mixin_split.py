@@ -76,7 +76,7 @@ def test_ms03_execution_handle_result_accessible_from_base():
 def test_ms04_subclass_override_check_exit_warning():
     """MarginTrendManager._check_exit_warning이 JudgeMixin 것을 정상 override."""
     from core.strategy._judge_mixin import JudgeMixin
-    from core.strategy.plugins.cfd_trend_following.manager import MarginTrendManager
+    from core.punisher.strategy.plugins.cfd_trend_following.manager import MarginTrendManager
 
     if hasattr(MarginTrendManager, "_check_exit_warning"):
         # override된 경우 MarginTrendManager의 메서드가 JudgeMixin 것이 아니어야 함

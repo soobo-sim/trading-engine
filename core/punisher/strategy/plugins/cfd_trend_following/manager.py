@@ -32,7 +32,7 @@ from core.exchange.types import OrderType, Position
 from core.strategy.base_trend import BaseTrendManager
 from core.punisher.task.supervisor import TaskSupervisor
 
-logger = logging.getLogger("core.strategy.plugins.cfd_trend_following.manager")  # 구 경로 유지
+logger = logging.getLogger("core.punisher.strategy.plugins.cfd_trend_following.manager")
 
 
 class MarginTrendManager(BaseTrendManager):

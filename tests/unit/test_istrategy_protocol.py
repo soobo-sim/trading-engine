@@ -15,7 +15,7 @@ def test_trend_following_implements_istrategy():
 
 
 def test_margin_trend_implements_istrategy():
-    from core.strategy.cfd_trend_following import MarginTrendManager
+    from core.punisher.strategy.plugins.cfd_trend_following.manager import MarginTrendManager
     assert hasattr(MarginTrendManager, "start")
     assert hasattr(MarginTrendManager, "stop")
     assert hasattr(MarginTrendManager, "is_running")
