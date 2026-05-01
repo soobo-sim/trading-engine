@@ -222,6 +222,44 @@ def classify_regime(
     return regime, regime_trending, regime_ranging
 
 
+def compute_trending_score(
+    bb_width_pct: float,
+    range_pct: float,
+    atr_pct: float,
+    slope_pct: Optional[float],
+    params: Optional[dict] = None,
+) -> int:
+    """trending_score 계산 — 0~6 가중합. 단일 진실 소스.
+
+    signals.py(진입 판단)와 analysis_service.py(API 표시) 모두 이 함수를 사용하여
+    trending_score 불일치 방지 (BUG-039 근본 수정).
+
+    지표 기여:
+      bb_width_pct >= max(bb_trending_min, 4.5) → +2
+      bb_width_pct >= bb_trending_min           → +1
+      range_pct    >= range_pct_trending_min    → +1
+      atr_pct      >= 2.5                       → +1
+      |slope_pct|  >= 4.0                       → +1
+    """
+    if params is None:
+        params = {}
+    _bb_trending_threshold = float(params.get("bb_width_trending_min", 3.0))
+    _range_trending_min = float(params.get("range_pct_trending_min", 6.0))
+
+    score = 0
+    if bb_width_pct >= max(_bb_trending_threshold, 4.5):
+        score += 2
+    elif bb_width_pct >= _bb_trending_threshold:
+        score += 1
+    if range_pct >= _range_trending_min:
+        score += 1
+    if atr_pct >= 2.5:
+        score += 1
+    if slope_pct is not None and abs(slope_pct) >= 4.0:
+        score += 1
+    return score
+
+
 def compute_trend_signal(
     candles: List[Any],
     params: Optional[dict] = None,
@@ -284,22 +322,9 @@ def compute_trend_signal(
     range_pct = (max(highs[-bb_period:]) - min(lows[-bb_period:])) / closes[-bb_period] * 100 if closes[-bb_period] > 0 else 0
     _, regime_trending, regime_ranging = classify_regime(bb_width_pct, range_pct, params)
 
-    # trending_score: bb/range/ATR/slope 4가지 지표 가중합 (0~6)
-    # long_setup 조건: trending_score >= 1 (최소 1개 지표라도 추세 확인)
+    # trending_score: compute_trending_score() 단일 진실 소스 사용 (BUG-039 근본 수정)
     _atr_pct = (atr / current_price * 100) if (atr and current_price > 0) else 0
-    _bb_trending_threshold = float(params.get("bb_width_trending_min", 3.0))
-    _range_trending_min = float(params.get("range_pct_trending_min", 6.0))
-    trending_score = 0
-    if bb_width_pct >= max(_bb_trending_threshold, 4.5):
-        trending_score += 2
-    elif bb_width_pct >= _bb_trending_threshold:
-        trending_score += 1
-    if range_pct >= _range_trending_min:
-        trending_score += 1
-    if _atr_pct >= 2.5:
-        trending_score += 1
-    if ema_slope_pct is not None and abs(ema_slope_pct) >= 4.0:
-        trending_score += 1
+    trending_score = compute_trending_score(bb_width_pct, range_pct, _atr_pct, ema_slope_pct, params)
 
     rsi_oversold = (rsi is not None and rsi < short_rsi_low)
 
