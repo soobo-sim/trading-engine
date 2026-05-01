@@ -596,6 +596,34 @@ class GmoCoinTrendManager(CfdTrendFollowingManager):
                         f"(position_id={fx_pos.position_id}, sl=¥{new_sl:.0f}) — "
                         "in-memory stop이 보호 중"
                     )
+                    # BUG-045: ERR-578 시 현재가 vs in-memory SL 진단 + 긴급 청산 트리거
+                    try:
+                        ticker = await self._adapter.get_ticker(pair)
+                        pos = self._position.get(pair)
+                        side = pos.extra.get("side", "?") if pos else "?"
+                        in_mem_sl = pos.stop_loss_price if pos else None
+                        if in_mem_sl is not None:
+                            if side == "sell":
+                                sl_breached = ticker.last > new_sl
+                            elif side == "buy":
+                                sl_breached = ticker.last < new_sl
+                            else:
+                                sl_breached = False
+                        else:
+                            sl_breached = False
+                        status_str = "⚠️ SL 초과 — 긴급 청산 발동" if sl_breached else "정상 범위"
+                        logger.error(
+                            f"[TrendMgr] {pair}: ERR-578 진단 — "
+                            f"현재가=¥{ticker.last:,.0f} / in-memory SL=¥{new_sl:,.0f} / "
+                            f"side={side} / 상태={status_str}"
+                        )
+                        if sl_breached:
+                            logger.critical(
+                                f"[TrendMgr] {pair}: ERR-578 + SL 초과 확인 — 긴급 청산 태스크 생성"
+                            )
+                            asyncio.create_task(self._close_position(pair, "stop_loss_err578"))
+                    except Exception:
+                        pass
                     try:
                         import os
                         from core.shared.logging.telegram_handlers import _send_telegram

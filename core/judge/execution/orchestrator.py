@@ -111,7 +111,7 @@ def _build_narrative(
 
     # ── 스탑 타이트닝 ────────────────────────────────────────────────
     if final_action == "tighten_stop":
-        sl_str = f" 새 SL ¥{decision.stop_loss:,.0f}." if decision.stop_loss else ""
+        sl_str = f" 현재 SL ¥{decision.stop_loss:,.0f} (조정 전)." if decision.stop_loss else ""
         reason = decision.reasoning or sig_ko
         return f"{pair}: 수익 구간 도달로 스탑 조정({sig}).{sl_str} 이유: {reason}."
 
