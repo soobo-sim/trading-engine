@@ -61,6 +61,41 @@ def _format_balance_line(data: dict) -> str:
     return f"💰 ¥{data['jpy_available']:,.0f}"
 
 
+def _build_entry_mode_lines(data: dict) -> list[str]:
+    """entry_mode / entry_timeframe / armed 상태 줄 목록을 반환한다.
+
+    ws_cross 모드 또는 1h timeframe이면 '진입 모드' 줄과
+    armed 상태 줄(ws_cross 전용)을 반환한다. 기본 설정이면 빈 리스트.
+    """
+    import time as _time
+
+    lines: list[str] = []
+    entry_mode = data.get("entry_mode", "market")
+    entry_tf = data.get("entry_timeframe")
+    tf_is_1h = bool(entry_tf and str(entry_tf).lower() in ("1h", "1"))
+
+    if entry_mode == "ws_cross":
+        _tf_part = " + 1H slope/RSI" if tf_is_1h else ""
+        lines.append(f"진입 모드: ⚡ WS 돌파{_tf_part} (EMA 실시간 감시)")
+    elif tf_is_1h:
+        lines.append("진입 모드: 📊 1H slope/RSI + 4H 체제")
+
+    if entry_mode == "ws_cross":
+        armed_dir = data.get("armed_direction")
+        armed_ema = data.get("armed_ema")
+        armed_expire = data.get("armed_expire_at", 0.0) or 0.0
+        if armed_dir is not None and armed_ema is not None:
+            remain = max(0.0, armed_expire - _time.time())
+            h_ = int(remain // 3600)
+            m_ = int((remain % 3600) // 60)
+            dir_kr = "숏" if armed_dir == "short" else "롱"
+            lines.append(f"⚡ WS 대기: {dir_kr} armed @ ¥{armed_ema:,.0f}  (만료까지 {h_}h {m_:02d}m)")
+        else:
+            lines.append("⏳ WS 대기: armed 조건 미충족")
+
+    return lines
+
+
 _STRATEGY_LABEL = {
     "trend_following": "추세추종",
     "box_mean_reversion": "박스역추세",
@@ -178,6 +213,7 @@ def build_telegram_text(prefix: str, time_str: str, pair: str, data: dict) -> st
             regime_label = _REGIME_LABEL.get(regime, regime or "-")
             strategy_label = _STRATEGY_LABEL.get(active_strategy, active_strategy or "-")
             lines.append(f"⚙️ 체제: {regime_label} | 활성전략: {strategy_label}")
+        lines.extend(_build_entry_mode_lines(data))
         lines.append(_format_balance_line(data))
     else:
         wait_dir = data.get("wait_direction")  # None = 현물 (롱 전용)
@@ -231,6 +267,7 @@ def build_telegram_text(prefix: str, time_str: str, pair: str, data: dict) -> st
             regime_label = _REGIME_LABEL.get(regime, regime or "-")
             strategy_label = _STRATEGY_LABEL.get(active_strategy, active_strategy or "-")
             lines.append(f"⚙️ 체제: {regime_label} | 활성전략: {strategy_label}")
+        lines.extend(_build_entry_mode_lines(data))
         lines.append(_format_balance_line(data))
 
     return "\n".join(lines)
@@ -472,6 +509,14 @@ async def generate_trend_report(
             "active_strategy": _regime_gate.active_strategy,
         }
     _jit_bypass_gate = getattr(trend_manager, "_jit_bypass_gate", False)
+
+    # ── entry_mode / entry_timeframe / armed 상태 (trend_manager 인메모리) ──
+    _entry_mode = str(params.get("entry_mode", "market"))
+    _entry_timeframe = params.get("entry_timeframe")  # '1h' | None
+    _armed_ema_val = getattr(trend_manager, "_armed_entry_ema", {}).get(pair)
+    _armed_dir = getattr(trend_manager, "_armed_direction", {}).get(pair)
+    _armed_expire = getattr(trend_manager, "_armed_expire_at", {}).get(pair, 0.0)
+
     report_data = {
         "current_price": current_price,
         "signal": signal,
@@ -501,6 +546,12 @@ async def generate_trend_report(
         "active_strategy": active_strategy,
         "regime_gate_info": regime_gate_info,
         "jit_bypass_gate": _jit_bypass_gate,
+        # 신규: 진입 모드 + armed 상태
+        "entry_mode": _entry_mode,
+        "entry_timeframe": _entry_timeframe,
+        "armed_direction": _armed_dir,
+        "armed_ema": _armed_ema_val,
+        "armed_expire_at": _armed_expire,
     }
 
     telegram_text = build_telegram_text(prefix.upper(), time_str, pair, report_data)

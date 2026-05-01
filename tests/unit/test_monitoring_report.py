@@ -3140,3 +3140,115 @@ class TestBuildTelegramTextConditionLines:
         }
         text = build_telegram_text("GMOC", "14:08", "btc_jpy", data)
         assert "판단 도메인 →" in text
+
+
+# ─── entry_mode / armed 상태 표시 (실행 도메인 보고) ─────────────────────────
+
+class TestEntryModeInReport:
+    """ER-01~ER-08: build_telegram_text entry_mode/armed 상태 표시."""
+
+    def _base_data(self) -> dict:
+        return {
+            "trend_icon": "🔻",
+            "current_price": 12_142_312,
+            "market_summary": "하락 전환",
+            "signal": "long_caution",
+            "position": None,
+            "wait_direction": "short",
+            "entry_blockers": [],
+            "conditions_met": 3,
+            "conditions_total": 5,
+            "jpy_available": 100_000,
+            "collateral": {"collateral": 98_051, "require_collateral": 0},
+            "regime_gate_info": {
+                "last_regime": "trending",
+                "consecutive_count": 20,
+                "active_strategy": "trend_following",
+            },
+            "jit_bypass_gate": True,
+        }
+
+    def test_er01_default_no_mode_line(self):
+        """ER-01: entry_mode/timeframe 없으면 '진입 모드' 줄 없음."""
+        text = build_telegram_text("GMOC", "22:46", "btc_jpy", self._base_data())
+        assert "진입 모드" not in text
+
+    def test_er02_ws_cross_shows_mode_line(self):
+        """ER-02: entry_mode=ws_cross → '진입 모드: ⚡ WS 돌파' 표시."""
+        data = self._base_data()
+        data["entry_mode"] = "ws_cross"
+        text = build_telegram_text("GMOC", "22:46", "btc_jpy", data)
+        assert "진입 모드" in text
+        assert "WS 돌파" in text
+
+    def test_er03_entry_timeframe_1h_shows_mode_line(self):
+        """ER-03: entry_timeframe=1h → '진입 모드: 📊 1H slope/RSI' 표시."""
+        data = self._base_data()
+        data["entry_timeframe"] = "1h"
+        text = build_telegram_text("GMOC", "22:46", "btc_jpy", data)
+        assert "진입 모드" in text
+        assert "1H slope/RSI" in text
+
+    def test_er04_ws_cross_with_1h_shows_combined(self):
+        """ER-04: ws_cross + 1h → '진입 모드' 줄에 WS + 1H 모두 표시."""
+        data = self._base_data()
+        data["entry_mode"] = "ws_cross"
+        data["entry_timeframe"] = "1h"
+        text = build_telegram_text("GMOC", "22:46", "btc_jpy", data)
+        assert "WS 돌파" in text
+        assert "1H slope/RSI" in text
+
+    def test_er05_ws_cross_armed_shows_line(self):
+        """ER-05: ws_cross + armed_direction=short → '⚡ WS 대기: 숏 armed' 표시."""
+        import time as _time
+        data = self._base_data()
+        data["entry_mode"] = "ws_cross"
+        data["armed_direction"] = "short"
+        data["armed_ema"] = 12_000_000.0
+        data["armed_expire_at"] = _time.time() + 3600 * 3.5
+        text = build_telegram_text("GMOC", "22:46", "btc_jpy", data)
+        assert "숏 armed" in text
+        assert "¥12,000,000" in text
+        assert "만료까지" in text
+
+    def test_er06_ws_cross_no_armed_shows_waiting(self):
+        """ER-06: ws_cross + armed 없음 → '⏳ WS 대기: armed 조건 미충족' 표시."""
+        data = self._base_data()
+        data["entry_mode"] = "ws_cross"
+        text = build_telegram_text("GMOC", "22:46", "btc_jpy", data)
+        assert "WS 대기" in text
+        assert "armed 조건 미충족" in text
+
+    def test_er07_mode_line_appears_with_position(self):
+        """ER-07: 포지션 보유 중에도 entry_mode 줄 표시."""
+        data = self._base_data()
+        data["position"] = {
+            "side": "sell",
+            "entry_price": 12_200_000,
+            "entry_amount": 0.01,
+            "current_price": 12_142_312,
+            "unrealized_pnl_jpy": 577,
+            "unrealized_pnl_pct": 0.47,
+            "stop_loss_price": 12_400_000,
+            "trailing_stop_distance": 257_688,
+            "price_diff": -57_688,
+            "pnl_at_stop": -20_000,
+        }
+        data["entry_mode"] = "ws_cross"
+        data["entry_timeframe"] = "1h"
+        text = build_telegram_text("GMOC", "22:46", "btc_jpy", data)
+        assert "진입 모드" in text
+        assert "WS 돌파" in text
+
+    def test_er08_long_armed_shows_correct_direction(self):
+        """ER-08: armed_direction=long → '롱 armed' 표시."""
+        import time as _time
+        data = self._base_data()
+        data["entry_mode"] = "ws_cross"
+        data["wait_direction"] = "long"
+        data["armed_direction"] = "long"
+        data["armed_ema"] = 11_900_000.0
+        data["armed_expire_at"] = _time.time() + 7200
+        text = build_telegram_text("GMOC", "22:46", "btc_jpy", data)
+        assert "롱 armed" in text
+        assert "¥11,900,000" in text
