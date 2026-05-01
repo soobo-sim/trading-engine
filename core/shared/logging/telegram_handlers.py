@@ -937,9 +937,14 @@ class TelegramTransactionHandler(logging.Handler):
             direction_label = "숏" if is_short_setup else "롱"
 
             if current is not None and ema is not None:
+                _has_pos = self._state.get('has_position', False)
+                _price_tf = _entry_tf.upper() if _entry_tf else '4H'
+                _price_src = "WS 실시간가" if _has_pos else f"{_price_tf} 캔들 종가"
+                _ema_dist = current - ema
                 if is_short_setup:
                     c1 = "✅"
-                    condition_lines.append(f" {c1} ① 가격 < EMA    ¥{current:,.0f} (EMA ¥{ema:,.0f})")
+                    condition_lines.append(f" {c1} ① 가격 (¥{current:,.0f}) < EMA (¥{ema:,.0f})")
+                    condition_lines.append(f"    가격: {_price_src}, EMA까지 거리 ¥{_ema_dist:+,.0f}")
 
                     SHORT_SLOPE_TH = -0.05
                     if ema_slope is not None:
@@ -968,7 +973,8 @@ class TelegramTransactionHandler(logging.Handler):
                         condition_lines.append(" ❓ ④ 추세 강도     데이터 없음")
                 else:
                     c1 = "✅" if current > ema else "❌"
-                    condition_lines.append(f" {c1} ① 가격 > EMA    ¥{current:,.0f} (EMA ¥{ema:,.0f})")
+                    condition_lines.append(f" {c1} ① 가격 (¥{current:,.0f}) > EMA (¥{ema:,.0f})")
+                    condition_lines.append(f"    가격: {_price_src}, EMA까지 거리 ¥{_ema_dist:+,.0f}")
 
                     LONG_SLOPE_TH = 0.0
                     if ema_slope is not None:
@@ -998,9 +1004,11 @@ class TelegramTransactionHandler(logging.Handler):
 
 
 
-        met_count = sum(1 for l in condition_lines if "✅" in l)
-        total_count = len(condition_lines)
-        has_unmet = any("❌" in l for l in condition_lines)
+        # 서브라인(들여쓰기 4칸)은 카운트/미충족 판별에서 제외
+        _cond_lines_main = [l for l in condition_lines if not l.startswith("    ")]
+        met_count = sum(1 for l in _cond_lines_main if "✅" in l)
+        total_count = len(_cond_lines_main)
+        has_unmet = any("❌" in l for l in _cond_lines_main)
         signal = self._state.get('signal')
 
         # 결론
@@ -1010,7 +1018,7 @@ class TelegramTransactionHandler(logging.Handler):
             _unmet_labels = ['가격/EMA', 'EMA기울기', 'RSI', '추세강도']
         _unmet = [
             _unmet_labels[i]
-            for i, _l in enumerate(condition_lines)
+            for i, _l in enumerate(_cond_lines_main)
             if '❌' in _l and i < len(_unmet_labels)
         ]
 
