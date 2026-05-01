@@ -1502,3 +1502,95 @@ class TestSeedStrategyParamsExtended:
         seed_telegram_strategy_params({"armed_expire_sec": 7200})
         assert h._state['armed_expire_sec'] == 7200.0
         _handlers.clear()
+
+
+# ─── trending_score ④번 조건 표시 ─────────────────────────────────────────
+
+class TestTrendingScoreCondition:
+    """TS-01~TS-05: trending_score 파싱 + 조건 블록 ④번 줄 표시."""
+
+    def _make_handler(self):
+        from core.shared.logging.telegram_handlers import TelegramTransactionHandler
+        return TelegramTransactionHandler("tok", "cid", exchange="GMOC", domain="judge")
+
+    def _run_summary(self, h) -> str:
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        async def _inner():
+            with patch(
+                "core.shared.logging.telegram_handlers._send_telegram",
+                new_callable=AsyncMock,
+            ) as m:
+                h._loop = asyncio.get_running_loop()
+                await h._send_periodic_summary()
+                return m.call_args[0][2]
+
+        return asyncio.run(_inner())
+
+    def _base_short_state(self, h):
+        """숏 대기 기본 상태 (trending + ①②③ 충족)."""
+        h._state['regime_status'] = 'trending'
+        h._state['regime_consecutive'] = 5
+        h._state['current_price'] = 12_100_000.0
+        h._state['ema_price'] = 12_200_000.0      # current < ema → 숏
+        h._state['ema_slope_pct'] = -0.10
+        h._state['rsi'] = 45.0
+
+    def test_ts01_parse_trending_score_from_log(self):
+        """TS-01: 로그에서 trending_score=2 파싱 → _state 갱신."""
+        h = self._make_handler()
+        from core.shared.logging.telegram_handlers import _handlers
+        _handlers.clear()
+        _handlers.append(h)
+        h._parse_and_update(
+            "[Judge-Layer][c1][TrendMgr] btc_jpy: 대기 "
+            "signal=long_caution ema_slope_pct=-0.0500 rsi=43.0 ema=12200000 "
+            "price=12100000 trending_score=2"
+        )
+        assert h._state['trending_score'] == 2
+        _handlers.clear()
+
+    def test_ts02_parse_trending_score_na(self):
+        """TS-02: trending_score=N/A → _state 변경 없음 (None 유지)."""
+        h = self._make_handler()
+        from core.shared.logging.telegram_handlers import _handlers
+        _handlers.clear()
+        _handlers.append(h)
+        h._parse_and_update(
+            "[Judge-Layer][c1][TrendMgr] btc_jpy: 대기 "
+            "signal=long_caution ema_slope_pct=-0.0500 rsi=43.0 ema=12200000 "
+            "price=12100000 trending_score=N/A"
+        )
+        assert h._state['trending_score'] is None
+        _handlers.clear()
+
+    def test_ts03_score_met_shows_check(self):
+        """TS-03: trending_score=2 → ④ ✅ 표시."""
+        h = self._make_handler()
+        self._base_short_state(h)
+        h._state['trending_score'] = 2
+        text = self._run_summary(h)
+        assert "④ 추세 강도" in text
+        assert "score=2" in text
+        assert "✅ ④ 추세 강도" in text
+
+    def test_ts04_score_zero_shows_cross(self):
+        """TS-04: trending_score=0 → ④ ❌ 표시 + 결론에 '추세강도' 언급."""
+        h = self._make_handler()
+        self._base_short_state(h)
+        h._state['trending_score'] = 0
+        text = self._run_summary(h)
+        assert "④ 추세 강도" in text
+        assert "score=0" in text
+        assert "❌ ④ 추세 강도" in text
+        assert "추세강도" in text
+
+    def test_ts05_no_score_shows_unknown(self):
+        """TS-05: trending_score=None → ④ ❓ 데이터 없음 표시."""
+        h = self._make_handler()
+        self._base_short_state(h)
+        h._state['trending_score'] = None
+        text = self._run_summary(h)
+        assert "④ 추세 강도" in text
+        assert "데이터 없음" in text

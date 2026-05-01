@@ -201,6 +201,8 @@ class TelegramTransactionHandler(logging.Handler):
             'entry_event': None,
             'close_event': None,
             'stop_tighten_event': None,
+            # 추세 강도 (candle_loop 로그에서 파싱)
+            'trending_score': None,         # int 0~6, None=미수신
             # ws_cross / entry_timeframe 진입 파라미터
             'entry_mode': 'market',        # 'market' | 'ws_cross'
             'entry_timeframe': None,       # '1h' | None — None이면 basis_timeframe(4h)
@@ -300,7 +302,7 @@ class TelegramTransactionHandler(logging.Handler):
             or 'box_mean_reversion' in msg
             or 'BoxMeanReversion' in msg
         )
-        m = re.search(r'signal=(\w+) ema_slope_pct=([-\d.]+|N/A) rsi=([\d.]+|N/A) ema=([\d.]+|N/A) price=([\d.]+)', msg)
+        m = re.search(r'signal=(\w+) ema_slope_pct=([-\d.]+|N/A) rsi=([\d.]+|N/A) ema=([\d.]+|N/A) price=([\d.]+)(?:.*?trending_score=(\d+|N/A))?', msg)
         if m and not is_box_log:
             new_signal = m.group(1)
             if m.group(2) != 'N/A':
@@ -310,6 +312,8 @@ class TelegramTransactionHandler(logging.Handler):
             if m.group(4) != 'N/A':
                 self._state['ema_price'] = float(m.group(4))
             self._state['current_price'] = float(m.group(5))
+            if m.group(6) and m.group(6) != 'N/A':
+                self._state['trending_score'] = int(m.group(6))
             if self._state['signal'] != new_signal:
                 self._state['prev_signal'] = self._state['signal']
                 self._state['signal'] = new_signal
@@ -955,6 +959,13 @@ class TelegramTransactionHandler(logging.Handler):
                         condition_lines.append(f" {c3} ③ RSI 범위      {rsi:.1f}  (허용 {SHORT_RSI_MIN:.0f}~{SHORT_RSI_MAX:.0f})")
                     else:
                         condition_lines.append(" ❓ ③ RSI 범위      데이터 없음")
+
+                    _tscore = self._state.get('trending_score')
+                    if _tscore is not None:
+                        c4 = "✅" if _tscore >= 1 else "❌"
+                        condition_lines.append(f" {c4} ④ 추세 강도     score={_tscore} (기준 ≥1)")
+                    else:
+                        condition_lines.append(" ❓ ④ 추세 강도     데이터 없음")
                 else:
                     c1 = "✅" if current > ema else "❌"
                     condition_lines.append(f" {c1} ① 가격 > EMA    ¥{current:,.0f} (EMA ¥{ema:,.0f})")
@@ -977,6 +988,13 @@ class TelegramTransactionHandler(logging.Handler):
                     else:
                         condition_lines.append(" ❓ ③ RSI 범위      데이터 없음")
 
+                    _tscore = self._state.get('trending_score')
+                    if _tscore is not None:
+                        c4 = "✅" if _tscore >= 1 else "❌"
+                        condition_lines.append(f" {c4} ④ 추세 강도     score={_tscore} (기준 ≥1)")
+                    else:
+                        condition_lines.append(" ❓ ④ 추세 강도     데이터 없음")
+
 
 
 
@@ -989,7 +1007,7 @@ class TelegramTransactionHandler(logging.Handler):
         if regime == 'ranging':
             _unmet_labels = ['박스감지', '가격위치', 'RSI']
         else:
-            _unmet_labels = ['가격/EMA', 'EMA기울기', 'RSI']
+            _unmet_labels = ['가격/EMA', 'EMA기울기', 'RSI', '추세강도']
         _unmet = [
             _unmet_labels[i]
             for i, _l in enumerate(condition_lines)
