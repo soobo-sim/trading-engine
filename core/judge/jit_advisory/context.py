@@ -84,6 +84,7 @@ def build_jit_request(
     bb_width_pct = float(params.get("bb_width_pct", 0.0))
     range_pct = float(params.get("range_pct", 0.0))
     consecutive_count = int(params.get("consecutive_count", 0))
+    regime_history: list[str] = list(params.get("regime_history", []))
 
     atr = snapshot.atr or 0.0
     current_price = snapshot.current_price or 1.0
@@ -115,6 +116,7 @@ def build_jit_request(
         bb_width_pct=bb_width_pct,
         range_pct=range_pct,
         consecutive_count=consecutive_count,
+        regime_history=regime_history,
 
         ema_value=snapshot.ema or 0.0,
         ema_slope_pct=snapshot.ema_slope_pct or 0.0,

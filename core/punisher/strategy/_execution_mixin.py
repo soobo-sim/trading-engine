@@ -201,11 +201,18 @@ class ExecutionMixin:
         if action in ("entry_long", "entry_short") and self._regime_gate is not None:
             manager_type = self._get_strategy_type()
             if not self._regime_gate.should_allow_entry(manager_type):
-                logger.debug(
-                    f"{_pfx} {pair}: RegimeGate 진입 차단 "
-                    f"(active={self._regime_gate.active_strategy}, this={manager_type})"
-                )
-                return False
+                # jit 모드 + warm-up 완료 시: RegimeGate bypass → JIT Advisory가 억제 담당
+                if self._jit_bypass_gate and self._regime_gate.active_strategy is not None:
+                    logger.debug(
+                        f"{_pfx} {pair}: RegimeGate bypass "
+                        f"(jit 모드, active={self._regime_gate.active_strategy}, this={manager_type})"
+                    )
+                else:
+                    logger.debug(
+                        f"{_pfx} {pair}: RegimeGate 진입 차단 "
+                        f"(active={self._regime_gate.active_strategy}, this={manager_type})"
+                    )
+                    return False
 
         if action == "entry_long":
             logger.info(

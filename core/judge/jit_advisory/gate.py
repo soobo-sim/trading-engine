@@ -69,15 +69,28 @@ class JITAdvisoryGate:
 
         # ── 진입 액션: JIT 자문 ──────────────────────────────
         _cid = get_judge_cycle_id() or "????"
-        _pfx = f"[JIT][{_cid}]"
+        _pfx = f"[Judge-Layer][{_cid}][Advisory]"
+
+        # ── 입력 컨텍스트 INFO 로그 ─────────────────────────────
+        _params = snapshot.params or {}
         _rsi_str = f"{snapshot.rsi:.1f}" if snapshot.rsi is not None else "N/A"
-        _slope_str = f"{snapshot.ema_slope_pct:.4f}" if snapshot.ema_slope_pct is not None else "N/A"
+        _slope_str = f"{snapshot.ema_slope_pct:+.4f}%" if snapshot.ema_slope_pct is not None else "N/A"
+        _sl_str = f"¥{rule_decision.stop_loss:,.0f}" if rule_decision.stop_loss else "없음"
+        _bb_str = f"{_params.get('bb_width_pct', 0.0):.2f}%"
+        _atr_pct = (snapshot.atr / snapshot.current_price * 100) if snapshot.atr and snapshot.current_price else 0.0
+        _consecutive = _params.get('consecutive_count', 0)
+        _regime_hist = ' → '.join(_params.get('regime_history', [])) or '없음'
+        _kill_cnt = _params.get('kill_active_count', 0)
+        _consec_loss = _params.get('recent_consecutive_losses', 0)
         logger.info(
-            f"{_pfx} {snapshot.pair} JIT 자문 요청 — "
-            f"action={rule_decision.action} signal={snapshot.signal} "
-            f"regime={snapshot.regime} price=¥{snapshot.current_price:,.0f} "
-            f"rsi={_rsi_str} ema_slope={_slope_str} "
-            f"conf={rule_decision.confidence:.2f} size={rule_decision.size_pct:.0%}"
+            f"{_pfx} {snapshot.pair} ▶ 자문 요청\n"
+            f"  룰엔진: action={rule_decision.action} signal={snapshot.signal}"
+            f" conf={rule_decision.confidence:.2f} size={rule_decision.size_pct:.0%} SL={_sl_str}\n"
+            f"  시장: regime={snapshot.regime}({_consecutive}회) price=¥{snapshot.current_price:,.0f}"
+            f" bb={_bb_str} atr={_atr_pct:.2f}%\n"
+            f"  지표: rsi={_rsi_str} ema_slope={_slope_str}\n"
+            f"  체제이력: {_regime_hist}\n"
+            f"  리스크: kill={_kill_cnt}건 연속손실={_consec_loss}회"
         )
 
         jit_req = build_jit_request(snapshot, rule_decision)
@@ -92,22 +105,28 @@ class JITAdvisoryGate:
             logger.error(f"[JIT] {error_msg}")
 
         if jit_resp is None:
-            # 타임아웃/오류 → fail-soft NO_GO
+            # 타임아웃/오류 → fail-soft GO (size * 0.7)
+            # 룰엔진이 이미 기술적 조건 검증 완료 — LLM 장애는 "의견 없음"이지 "하지 마"가 아님
             error_msg = error_msg or "JIT 타임아웃 또는 응답 파싱 실패"
+            timeout_size = rule_decision.size_pct * 0.7
             logger.warning(
-                f"{_pfx} {snapshot.pair} fail-soft NO_GO — {error_msg}"
+                f"{_pfx} {snapshot.pair} ◀ FAIL-SOFT GO — {error_msg}\n"
+                f"  → size {rule_decision.size_pct:.0%}→{timeout_size:.0%} (70%), 룰엔진 판단으로 실행"
             )
             final_decision = modify_decision(
                 rule_decision,
-                action="hold",
-                reasoning=f"[JIT fail-soft] {error_msg}",
+                size_pct=timeout_size,
+                reasoning=f"[JIT timeout-GO] {error_msg} — 룰엔진 판단 70% size로 실행",
             )
 
         elif jit_resp.decision == "NO_GO":
+            _risk_str = ", ".join(jit_resp.risk_factors) if jit_resp.risk_factors else "없음"
             logger.info(
-                f"{_pfx} {snapshot.pair} NO_GO — "
-                f"action={rule_decision.action} → hold. "
-                f"사유: {jit_resp.reasoning[:120]}"
+                f"{_pfx} {snapshot.pair} ◀ NO_GO"
+                f" (conf={jit_resp.confidence:.2f} {jit_resp.latency_ms}ms [{jit_resp.model or '?'}])\n"
+                f"  근거: {jit_resp.reasoning}\n"
+                f"  리스크: {_risk_str}\n"
+                f"  → action={rule_decision.action} → hold으로 변환"
             )
             final_decision = modify_decision(
                 rule_decision,
@@ -121,12 +140,16 @@ class JITAdvisoryGate:
             adjusted_action = jit_resp.adjusted_action or rule_decision.action
             adjusted_sl = jit_resp.adjusted_stop_loss or rule_decision.stop_loss
             adjusted_tp = jit_resp.adjusted_take_profit or rule_decision.take_profit
+            _risk_str = ", ".join(jit_resp.risk_factors) if jit_resp.risk_factors else "없음"
+            _sl_new = f"¥{adjusted_sl:,.0f}" if adjusted_sl else "변경없음"
 
             logger.info(
-                f"{_pfx} {snapshot.pair} ADJUST — "
-                f"size {rule_decision.size_pct:.0%}→{adjusted_size:.0%} "
-                f"action {rule_decision.action}→{adjusted_action} "
-                f"사유: {jit_resp.reasoning[:80]}"
+                f"{_pfx} {snapshot.pair} ◀ ADJUST"
+                f" (conf={jit_resp.confidence:.2f} {jit_resp.latency_ms}ms [{jit_resp.model or '?'}])\n"
+                f"  근거: {jit_resp.reasoning}\n"
+                f"  리스크: {_risk_str}\n"
+                f"  조정: action {rule_decision.action}→{adjusted_action}"
+                f" size {rule_decision.size_pct:.0%}→{adjusted_size:.0%} SL={_sl_new}"
             )
             final_decision = modify_decision(
                 rule_decision,
@@ -145,11 +168,13 @@ class JITAdvisoryGate:
 
         else:
             # GO — 룰엔진 결정 그대로, reasoning에 JIT 승인 메모 추가
+            _risk_str = ", ".join(jit_resp.risk_factors) if jit_resp.risk_factors else "없음"
             logger.info(
-                f"{_pfx} {snapshot.pair} GO — "
-                f"action={rule_decision.action} size={rule_decision.size_pct:.0%} "
-                f"conf={jit_resp.confidence:.2f}. "
-                f"사유: {jit_resp.reasoning[:80]}"
+                f"{_pfx} {snapshot.pair} ◀ GO"
+                f" (conf={jit_resp.confidence:.2f} {jit_resp.latency_ms}ms [{jit_resp.model or '?'}])\n"
+                f"  근거: {jit_resp.reasoning}\n"
+                f"  리스크: {_risk_str}\n"
+                f"  실행: action={rule_decision.action} size={rule_decision.size_pct:.0%}"
             )
             final_decision = modify_decision(
                 rule_decision,
@@ -164,7 +189,7 @@ class JITAdvisoryGate:
 
         # ── 감사 로그 ─────────────────────────────────────────
         try:
-            await self._log_audit(jit_req, jit_resp, final_decision, error_msg)
+            await self._log_audit(jit_req, jit_resp, final_decision, error_msg, _pfx)
         except Exception as e:
             logger.warning(f"{_pfx} {snapshot.pair} 감사 로그 실패 (무시): {e}")
 
@@ -176,6 +201,7 @@ class JITAdvisoryGate:
         jit_resp: Optional[JITAdvisoryResponse],
         final_decision: Decision,
         error_msg: Optional[str],
+        pfx: str = "[Judge-Layer][????][Advisory]",
     ) -> None:
         """비동기 감사 로그 — DB 저장 실패해도 거래 방해 안 함."""
         try:
@@ -187,6 +213,7 @@ class JITAdvisoryGate:
                     final_action=final_decision.action,
                     final_size_pct=final_decision.size_pct,
                     error=error_msg,
+                    log_prefix=pfx,
                 )
         except Exception as e:
-            logger.warning(f"[JIT] 감사 로그 세션 오류 (무시): {e}")
+            logger.warning(f"{pfx} 감사 로그 세션 오류 (무시): {e}")
