@@ -1009,11 +1009,25 @@ class TelegramTransactionHandler(logging.Handler):
         # 승인 정도 정보는 결론에 이미 포함(단 MANUAL모드에서만 의미 있는 도구)
         _approval_str = ""
 
+        # 게이트 줄: JIT 모드이면 RegimeGate가 bypass → JIT Advisory 상태 표시
+        _trading_mode = _os.environ.get("TRADING_MODE", "v1").lower()
+        if _trading_mode == "jit":
+            _jit_icons = {'GO': '✅', 'NO_GO': '🚫', 'ADJUST': '⚙️'}
+            _jit_gate_icon = _jit_icons.get(jit or '', '⏳')
+            _jit_gate_status = {
+                'GO': '최근 진입 승인',
+                'NO_GO': '최근 진입 차단',
+                'ADJUST': '최근 사이즈 조정',
+            }.get(jit or '', '진입 신호 대기 중')
+            gate_line = f"JIT Advisory: {_jit_gate_icon} {_jit_gate_status}"
+        else:
+            gate_line = f"실행 게이트: 4H×{consecutive} {gate_icon} — {gate_status}"
+
         text = (
             f"🔮 [{self._exchange}·BTC] {_format_time(time.time())}  (판단 사이클 · 5분 요약)\n"
             f"──────────────────────────\n"
             f"체제: {regime_kr}{regime_detail}\n"
-            f"실행 게이트: 4H×{consecutive} {gate_icon} — {gate_status}\n"
+            f"{gate_line}\n"
             f"──────────────────────────\n"
             f"{sig_block}\n"
             f"결론: {conclusion}"

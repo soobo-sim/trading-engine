@@ -168,7 +168,10 @@ def build_telegram_text(prefix: str, time_str: str, pair: str, data: dict) -> st
             _active = _rg.get("active_strategy")
             _rl = _REGIME_LABEL.get(_last, _last or "-")
             if _active is not None:
-                lines.append(f"⚙️ 체제: {_rl}(×{_cnt}) | 활성: {_STRATEGY_LABEL.get(_active, _active)}")
+                if data.get("jit_bypass_gate"):
+                    lines.append(f"⚙️ 체제: {_rl}(×{_cnt}) | JIT bypass")
+                else:
+                    lines.append(f"⚙️ 체제: {_rl}(×{_cnt}) | 활성: {_STRATEGY_LABEL.get(_active, _active)}")
             else:
                 lines.append(f"⚙️ 체제: {_rl}(×{_cnt}) | 진입 차단 중")
         elif regime or active_strategy:
@@ -218,7 +221,10 @@ def build_telegram_text(prefix: str, time_str: str, pair: str, data: dict) -> st
             _active = _rg.get("active_strategy")
             _rl = _REGIME_LABEL.get(_last, _last or "-")
             if _active is not None:
-                lines.append(f"⚙️ 체제: {_rl}(×{_cnt}) | 활성: {_STRATEGY_LABEL.get(_active, _active)}")
+                if data.get("jit_bypass_gate"):
+                    lines.append(f"⚙️ 체제: {_rl}(×{_cnt}) | JIT bypass")
+                else:
+                    lines.append(f"⚙️ 체제: {_rl}(×{_cnt}) | 활성: {_STRATEGY_LABEL.get(_active, _active)}")
             else:
                 lines.append(f"⚙️ 체제: {_rl}(×{_cnt}) | 진입 차단 중")
         elif regime or active_strategy:
@@ -465,6 +471,7 @@ async def generate_trend_report(
             "consecutive_count": _regime_gate.consecutive_count,
             "active_strategy": _regime_gate.active_strategy,
         }
+    _jit_bypass_gate = getattr(trend_manager, "_jit_bypass_gate", False)
     report_data = {
         "current_price": current_price,
         "signal": signal,
@@ -493,6 +500,7 @@ async def generate_trend_report(
         "regime": regime,
         "active_strategy": active_strategy,
         "regime_gate_info": regime_gate_info,
+        "jit_bypass_gate": _jit_bypass_gate,
     }
 
     telegram_text = build_telegram_text(prefix.upper(), time_str, pair, report_data)

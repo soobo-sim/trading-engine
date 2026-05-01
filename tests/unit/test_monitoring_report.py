@@ -2600,7 +2600,7 @@ class TestBuildTelegramTextRegimeLine:
 class TestBuildTelegramTextRegimeGateInfo:
     """RG-D01~RG-D05: regime_gate_info 기반 체제 라인 표시."""
 
-    def _base_data(self, regime_gate_info=None, regime=None, active_strategy=None, has_position=False):
+    def _base_data(self, regime_gate_info=None, regime=None, active_strategy=None, has_position=False, jit_bypass_gate=False):
         d = {
             "trend_icon": "📈",
             "current_price": 11_800_000,
@@ -2609,6 +2609,7 @@ class TestBuildTelegramTextRegimeGateInfo:
             "regime": regime,
             "active_strategy": active_strategy,
             "regime_gate_info": regime_gate_info,
+            "jit_bypass_gate": jit_bypass_gate,
             "jpy_available": 50_000,
             "collateral": None,
         }
@@ -2708,6 +2709,33 @@ class TestBuildTelegramTextRegimeGateInfo:
         })
         text = build_telegram_text("GMOC", "08:25", "btc_jpy", data)
         assert "⚙️ 체제: -(×0) | 진입 차단 중" in text
+
+    def test_rgd07_jit_bypass_gate_hides_active_strategy(self):
+        """RG-D07: jit_bypass_gate=True → 활성전략 대신 'JIT bypass' 표시."""
+        data = self._base_data(
+            regime_gate_info={
+                "last_regime": "trending",
+                "consecutive_count": 19,
+                "active_strategy": "trend_following",
+            },
+            jit_bypass_gate=True,
+        )
+        text = build_telegram_text("GMOC", "08:25", "btc_jpy", data)
+        assert "⚙️ 체제: 추세장(×19) | JIT bypass" in text
+        assert "활성: 추세추종" not in text
+
+    def test_rgd08_jit_bypass_false_shows_active_strategy(self):
+        """RG-D08: jit_bypass_gate=False (기본) → 기존 활성전략 표시 유지."""
+        data = self._base_data(
+            regime_gate_info={
+                "last_regime": "trending",
+                "consecutive_count": 19,
+                "active_strategy": "trend_following",
+            },
+            jit_bypass_gate=False,
+        )
+        text = build_telegram_text("GMOC", "08:25", "btc_jpy", data)
+        assert "⚙️ 체제: 추세장(×19) | 활성: 추세추종" in text
 
 
 class TestBuildBoxTelegramTextRegimeGateInfo:
