@@ -1298,3 +1298,204 @@ class TestBoxMgrSignalFilter:
         assert "4H×" in text
         assert "¥11,800,000" in text
         assert "¥12,200,000" in text
+
+
+# ─── WS-Cross / entry_timeframe 5분 요약 표시 테스트 ────────────────────────
+
+class TestEntryModeAndArmedSummary:
+    """EP-01~EP-08: entry_mode / entry_timeframe / armed 상태 5분 요약 표시."""
+
+    def _make_handler(self) -> TelegramTransactionHandler:
+        h = TelegramTransactionHandler("tok", "cid", exchange="GMO_COIN", domain="judge")
+        h._state.update({
+            'regime_status': 'trending',
+            'regime_consecutive': 4,
+            'signal': 'short_setup',
+            'current_price': 11_900_000.0,
+            'ema_price': 12_000_000.0,
+            'ema_slope_pct': -0.08,
+            'rsi': 50.0,
+        })
+        return h
+
+    def _run_summary(self, h: TelegramTransactionHandler) -> str:
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        async def _inner():
+            with patch(
+                "core.shared.logging.telegram_handlers._send_telegram",
+                new_callable=AsyncMock,
+            ) as m:
+                h._loop = asyncio.get_running_loop()
+                await h._send_periodic_summary()
+                return m.call_args[0][2]
+
+        return asyncio.run(_inner())
+
+    def test_ep01_default_mode_no_mode_line(self):
+        """EP-01: 기본 모드(market + 4H)는 '진입 모드' 줄 표시 안 함."""
+        h = self._make_handler()
+        text = self._run_summary(h)
+        assert "진입 모드" not in text
+
+    def test_ep02_ws_cross_mode_shows_mode_line(self):
+        """EP-02: entry_mode=ws_cross → '진입 모드: ⚡ WS 돌파' 표시."""
+        h = self._make_handler()
+        h._state['entry_mode'] = 'ws_cross'
+        text = self._run_summary(h)
+        assert "진입 모드" in text
+        assert "WS 돌파" in text
+
+    def test_ep03_entry_timeframe_1h_shows_mode_line(self):
+        """EP-03: entry_timeframe=1h (market 모드) → '진입 모드: 📊 1H slope/RSI' 표시."""
+        h = self._make_handler()
+        h._state['entry_timeframe'] = '1h'
+        text = self._run_summary(h)
+        assert "진입 모드" in text
+        assert "1H slope/RSI" in text
+
+    def test_ep04_ws_cross_with_1h_shows_combined(self):
+        """EP-04: entry_mode=ws_cross + entry_timeframe=1h → WS 돌파 + 1H 같이 표시."""
+        h = self._make_handler()
+        h._state['entry_mode'] = 'ws_cross'
+        h._state['entry_timeframe'] = '1h'
+        text = self._run_summary(h)
+        assert "WS 돌파" in text
+        assert "1H slope/RSI" in text
+
+    def test_ep05_slope_label_shows_1h_suffix(self):
+        """EP-05: entry_timeframe=1h → ② EMA 기울기 라벨에 '(1H)' 표시."""
+        h = self._make_handler()
+        h._state['entry_timeframe'] = '1h'
+        text = self._run_summary(h)
+        assert "(1H)" in text
+
+    def test_ep06_default_no_1h_suffix(self):
+        """EP-06: entry_timeframe None → ② EMA 기울기 라벨에 '(1H)' 없음."""
+        h = self._make_handler()
+        text = self._run_summary(h)
+        assert "(1H)" not in text
+
+    def test_ep07_armed_short_shows_armed_line(self):
+        """EP-07: ws_cross + armed_direction=short → '⚡ WS 대기: 숏 armed' 표시."""
+        import time as _time
+        h = self._make_handler()
+        h._state['entry_mode'] = 'ws_cross'
+        h._state['armed_direction'] = 'short'
+        h._state['armed_ema'] = 12_000_000.0
+        h._state['armed_expire_at'] = _time.time() + 3600 * 3.5  # 3h 30m
+        text = self._run_summary(h)
+        assert "숏 armed" in text
+        assert "¥12,000,000" in text
+        assert "만료까지" in text
+
+    def test_ep08_ws_cross_no_armed_shows_waiting(self):
+        """EP-08: ws_cross + armed 없음 → '⏳ WS 대기: armed 조건 미충족' 표시."""
+        h = self._make_handler()
+        h._state['entry_mode'] = 'ws_cross'
+        text = self._run_summary(h)
+        assert "WS 대기" in text
+        assert "armed 조건 미충족" in text
+
+
+class TestArmedStateParsing:
+    """AP-01~AP-05: armed 상태 로그 파싱."""
+
+    def _make_handler(self) -> TelegramTransactionHandler:
+        return TelegramTransactionHandler("tok", "cid", exchange="GMO_COIN", domain="judge")
+
+    def _emit(self, h: TelegramTransactionHandler, msg: str) -> None:
+        import logging
+        record = logging.LogRecord(
+            name="test", level=logging.INFO,
+            pathname="", lineno=0, msg=msg, args=(), exc_info=None,
+        )
+        h.emit(record)
+
+    def test_ap01_short_armed_sets_state(self):
+        """AP-01: 'short armed @ EMA ¥12,000,000' 로그 → armed_direction/ema 설정."""
+        import time as _time
+        h = self._make_handler()
+        self._emit(h, "[TrendMgr] btc_jpy: short armed @ EMA ¥12,000,000 (slope=-0.0610%)")
+        assert h._state['armed_direction'] == 'short'
+        assert h._state['armed_ema'] == 12_000_000.0
+        assert h._state['armed_expire_at'] > _time.time()
+
+    def test_ap02_long_armed_sets_state(self):
+        """AP-02: 'long armed @ EMA ¥12,000,000' 로그 → armed_direction=long."""
+        h = self._make_handler()
+        self._emit(h, "[TrendMgr] btc_jpy: long armed @ EMA ¥12,000,000 (slope=0.0312%)")
+        assert h._state['armed_direction'] == 'long'
+        assert h._state['armed_ema'] == 12_000_000.0
+
+    def test_ap03_armed_disarm_clears_state(self):
+        """AP-03: 'armed 해제 (조건 소멸)' 로그 → armed 클리어."""
+        h = self._make_handler()
+        h._state['armed_direction'] = 'short'
+        h._state['armed_ema'] = 12_000_000.0
+        self._emit(h, "[TrendMgr] btc_jpy: armed 해제 (조건 소멸)")
+        assert h._state['armed_direction'] is None
+        assert h._state['armed_ema'] is None
+
+    def test_ap04_arm_expire_clears_state(self):
+        """AP-04: 'arm 만료 → 해제' 로그 → armed 클리어."""
+        h = self._make_handler()
+        h._state['armed_direction'] = 'long'
+        h._state['armed_ema'] = 11_900_000.0
+        self._emit(h, "[TrendMgr] btc_jpy: arm 만료 → 해제")
+        assert h._state['armed_direction'] is None
+        assert h._state['armed_ema'] is None
+
+    def test_ap05_ws_trigger_clears_state(self):
+        """AP-05: 'WS EMA 돌파 감지 ... → 진입 트리거' 로그 → armed 클리어."""
+        h = self._make_handler()
+        h._state['armed_direction'] = 'short'
+        h._state['armed_ema'] = 12_000_000.0
+        self._emit(
+            h,
+            "[TrendMgr] btc_jpy: WS EMA 돌파 감지 direction=short price=¥11990000 "
+            "ema=¥12000000 → 진입 트리거",
+        )
+        assert h._state['armed_direction'] is None
+        assert h._state['armed_ema'] is None
+
+
+class TestSeedStrategyParamsExtended:
+    """SP-01~SP-03: seed_telegram_strategy_params 확장 파라미터 주입."""
+
+    def test_sp01_entry_mode_seeded(self):
+        """SP-01: entry_mode 주입 → _state['entry_mode'] 갱신."""
+        from core.shared.logging.telegram_handlers import _handlers, seed_telegram_strategy_params
+
+        _handlers.clear()
+        h = TelegramTransactionHandler("tok", "cid", exchange="GMO_COIN", domain="judge")
+        _handlers.append(h)
+
+        seed_telegram_strategy_params({"entry_mode": "ws_cross"})
+        assert h._state['entry_mode'] == "ws_cross"
+        _handlers.clear()
+
+    def test_sp02_entry_timeframe_seeded(self):
+        """SP-02: entry_timeframe 주입 → _state['entry_timeframe'] 갱신."""
+        from core.shared.logging.telegram_handlers import _handlers, seed_telegram_strategy_params
+
+        _handlers.clear()
+        h = TelegramTransactionHandler("tok", "cid", exchange="GMO_COIN", domain="judge")
+        _handlers.append(h)
+
+        seed_telegram_strategy_params({"entry_timeframe": "1h"})
+        assert h._state['entry_timeframe'] == "1h"
+        _handlers.clear()
+
+    def test_sp03_armed_expire_sec_seeded(self):
+        """SP-03: armed_expire_sec 주입 → _state['armed_expire_sec'] 갱신."""
+        from core.shared.logging.telegram_handlers import _handlers, seed_telegram_strategy_params
+
+        _handlers.clear()
+        h = TelegramTransactionHandler("tok", "cid", exchange="GMO_COIN", domain="judge")
+        _handlers.append(h)
+
+        seed_telegram_strategy_params({"armed_expire_sec": 7200})
+        assert h._state['armed_expire_sec'] == 7200.0
+        _handlers.clear()
