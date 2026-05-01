@@ -1378,17 +1378,20 @@ class TestEntryModeAndArmedSummary:
         assert "(1H)" not in text
 
     def test_ep07_armed_short_shows_armed_line(self):
-        """EP-07: ws_cross + armed_direction=short → '⚡ WS 대기: 숏 armed' 표시."""
+        """EP-07: ws_cross + armed_direction=short → EMA/현재가/거리 표시."""
         import time as _time
         h = self._make_handler()
         h._state['entry_mode'] = 'ws_cross'
         h._state['armed_direction'] = 'short'
         h._state['armed_ema'] = 12_000_000.0
         h._state['armed_expire_at'] = _time.time() + 3600 * 3.5  # 3h 30m
+        h._state['current_price'] = 12_142_312.0   # current > ema → 더 내려가야
         text = self._run_summary(h)
         assert "숏 armed" in text
         assert "¥12,000,000" in text
         assert "만료까지" in text
+        assert "현재" in text
+        assert "더 내려가야 진입" in text
 
     def test_ep08_ws_cross_no_armed_shows_waiting(self):
         """EP-08: ws_cross + armed 없음 → '⏳ WS 대기: armed 조건 미충족' 표시."""

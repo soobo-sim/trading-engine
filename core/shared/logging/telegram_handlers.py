@@ -1064,7 +1064,20 @@ class TelegramTransactionHandler(logging.Handler):
             _remain_h = int(_remain_sec // 3600)
             _remain_m = int((_remain_sec % 3600) // 60)
             _dir_kr = '숏' if _armed_dir == 'short' else '롱'
-            armed_line = f"⚡ WS 대기: {_dir_kr} armed @ ¥{_armed_ema_v:,.0f}  (만료까지 {_remain_h}h {_remain_m:02d}m)"
+            _cur_p = self._state.get('current_price')
+            if _cur_p is not None:
+                if _armed_dir == 'short':
+                    _gap = _cur_p - _armed_ema_v
+                    _gap_str = f"¥{_gap:,.0f} 더 내려가야 진입" if _gap > 0 else f"¥{abs(_gap):,.0f} 아래 (WS 신호 대기)"
+                else:
+                    _gap = _armed_ema_v - _cur_p
+                    _gap_str = f"¥{_gap:,.0f} 더 올라가야 진입" if _gap > 0 else f"¥{abs(_gap):,.0f} 위 (WS 신호 대기)"
+                armed_line = (
+                    f"⚡ WS 대기: {_dir_kr} armed | EMA ¥{_armed_ema_v:,.0f} / 현재 ¥{_cur_p:,.0f} → {_gap_str}"
+                    f"  (만료까지 {_remain_h}h {_remain_m:02d}m)"
+                )
+            else:
+                armed_line = f"⚡ WS 대기: {_dir_kr} armed @ ¥{_armed_ema_v:,.0f}  (만료까지 {_remain_h}h {_remain_m:02d}m)"
         elif _entry_mode_state == 'ws_cross':
             armed_line = "⏳ WS 대기: armed 조건 미충족"
         else:
