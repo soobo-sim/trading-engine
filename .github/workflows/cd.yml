@@ -4,12 +4,20 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+  pull_request:
+    branches: [main]
+    types: [closed]
+
+concurrency:
+  group: cd-main
+  cancel-in-progress: false
 
 jobs:
   deploy:
     name: Deploy to production
     runs-on: self-hosted
     timeout-minutes: 15
+    if: github.event_name != 'pull_request' || github.event.pull_request.merged == true
 
     steps:
       - uses: actions/checkout@v4
