@@ -11,7 +11,7 @@ from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.dependencies import AppState
-from core.strategy.signals import classify_regime, compute_exit_signal
+from core.strategy.signals import classify_regime, compute_exit_signal, compute_trending_score
 
 logger = logging.getLogger(__name__)
 
@@ -528,28 +528,19 @@ async def get_market_regime(
     sma_late = sum(closes[-sma_period:]) / sma_period
     sma_slope_pct = (sma_late - sma_early) / sma_early * 100 if sma_early > 0 else 0
 
+    # trending_score: compute_trending_score() 단일 진실 소스 사용 (BUG-039 근본 수정)
+    # ranging_score: 표시 전용 참고 지표 (별도 유지)
+    trending_score = compute_trending_score(bb_width_pct, range_pct, atr_pct, sma_slope_pct)
     ranging_score = 0
-    trending_score = 0
 
     if bb_width_pct < 4.0:
         ranging_score += 2
-    elif bb_width_pct >= 4.5:  # BTC 최적화: 6.0 → 4.5
-        trending_score += 2
-
     if range_pct < 8.0:
         ranging_score += 2
-    elif range_pct >= 8.5:  # BTC 최적화: 10.0 → 8.5
-        trending_score += 2
-
     if atr_pct < 1.5:
         ranging_score += 1
-    elif atr_pct >= 2.5:
-        trending_score += 1
-
     if abs(sma_slope_pct) < 2.0:
         ranging_score += 1
-    elif abs(sma_slope_pct) >= 4.0:
-        trending_score += 1
 
     # 최종 regime 판정 — classify_regime() 단일 진실 소스 사용
     # (6항목 채점은 참고 수치로 metrics에 유지)
