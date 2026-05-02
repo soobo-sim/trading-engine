@@ -868,7 +868,7 @@ async def test_change_losscut_price_failure(adapter: GmoCoinAdapter) -> None:
 
 @pytest.mark.asyncio
 async def test_change_losscut_price_err578(adapter: GmoCoinAdapter) -> None:
-    """ERR-578 (trailing race condition) → False, 예외 없음."""
+    """ERR-578 (GMO Coin API 구조적 제한) → None 반환, 예외 없음."""
     resp = _mock_response({
         "status": 1,
         "messages": [{"message_code": "ERR-578", "message_string": "Specify losscutprice greater than 14929028."}],
@@ -877,7 +877,7 @@ async def test_change_losscut_price_err578(adapter: GmoCoinAdapter) -> None:
     adapter._client.post = AsyncMock(return_value=resp)
 
     result = await adapter.change_losscut_price(position_id=283501561, price=12098106.0)
-    assert result is False  # False 반환, 예외 없음
+    assert result is None  # None 반환 = 구조적 제한, 재시도 불필요
 
 
 @pytest.mark.asyncio

@@ -23,10 +23,10 @@ logger = logging.getLogger(__name__)
 class SafetyChecksMixin:
     """SF-01 ~ SF-10 안전장치 체크 + Telegram 직접 경고."""
 
-    # 포지션 type별 태스크명 매핑
+    # 포지션 type별 태스크명 매핑 (Supervisor 등록명 기준: {prefix}_{type}:{pair})
     _TASK_MAP = {
-        "trend": {"sf01": "trend_stoploss", "sf02": "trend_candle"},
-        "box":   {"sf01": "box_entry",      "sf02": "box_monitor"},
+        "trend": {"sf01": "gmoc_trend_stoploss", "sf02": "gmoc_trend_candle"},
+        "box":   {"sf01": "gmoc_box_stoploss",   "sf02": "gmoc_box_candle"},
     }
 
     def _check_sf01_sf02(
