@@ -26,7 +26,7 @@ from typing import Any, Dict, Optional
 
 from core.exchange.errors import ExchangeError
 from core.exchange.types import OrderType, Position
-from core.punisher.strategy.plugins.cfd_trend_following.manager import MarginTrendManager as CfdTrendFollowingManager
+from core.punisher.strategy.plugins.gmo_coin_trend.base import MarginTrendManager as CfdTrendFollowingManager
 
 logger = logging.getLogger(__name__)
 
@@ -718,9 +718,18 @@ class GmoCoinTrendManager(CfdTrendFollowingManager):
             for fx_pos in fx_positions:
                 if fx_pos.position_id is None:
                     continue
-                ok = False
+                ok: Optional[bool] = False
                 for attempt in range(1, max_retries + 1):
                     ok = await self._adapter.change_losscut_price(fx_pos.position_id, new_sl)
+                    if ok is None:
+                        # ERR-578: 구조적 제한 — 거래소 허용 범위 초과. 재시도 무의미.
+                        # in-memory SL이 실제 손절 보호 담당.
+                        logger.debug(
+                            f"[TrendMgr] {pair}: ロスカットレート API 제한 (ERR-578) "
+                            f"(position_id={fx_pos.position_id}, sl=¥{new_sl:.0f}) "
+                            "— in-memory SL 보호 중"
+                        )
+                        break
                     if ok:
                         logger.debug(
                             f"[TrendMgr] {pair}: ロスカットレート 동기화 완료 "
@@ -733,7 +742,7 @@ class GmoCoinTrendManager(CfdTrendFollowingManager):
                             f"[TrendMgr] {pair}: ロスカット 동기화 재시도 {attempt}/{max_retries} "
                             f"(position_id={fx_pos.position_id})"
                         )
-                if not ok:
+                if ok is False:  # None(구조적 실패)은 제외, False(일시 실패)만 최종 실패 처리
                     await self._handle_losscut_sync_failure(pair, new_sl, fx_pos.position_id)
         except Exception as e:
             logger.warning(f"[TrendMgr] {pair}: ロスカットレート 동기화 오류 — {e}")

@@ -46,7 +46,7 @@ def _patch_select():
     mock_query.limit.return_value = mock_query
 
     return patch(
-        "core.punisher.strategy.plugins.cfd_trend_following.manager.select",
+        "core.punisher.strategy.plugins.gmo_coin_trend.base.select",
         return_value=mock_query,
     )
 
@@ -115,7 +115,7 @@ async def test_pr01_restore_success_on_db_open_record():
 
     with _patch_select():
         with patch(
-            "core.punisher.strategy.plugins.cfd_trend_following.manager.asyncio.ensure_future",
+            "core.punisher.strategy.plugins.gmo_coin_trend.base.asyncio.ensure_future",
         ) as mock_future:
             mock_future.return_value = None
             with patch(

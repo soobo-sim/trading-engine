@@ -59,6 +59,35 @@ class GmoCoinBoxManager(GmoCoinTrendManager):
     def _get_strategy_type(self) -> str:
         return "box_mean_reversion"
 
+    async def _record_open(self, **kwargs) -> Optional[int]:
+        """GmocBoxPosition 스키마에 맞는 레코드 기록.
+
+        MarginTrendManager._record_open은 GmocTrendPosition 필드명을 사용하므로
+        오버라이드: entry_amount / entry_jpy 사용, strategy_id / stop_loss_price 제외.
+        """
+        product_code = kwargs["product_code"]
+        try:
+            Model = self._position_model
+            async with self._session_factory() as db:
+                db_kwargs = {
+                    self._pair_column: product_code,
+                    "side": kwargs["side"],
+                    "entry_order_id": kwargs["order_id"],
+                    "entry_price": kwargs["price"],
+                    "entry_amount": kwargs["size"],
+                    "entry_jpy": round(kwargs.get("collateral_jpy", 0), 2),
+                    "status": "open",
+                }
+                rec = Model(**db_kwargs)
+                db.add(rec)
+                await db.commit()
+                await db.refresh(rec)
+                logger.debug(f"{_LOG_PREFIX} {product_code}: DB 포지션 기록 id={rec.id}")
+                return rec.id
+        except Exception as e:
+            logger.error(f"{_LOG_PREFIX} {product_code}: DB 진입 기록 실패 — {e}", exc_info=True)
+            return None
+
     async def _detect_existing_position(self, pair: str) -> Optional[Position]:
         """box 전략의 기존 포지션 감지 — DB 게이트 추가.
 

@@ -28,7 +28,7 @@ from core.data.dto import Decision, ExecutionResult, SignalSnapshot
 
 def _make_cfd_manager():
     """CfdTrendFollowingManager 최소 인스턴스."""
-    from core.punisher.strategy.plugins.cfd_trend_following.manager import CfdTrendFollowingManager
+    from core.punisher.strategy.plugins.gmo_coin_trend.base import MarginTrendManager as CfdTrendFollowingManager
 
     adapter = MagicMock()
     adapter.exchange_name = "bitflyer"
@@ -100,7 +100,7 @@ def test_supports_short_default_false():
 
 def test_cfd_manager_supports_short_true():
     """SG-02: CfdTrendFollowingManager._supports_short == True."""
-    from core.punisher.strategy.plugins.cfd_trend_following.manager import CfdTrendFollowingManager
+    from core.punisher.strategy.plugins.gmo_coin_trend.base import MarginTrendManager as CfdTrendFollowingManager
     assert CfdTrendFollowingManager._supports_short is True
 
 
@@ -175,7 +175,7 @@ def test_gmo_coin_trend_manager_supports_short_true():
 
 def test_d35_02_gmofx_manager_supports_short():
     """D35-02: GMO FX용 CfdTrendFollowingManager._supports_short == True."""
-    from core.punisher.strategy.plugins.cfd_trend_following.manager import CfdTrendFollowingManager
+    from core.punisher.strategy.plugins.gmo_coin_trend.base import MarginTrendManager as CfdTrendFollowingManager
     assert CfdTrendFollowingManager._supports_short is True
 
 def test_d35_04_gmo_coin_still_uses_gmo_coin_manager():
@@ -199,7 +199,7 @@ def test_d35_04_gmo_coin_still_uses_gmo_coin_manager():
 
 def test_d35_05_gmofx_log_prefix():
     """D35-05: GMO FX용 CfdTrendFollowingManager 프리픽스 [CfdMgr], [TrendMgr] 아님."""
-    from core.punisher.strategy.plugins.cfd_trend_following.manager import CfdTrendFollowingManager
+    from core.punisher.strategy.plugins.gmo_coin_trend.base import MarginTrendManager as CfdTrendFollowingManager
     from unittest.mock import MagicMock, AsyncMock
 
     adapter = MagicMock()
@@ -226,7 +226,7 @@ def test_d35_05_gmofx_log_prefix():
 @pytest.mark.asyncio
 async def test_d34_02_cfd_pre_entry_checks_ok_calls_open_position():
     """D34-02: CdfTF + long_setup → _pre_entry_checks → _open_position(side='buy') 호출."""
-    from core.punisher.strategy.plugins.cfd_trend_following.manager import CfdTrendFollowingManager
+    from core.punisher.strategy.plugins.gmo_coin_trend.base import MarginTrendManager as CfdTrendFollowingManager
     from unittest.mock import MagicMock, AsyncMock, patch
 
     adapter = MagicMock()
@@ -258,7 +258,7 @@ async def test_d34_02_cfd_pre_entry_checks_ok_calls_open_position():
 @pytest.mark.asyncio
 async def test_d34_03_cfd_pre_entry_checks_ok_calls_open_position_short():
     """D34-03: CdfTF + short_setup → _pre_entry_checks → _open_position(side='sell') 호출."""
-    from core.punisher.strategy.plugins.cfd_trend_following.manager import CfdTrendFollowingManager
+    from core.punisher.strategy.plugins.gmo_coin_trend.base import MarginTrendManager as CfdTrendFollowingManager
     from unittest.mock import MagicMock, AsyncMock, patch
 
     adapter = MagicMock()
@@ -292,7 +292,7 @@ async def test_d34_03_cfd_pre_entry_checks_ok_calls_open_position_short():
 @pytest.mark.asyncio
 async def test_d34_05_cfd_pre_entry_checks_blocks_on_low_keep_rate():
     """D34-05: CdfTF + keep_rate < warn_threshold → _open_position 미호출."""
-    from core.punisher.strategy.plugins.cfd_trend_following.manager import CfdTrendFollowingManager
+    from core.punisher.strategy.plugins.gmo_coin_trend.base import MarginTrendManager as CfdTrendFollowingManager
     from unittest.mock import MagicMock, AsyncMock, patch
 
     adapter = MagicMock()
@@ -324,7 +324,7 @@ async def test_d34_05_cfd_pre_entry_checks_blocks_on_low_keep_rate():
 @pytest.mark.asyncio
 async def test_d34_06_pre_entry_checks_default_returns_true():
     """D34-06: BaseTrendManager._pre_entry_checks 기본 구현 → True 반환."""
-    from core.punisher.strategy.plugins.cfd_trend_following.manager import MarginTrendManager
+    from core.punisher.strategy.plugins.gmo_coin_trend.base import MarginTrendManager
     from unittest.mock import MagicMock, AsyncMock
 
     adapter = MagicMock()
@@ -344,7 +344,7 @@ async def test_d34_06_pre_entry_checks_default_returns_true():
 @pytest.mark.asyncio
 async def test_d34_07_try_paper_entry_short_sl_uses_short_formula():
     """D34-07: _try_paper_entry(direction='short') → SL = price + atr*mult (숏 공식 적용)."""
-    from core.punisher.strategy.plugins.cfd_trend_following.manager import CfdTrendFollowingManager
+    from core.punisher.strategy.plugins.gmo_coin_trend.base import MarginTrendManager as CfdTrendFollowingManager
     from unittest.mock import MagicMock, AsyncMock
 
     adapter = MagicMock()

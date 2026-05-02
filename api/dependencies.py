@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from core.exchange.base import ExchangeAdapter
 from core.punisher.monitoring.health import HealthChecker
-from core.punisher.strategy.plugins.cfd_trend_following.manager import MarginTrendManager
+from core.punisher.strategy.plugins.gmo_coin_trend.base import MarginTrendManager
 from core.strategy.gmo_coin_trend import GmoCoinTrendManager
 from core.strategy.registry import StrategyRegistry
 from core.punisher.task.supervisor import TaskSupervisor

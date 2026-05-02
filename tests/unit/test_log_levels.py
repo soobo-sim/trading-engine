@@ -468,7 +468,7 @@ def test_base_trend_check_exit_warning_log_no_old_message(caplog):
 
 def test_cfd_check_exit_warning_log_no_old_message(caplog):
     """E5: MarginTrendManager._check_exit_warning 로그에 'exit_warning' 변수명이 노출되지 않는다."""
-    from core.punisher.strategy.plugins.cfd_trend_following.manager import MarginTrendManager
+    from core.punisher.strategy.plugins.gmo_coin_trend.base import MarginTrendManager
 
     adapter = MagicMock()
     adapter.exchange_name = "gmo_coin"
@@ -486,7 +486,7 @@ def test_cfd_check_exit_warning_log_no_old_message(caplog):
     pos = MagicMock()
     pos.extra = {"side": "buy"}
 
-    with caplog.at_level(logging.INFO, logger="core.punisher.strategy.plugins.cfd_trend_following.manager"):
+    with caplog.at_level(logging.INFO, logger="core.punisher.strategy.plugins.gmo_coin_trend.base"):
         result = mgr._check_exit_warning("USD_JPY", "long_overheated", 100.0, 200.0, pos)
 
     assert result == "long_caution"

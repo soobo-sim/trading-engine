@@ -209,7 +209,7 @@ class TestNoCollectorRegression:
     @pytest.mark.asyncio
     async def test_v29_no_collector_margin_manager_safe2(self):
         """snapshot_collector=None → T1 훅 없이 정상 청산 (MarginTrendManager)."""
-        from core.punisher.strategy.plugins.cfd_trend_following.manager import MarginTrendManager
+        from core.punisher.strategy.plugins.gmo_coin_trend.base import MarginTrendManager
 
         mgr = MarginTrendManager(
             adapter=MagicMock(),

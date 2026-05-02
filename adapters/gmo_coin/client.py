@@ -636,11 +636,16 @@ class GmoCoinAdapter:
             raw=data,
         )
 
-    async def change_losscut_price(self, position_id: int, price: float) -> bool:
+    async def change_losscut_price(self, position_id: int, price: float) -> Optional[bool]:
         """
         건옥 ロスカットレート 변경.
 
         POST /private/v1/changeLosscutPrice
+
+        반환값:
+            True  — 성공
+            False — 일시적 실패 (재시도 권장)
+            None  — 구조적 제한 (ERR-578: SL이 거래소 허용 범위 초과, 재시도 불필요)
         """
         payload = {"positionId": position_id, "losscutPrice": str(int(price))}
         sign_path = "/v1/changeLosscutPrice"
@@ -659,12 +664,16 @@ class GmoCoinAdapter:
             if data.get("status") != 0:
                 err_codes = [m.get("message_code") for m in data.get("messages", [])]
                 if "ERR-578" in err_codes:
-                    # ERR-578: 현재가보다 낮은 로스컷 시도 (trailing ratchet race condition)
-                    # in-memory stop_loss_monitor가 실제 보호 담당 → INFO 레벨로 기록
-                    logger.info(
-                        f"[GMO Coin] ロスカットレート ERR-578 — "
-                        f"sl=¥{price:.0f} 이 현재가 이하 (trailing race condition, 다음 사이클 재시도): {data}"
+                    # ERR-578: GMO Coin API 구조적 제한 — changeLosscutPrice는 현재가의
+                    # ~75% 이하 수준만 허용. 타이트한 SL(~2-5%)은 항상 거부됨.
+                    # None 반환 → _sync_losscut_price에서 재시도/경고 없이 스킵.
+                    # 실제 SL 보호는 in-memory stop_loss_monitor가 전담.
+                    logger.debug(
+                        f"[GMO Coin] ロスカットレート API 제한 (ERR-578) — "
+                        f"sl=¥{price:.0f} 는 거래소 허용 범위 초과 (in-memory SL 보호 중): "
+                        f"{data.get('messages', [])}"
                     )
+                    return None  # type: ignore[return-value]  # permanent failure
                 else:
                     logger.warning(f"[GMO Coin] ロスカットレート 변경 실패: {data}")
                 return False

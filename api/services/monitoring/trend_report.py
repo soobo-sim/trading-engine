@@ -217,10 +217,7 @@ def build_telegram_text(prefix: str, time_str: str, pair: str, data: dict) -> st
             _active = _rg.get("active_strategy")
             _rl = _REGIME_LABEL.get(_last, _last or "-")
             if _active is not None:
-                if data.get("jit_bypass_gate"):
-                    lines.append(f"⚙️ 체제: {_rl}(×{_cnt}) | JIT bypass")
-                else:
-                    lines.append(f"⚙️ 체제: {_rl}(×{_cnt}) | 활성: {_STRATEGY_LABEL.get(_active, _active)}")
+                lines.append(f"⚙️ 체제: {_rl}(×{_cnt}) | 활성: {_STRATEGY_LABEL.get(_active, _active)}")
             else:
                 lines.append(f"⚙️ 체제: {_rl}(×{_cnt}) | 진입 차단 중")
         elif regime or active_strategy:
@@ -271,10 +268,7 @@ def build_telegram_text(prefix: str, time_str: str, pair: str, data: dict) -> st
             _active = _rg.get("active_strategy")
             _rl = _REGIME_LABEL.get(_last, _last or "-")
             if _active is not None:
-                if data.get("jit_bypass_gate"):
-                    lines.append(f"⚙️ 체제: {_rl}(×{_cnt}) | JIT bypass")
-                else:
-                    lines.append(f"⚙️ 체제: {_rl}(×{_cnt}) | 활성: {_STRATEGY_LABEL.get(_active, _active)}")
+                lines.append(f"⚙️ 체제: {_rl}(×{_cnt}) | 활성: {_STRATEGY_LABEL.get(_active, _active)}")
             else:
                 lines.append(f"⚙️ 체제: {_rl}(×{_cnt}) | 진입 차단 중")
         elif regime or active_strategy:
@@ -522,7 +516,6 @@ async def generate_trend_report(
             "consecutive_count": _regime_gate.consecutive_count,
             "active_strategy": _regime_gate.active_strategy,
         }
-    _jit_bypass_gate = getattr(trend_manager, "_jit_bypass_gate", False)
 
     # ── entry_mode / entry_timeframe / armed 상태 (trend_manager 인메모리) ──
     _entry_mode = str(params.get("entry_mode", "market"))
@@ -559,7 +552,6 @@ async def generate_trend_report(
         "regime": regime,
         "active_strategy": active_strategy,
         "regime_gate_info": regime_gate_info,
-        "jit_bypass_gate": _jit_bypass_gate,
         # 신규: 진입 모드 + armed 상태
         "entry_mode": _entry_mode,
         "entry_timeframe": _entry_timeframe,

@@ -15,8 +15,6 @@ BaseTrendManager를 상속하여 증거금 고유 로직만 구현한다.
 
 이 클래스는 GmoCoinTrendManager의 기반 클래스로 사용된다.
 """
-# 후방 호환 alias — 기존 import(CfdTrendFollowingManager)가 동작하도록 유지
-# from core.strategy.plugins.cfd_trend_following.manager import CfdTrendFollowingManager
 from __future__ import annotations
 
 import asyncio
@@ -31,8 +29,9 @@ from core.exchange.base import ExchangeAdapter
 from core.exchange.types import OrderType, Position
 from core.strategy.base_trend import BaseTrendManager
 from core.punisher.task.supervisor import TaskSupervisor
+from core.punisher.monitoring.maintenance import is_maintenance_window
 
-logger = logging.getLogger("core.punisher.strategy.plugins.cfd_trend_following.manager")
+logger = logging.getLogger(__name__)
 
 
 class MarginTrendManager(BaseTrendManager):
@@ -91,7 +90,11 @@ class MarginTrendManager(BaseTrendManager):
                 extra={"side": first.side.lower()},
             )
         except Exception as e:
-            logger.warning(f"[MarginMgr] {product_code}: 포지션 복원 실패 — {e}")
+            exchange = getattr(self._adapter, "exchange_name", "gmo_coin")
+            if is_maintenance_window(exchange):
+                logger.debug(f"[MarginMgr] {product_code}: 포지션 복원 실패 (메인터넌스) — {e}")
+            else:
+                logger.warning(f"[MarginMgr] {product_code}: 포지션 복원 실패 — {e}")
         return None
 
     async def _try_restore_position(self, product_code: str) -> None:
@@ -209,7 +212,11 @@ class MarginTrendManager(BaseTrendManager):
 
             return keep_rate
         except Exception as e:
-            logger.warning(f"[MarginMgr] {product_code}: keep_rate 조회 실패 — {e}")
+            exchange = getattr(self._adapter, "exchange_name", "gmo_coin")
+            if is_maintenance_window(exchange):
+                logger.debug(f"[MarginMgr] {product_code}: keep_rate 조회 실패 (메인터넌스) — {e}")
+            else:
+                logger.warning(f"[MarginMgr] {product_code}: keep_rate 조회 실패 — {e}")
             return None
 
     # ──────────────────────────────────────────
@@ -609,7 +616,6 @@ class MarginTrendManager(BaseTrendManager):
         self, pair: str, adjustments: dict, params: dict
     ) -> None:
         """adjust_risk 실행 후 훅. 서브클래스에서 오버라이드 가능."""
-        # 기본 구현: no-op (서브클래스에서 IFD-OCO 변경 등 구현 가능)
         pass
 
     # ──────────────────────────────────────────
@@ -624,7 +630,6 @@ class MarginTrendManager(BaseTrendManager):
         params: Dict,
         *,
         signal_data: dict | None = None,
-
     ) -> Optional[Any]:
         """지정가(limit) 진입 주문 발주. 성공 시 PendingLimitOrder 반환, 실패 시 None."""
         import time as _time
@@ -722,7 +727,3 @@ class MarginTrendManager(BaseTrendManager):
             )
         except Exception as e:
             logger.error(f"{self._log_prefix} {pair}: limit 진입 확정 오류 — {e}", exc_info=True)
-
-
-# 후방 호환 alias — 기존 import(CfdTrendFollowingManager)가 동작하도록 유지
-CfdTrendFollowingManager = MarginTrendManager

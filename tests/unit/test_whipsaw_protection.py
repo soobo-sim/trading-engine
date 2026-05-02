@@ -48,7 +48,7 @@ def _make_pos(side: str = "buy", opened_at=None) -> Position:
 
 def _make_margin_mgr(pair: str = "btc_jpy", params: dict | None = None):
     """MarginTrendManager(CfdTrendFollowingManager) 최소 인스턴스."""
-    from core.punisher.strategy.plugins.cfd_trend_following.manager import MarginTrendManager
+    from core.punisher.strategy.plugins.gmo_coin_trend.base import MarginTrendManager
 
     adapter = MagicMock()
     adapter.exchange_name = "gmo_coin"

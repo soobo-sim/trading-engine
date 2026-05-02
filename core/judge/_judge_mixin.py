@@ -333,6 +333,7 @@ class JudgeMixin:
             ema_slope_pct=signal_data.get("ema_slope_pct"),
             rsi=signal_data.get("rsi"),
             atr=signal_data.get("atr"),
+            regime=signal_data.get("regime"),
             stop_loss_price=signal_data.get("stop_loss_price"),
             position=pos_dto,
             candles=tuple(candles_raw) if candles_raw else None,
