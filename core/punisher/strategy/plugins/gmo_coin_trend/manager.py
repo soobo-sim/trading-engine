@@ -26,7 +26,7 @@ from typing import Any, Dict, Optional
 
 from core.exchange.errors import ExchangeError
 from core.exchange.types import OrderType, Position
-from core.punisher.strategy.plugins.cfd_trend_following.manager import MarginTrendManager as CfdTrendFollowingManager
+from core.punisher.strategy.plugins.gmo_coin_trend.base import MarginTrendManager as CfdTrendFollowingManager
 
 logger = logging.getLogger(__name__)
 

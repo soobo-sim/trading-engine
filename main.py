@@ -119,7 +119,7 @@ from core.punisher.monitoring.health import HealthChecker
 from core.judge.analysis.event_filter import create_event_filter
 from core.judge.analysis.intermarket import create_intermarket_client
 from core.strategy.box_mean_reversion import GmoCoinBoxManager
-from core.punisher.strategy.plugins.cfd_trend_following.manager import MarginTrendManager
+from core.punisher.strategy.plugins.gmo_coin_trend.base import MarginTrendManager
 from core.strategy.gmo_coin_trend import GmoCoinTrendManager
 from core.strategy.registry import StrategyRegistry
 from core.execution.regime_gate import RegimeGate

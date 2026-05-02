@@ -486,7 +486,7 @@ def test_cfd_check_exit_warning_log_no_old_message(caplog):
     pos = MagicMock()
     pos.extra = {"side": "buy"}
 
-    with caplog.at_level(logging.INFO, logger="core.punisher.strategy.plugins.cfd_trend_following.manager"):
+    with caplog.at_level(logging.INFO, logger="core.punisher.strategy.plugins.gmo_coin_trend.base"):
         result = mgr._check_exit_warning("USD_JPY", "long_overheated", 100.0, 200.0, pos)
 
     assert result == "long_caution"
