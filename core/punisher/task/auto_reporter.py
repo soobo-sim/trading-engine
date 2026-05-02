@@ -138,7 +138,7 @@ class AutoReporter:
     async def _run_once(self) -> None:
         """활성 전략 전체에 대해 보고 생성 → Telegram 전송 + 손실 포지션 감지."""
         # 정기 메인터넌스 중: API 호출 없이 간소 보고만 전송
-        exchange = os.getenv("EXCHANGE", "")
+        exchange = os.getenv("EXCHANGE", "gmo_coin")
         if is_maintenance_window(exchange):
             text = "🔧 정기 메인터넌스 중\n\n거래소 API/WS 일시 중단. 메인터넌스 종료 후 자동 복구됩니다."
             await send_telegram_message(

@@ -31,6 +31,7 @@ from core.exchange.base import ExchangeAdapter
 from core.exchange.types import OrderType, Position
 from core.strategy.base_trend import BaseTrendManager
 from core.punisher.task.supervisor import TaskSupervisor
+from core.punisher.monitoring.maintenance import is_maintenance_window
 
 logger = logging.getLogger("core.punisher.strategy.plugins.cfd_trend_following.manager")
 
@@ -91,7 +92,11 @@ class MarginTrendManager(BaseTrendManager):
                 extra={"side": first.side.lower()},
             )
         except Exception as e:
-            logger.warning(f"[MarginMgr] {product_code}: 포지션 복원 실패 — {e}")
+            exchange = getattr(self._adapter, "exchange_name", "gmo_coin")
+            if is_maintenance_window(exchange):
+                logger.debug(f"[MarginMgr] {product_code}: 포지션 복원 실패 (메인터넌스) — {e}")
+            else:
+                logger.warning(f"[MarginMgr] {product_code}: 포지션 복원 실패 — {e}")
         return None
 
     async def _try_restore_position(self, product_code: str) -> None:
@@ -209,7 +214,11 @@ class MarginTrendManager(BaseTrendManager):
 
             return keep_rate
         except Exception as e:
-            logger.warning(f"[MarginMgr] {product_code}: keep_rate 조회 실패 — {e}")
+            exchange = getattr(self._adapter, "exchange_name", "gmo_coin")
+            if is_maintenance_window(exchange):
+                logger.debug(f"[MarginMgr] {product_code}: keep_rate 조회 실패 (메인터넌스) — {e}")
+            else:
+                logger.warning(f"[MarginMgr] {product_code}: keep_rate 조회 실패 — {e}")
             return None
 
     # ──────────────────────────────────────────
