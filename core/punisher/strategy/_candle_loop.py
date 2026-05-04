@@ -277,10 +277,20 @@ class CandleLoopMixin:
             _ema_str = f"{ema:.0f}" if ema is not None else "N/A"
             _tscore = signal_data.get("trending_score")
             _tscore_str = str(int(_tscore)) if _tscore is not None else "N/A"
+            # 박스 전략의 경우 box 상태를 로그에 포함 (텔레그램 핸들러가 INFO 로그에서 파싱)
+            _box_detected = signal_data.get("box_detected")
+            _box_suffix = ""
+            if _box_detected is not None:
+                _box_upper_v = signal_data.get("box_upper")
+                _box_lower_v = signal_data.get("box_lower")
+                if _box_detected and _box_upper_v is not None and _box_lower_v is not None:
+                    _box_suffix = f" box_detected=True box_lower={_box_lower_v:.0f} box_upper={_box_upper_v:.0f}"
+                else:
+                    _box_suffix = " box_detected=False"
             _sig_log(
                 f"[Judge-Layer][{cycle_id}]{self._log_prefix} {pair}: {self._describe_signal(signal, pos)} "
                 f"signal={signal} ema_slope_pct={_slope_str} rsi={_rsi_str} ema={_ema_str} "
-                f"price={current_price:.0f} trending_score={_tscore_str}{_pos_label}"
+                f"price={current_price:.0f} trending_score={_tscore_str}{_pos_label}{_box_suffix}"
             )
 
             # ══════════════════════════════════════
