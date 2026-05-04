@@ -597,6 +597,13 @@ class ExecutionMixin:
             )
             return
 
+        # trailing_stop 청산 시각 기록 (재진입 slope 완화 윈도우용)
+        if reason == "trailing_stop":
+            if not hasattr(self, "_last_trailing_stop_time"):
+                self._last_trailing_stop_time: Dict[str, float] = {}
+            self._last_trailing_stop_time[pair] = time.time()
+            logger.debug(f"{self._log_prefix} {pair}: trailing_stop 청산 시각 기록")
+
         # 학습 루프: impl 호출 전에 Position 정보 보존 (impl 내에서 position=None 처리됨)
         pos_before = self._position.get(pair)
         judgment_id: int | None = pos_before.extra.get("judgment_id") if pos_before else None

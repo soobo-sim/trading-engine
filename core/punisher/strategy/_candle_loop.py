@@ -28,6 +28,13 @@ logger = logging.getLogger("core.judge.candle_loop")
 _CANDLE_POLL_INTERVAL = 60   # 초
 _SYNC_INTERVAL_CYCLES = 30   # 잔고/포지션 정합성 검사 주기 (사이클 단위, 30사이클=30분)
 
+# 박스역추세 전략 — trending 연속 N회 이상이면 오케스트레이터(JIT) 호출 skip
+# trending 체제에서 박스역추세 신호는 JIT가 100% NO_GO → LLM 비용 낭비 방지
+_BOX_TRENDING_BLOCK_MIN = 5  # 파라미터 box_trending_block_min으로도 재정의 가능
+
+# trailing_stop 청산 후 재진입 완화 윈도우 (기본 60분)
+_TRAILING_STOP_REENTRY_WINDOW_SEC = 3600
+
 
 class CandleLoopMixin:
     """캔들 모니터 루프 + 스탑로스 모니터. 접합점.
@@ -152,11 +159,35 @@ class CandleLoopMixin:
             # ══════════════════════════════════════
             # JUDGE 사이클: 시그널 계산 (extra_checks 전 — BUG-041)
             # ══════════════════════════════════════
+
+            # ── trailing_stop 청산 후 재진입 slope 완화 (포지션 없을 때만) ──
+            # trailing_stop으로 청산 후 N초 이내에 재진입 시, ema_slope_entry_min을
+            # trailing_stop_reentry_slope_min으로 완화 → 단기 눌림목 재탑승 허용
+            _effective_params = params
+            if pos is None and self._get_strategy_type() == "trend_following":
+                _last_ts = getattr(self, "_last_trailing_stop_time", {}).get(pair, 0)
+                _reentry_window = float(
+                    params.get("trailing_stop_reentry_window_sec", _TRAILING_STOP_REENTRY_WINDOW_SEC)
+                )
+                _reentry_slope = params.get("trailing_stop_reentry_slope_min")
+                if (
+                    _reentry_slope is not None
+                    and _last_ts > 0
+                    and (time.time() - _last_ts) <= _reentry_window
+                    and float(_reentry_slope) < float(params.get("ema_slope_entry_min", 0.0))
+                ):
+                    _elapsed = int(time.time() - _last_ts)
+                    logger.debug(
+                        f"{self._log_prefix} {pair}: trailing_stop 후 {_elapsed}s — "
+                        f"ema_slope_entry_min 완화 {params.get('ema_slope_entry_min')} → {_reentry_slope}"
+                    )
+                    _effective_params = {**params, "ema_slope_entry_min": float(_reentry_slope)}
+
             try:
                 signal_data = await self._compute_signal(
                     pair, basis_tf,
                     entry_price=entry_price,
-                    params=params,
+                    params=_effective_params,
                     side=pos.extra.get("side") if pos else None,
                 )
             except Exception as e:
@@ -418,6 +449,24 @@ class CandleLoopMixin:
                         self._armed_direction.pop(pair, None)
                         self._armed_expire_at.pop(pair, None)
                     continue  # WS _trigger_ws_entry가 진입 담당
+
+            # ── 박스역추세 trending 체제 조기 차단 (JIT 호출 낭비 방지) ──
+            # trending 체제가 N회 연속 지속 중이면, 박스역추세 롱/숏 신호는
+            # JIT에서 100% NO_GO → LLM 비용 낭비. 오케스트레이터 호출 전에 skip한다.
+            if (
+                self._get_strategy_type() == "box_mean_reversion"
+                and signal in ("long_setup", "short_setup")
+                and signal_data.get("regime") == "trending"
+                and signal_data.get("consecutive_count", 0)
+                    >= int(params.get("box_trending_block_min", _BOX_TRENDING_BLOCK_MIN))
+            ):
+                _cc = signal_data.get("consecutive_count", 0)
+                logger.debug(
+                    f"{self._log_prefix} {pair}: [BoxMgr] trending 연속 {_cc}회 "
+                    f"— signal={signal} JIT skip (box_trending_block_min="
+                    f"{params.get('box_trending_block_min', _BOX_TRENDING_BLOCK_MIN)})"
+                )
+                continue
 
             snapshot = await self._build_signal_snapshot(pair, signal_data, params, pos)
             result = await self._orchestrator.process(snapshot)
