@@ -28,10 +28,6 @@ logger = logging.getLogger("core.judge.candle_loop")
 _CANDLE_POLL_INTERVAL = 60   # 초
 _SYNC_INTERVAL_CYCLES = 30   # 잔고/포지션 정합성 검사 주기 (사이클 단위, 30사이클=30분)
 
-# 박스역추세 전략 — trending 연속 N회 이상이면 오케스트레이터(JIT) 호출 skip
-# trending 체제에서 박스역추세 신호는 JIT가 100% NO_GO → LLM 비용 낭비 방지
-_BOX_TRENDING_BLOCK_MIN = 5  # 파라미터 box_trending_block_min으로도 재정의 가능
-
 # trailing_stop 청산 후 재진입 완화 윈도우 (기본 60분)
 _TRAILING_STOP_REENTRY_WINDOW_SEC = 3600
 
@@ -450,21 +446,22 @@ class CandleLoopMixin:
                         self._armed_expire_at.pop(pair, None)
                     continue  # WS _trigger_ws_entry가 진입 담당
 
-            # ── 박스역추세 trending 체제 조기 차단 (JIT 호출 낭비 방지) ──
-            # trending 체제가 N회 연속 지속 중이면, 박스역추세 롱/숏 신호는
-            # JIT에서 100% NO_GO → LLM 비용 낭비. 오케스트레이터 호출 전에 skip한다.
+            # ── RegimeGate 사전 체크 — 진입 신호 + 포지션 없을 때만 ──
+            # should_allow_entry()=False면 JIT 포함 오케스트레이터 호출 전체 skip.
+            # cheap local check를 expensive remote call(JIT) 앞에 배치.
+            # (박스 trending 체제 / 추세 ranging 체제 모두 커버)
             if (
-                self._get_strategy_type() == "box_mean_reversion"
+                pos is None
                 and signal in ("long_setup", "short_setup")
-                and signal_data.get("regime") == "trending"
-                and signal_data.get("consecutive_count", 0)
-                    >= int(params.get("box_trending_block_min", _BOX_TRENDING_BLOCK_MIN))
+                and self._regime_gate is not None
+                and not self._regime_gate.should_allow_entry(self._get_strategy_type())
             ):
+                _active = self._regime_gate.active_strategy
                 _cc = signal_data.get("consecutive_count", 0)
                 logger.debug(
-                    f"{self._log_prefix} {pair}: [BoxMgr] trending 연속 {_cc}회 "
-                    f"— signal={signal} JIT skip (box_trending_block_min="
-                    f"{params.get('box_trending_block_min', _BOX_TRENDING_BLOCK_MIN)})"
+                    f"{self._log_prefix} {pair}: RegimeGate 사전 차단 "
+                    f"(active={_active}, this={self._get_strategy_type()}, "
+                    f"signal={signal}, consecutive={_cc}) — JIT skip"
                 )
                 continue
 
