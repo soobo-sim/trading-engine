@@ -356,12 +356,23 @@ class TelegramTransactionHandler(logging.Handler):
                             self._state['signal_size_pct'] = None
                         if self._domain == "judge" and self._loop and self._state['prev_signal'] is not None:
                             self._loop.create_task(self._send_signal_change())
-            # 박스 범위 파싱: "박스 ¥11,400,000~¥12,200,000"
+            # 박스 범위 파싱: "박스 ¥11,400,000~¥12,200,000" (DEBUG 레벨 로그)
             m_bounds = re.search(r'박스 ¥([\d,]+)~¥([\d,]+)', msg)
             if m_bounds:
                 self._state['box_lower'] = float(m_bounds.group(1).replace(',', ''))
                 self._state['box_upper'] = float(m_bounds.group(2).replace(',', ''))
                 self._state['box_detected'] = True
+            # candle_loop INFO 로그 포맷: "box_detected=True box_lower=xxx box_upper=yyy"
+            m_box_info = re.search(r'box_detected=(\w+)(?:\s+box_lower=([\d.]+)\s+box_upper=([\d.]+))?', msg)
+            if m_box_info:
+                bd = m_box_info.group(1) == 'True'
+                self._state['box_detected'] = bd
+                if bd and m_box_info.group(2) and m_box_info.group(3):
+                    self._state['box_lower'] = float(m_box_info.group(2))
+                    self._state['box_upper'] = float(m_box_info.group(3))
+                elif not bd:
+                    self._state['box_lower'] = None
+                    self._state['box_upper'] = None
             # 박스 미감지
             if '박스 미감지' in msg:
                 self._state['box_detected'] = False
