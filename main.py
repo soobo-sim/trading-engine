@@ -389,9 +389,11 @@ async def lifespan(app: FastAPI):
             token=_jit_token,
             timeout_sec=_jit_timeout,
         )
+        _jit_daily_limit = int(os.environ.get("JIT_DAILY_LIMIT", "200"))
         _jit_gate = JITAdvisoryGate(
             session_factory=session_factory,
             jit_client=_jit_client,
+            daily_limit=_jit_daily_limit,
         )
         _guardrail = AiGuardrails(
             session_factory=session_factory,
@@ -409,7 +411,7 @@ async def lifespan(app: FastAPI):
         box_manager.set_orchestrator(_orchestrator)
         logger.info(
             f"Execution Layer 초기화: TRADING_MODE=jit — "
-            f"JIT advisory URL={_jit_url}, timeout={_jit_timeout}s"
+            f"JIT advisory URL={_jit_url}, timeout={_jit_timeout}s, daily_limit={_jit_daily_limit}건"
         )
     else:
         logger.warning(

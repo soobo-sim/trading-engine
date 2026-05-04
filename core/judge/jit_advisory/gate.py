@@ -16,6 +16,7 @@ IDecisionMaker Protocol 구현.
 from __future__ import annotations
 
 import logging
+from datetime import date
 from typing import Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -37,6 +38,9 @@ _ENTRY_ACTIONS = frozenset({"entry_long", "entry_short", "add_position"})
 # NO_GO 직후 쿨다운 (초) — 같은 페어에서 연속 JIT 차단 시 대기
 _NOGO_COOLDOWN_SEC = 60.0
 
+# 일별 JIT 호출 상한 기본값 — 환경변수 JIT_DAILY_LIMIT으로 재정의 가능
+_DEFAULT_DAILY_LIMIT = 200
+
 
 class JITAdvisoryGate:
     """룰엔진 + JIT 자문 게이트.
@@ -49,10 +53,15 @@ class JITAdvisoryGate:
         self,
         session_factory,
         jit_client: Optional[JITAdvisoryClient] = None,
+        daily_limit: int = _DEFAULT_DAILY_LIMIT,
     ) -> None:
         self._rule = RuleBasedDecision()
         self._client = jit_client or JITAdvisoryClient()
         self._session_factory = session_factory
+        self._daily_limit = daily_limit
+        # 일별 카운터 — (날짜, 호출 수)
+        self._counter_date: date = date.today()
+        self._counter_calls: int = 0
 
     async def decide(self, snapshot: SignalSnapshot) -> Decision:
         """SignalSnapshot → Decision.
@@ -66,6 +75,23 @@ class JITAdvisoryGate:
         if rule_decision.action not in _ENTRY_ACTIONS:
             # 청산/tighten/hold — JIT 없이 즉시 통과
             return rule_decision
+
+        # ── 일별 호출 상한 체크 ─────────────────────────────
+        today = date.today()
+        if today != self._counter_date:
+            # 날짜가 바뀌면 카운터 리셋
+            self._counter_date = today
+            self._counter_calls = 0
+
+        if self._counter_calls >= self._daily_limit:
+            logger.warning(
+                f"[JIT][DailyLimit] 일별 호출 상한 도달 ({self._counter_calls}/{self._daily_limit}건) "
+                f"— {snapshot.pair} v1 룰엔진으로 폴백"
+            )
+            return modify_decision(
+                rule_decision,
+                reasoning=f"[JIT daily-limit fallback] 상한 {self._daily_limit}건 도달 — 룰엔진 결정 적용",
+            )
 
         # ── 진입 액션: JIT 자문 ──────────────────────────────
         _cid = get_judge_cycle_id() or "????"
@@ -93,6 +119,7 @@ class JITAdvisoryGate:
             f"  리스크: kill={_kill_cnt}건 연속손실={_consec_loss}회"
         )
 
+        self._counter_calls += 1
         jit_req = build_jit_request(snapshot, rule_decision)
         jit_resp: Optional[JITAdvisoryResponse] = None
         error_msg: Optional[str] = None
