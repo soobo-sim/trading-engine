@@ -1,11 +1,12 @@
 """
 GmoCoinBoxManager — GMO Coin 레버리지 박스역추세 매니저.
 
-GmoCoinTrendManager 상속. GMO Coin 어댑터/주문 시맨틱은 그대로 재사용.
+GmoCoinBaseManager 상속. GmoCoinTrendManager와 형제 관계.
+GMO Coin 어댑터/주문 시맨틱은 그대로 재사용.
 시그널 계산만 box_signals + box_detector 기반으로 오버라이드.
 
 상속 체인:
-    BaseTrendManager → MarginTrendManager → GmoCoinTrendManager → GmoCoinBoxManager
+    BaseTrendManager → MarginTrendManager → GmoCoinBaseManager → GmoCoinBoxManager
 
 핵심 차이:
     - _compute_signal: detect_box() → classify_price_in_box() 기반 시그널
@@ -34,7 +35,7 @@ from sqlalchemy import select
 
 from core.judge.analysis.box_detector import detect_box
 from core.strategy.box_signals import classify_price_in_box
-from core.strategy.plugins.gmo_coin_trend.manager import GmoCoinTrendManager
+from core.punisher.strategy.plugins.gmo_coin_base.manager import GmoCoinBaseManager
 from core.exchange.types import Position
 from core.shared.logging.context import get_judge_cycle_id
 
@@ -49,12 +50,12 @@ _DEFAULT_MIN_TOUCHES = 3
 _DEFAULT_BOX_LOOKBACK = 60
 
 
-class GmoCoinBoxManager(GmoCoinTrendManager):
+class GmoCoinBoxManager(GmoCoinBaseManager):
     """GMO Coin 레버리지 박스역추세 매니저. 롱/숏 양방향."""
 
     _task_prefix = "gmoc_box"
     _log_prefix = "[BoxMgr]"
-    # _supports_short = True — GmoCoinTrendManager에서 상속
+    # _supports_short = True — GmoCoinBaseManager에서 상속
 
     def _get_strategy_type(self) -> str:
         return "box_mean_reversion"
