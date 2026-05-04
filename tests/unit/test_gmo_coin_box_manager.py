@@ -415,123 +415,83 @@ class TestDetectExistingPositionDbGate:
 # ──────────────────────────────────────────────────────────────
 
 class TestBoxTrendingBlockSkip:
-    """_candle_loop: trending 연속 N회 이상이면 박스역추세 JIT 호출 skip."""
+    """_candle_loop: RegimeGate.should_allow_entry() 사전 체크 — JIT 포함 전체 skip."""
 
-    def _make_signal_data(self, signal: str, consecutive_count: int, regime: str = "trending") -> dict:
-        return {
-            "signal": signal,
-            "regime": regime,
-            "consecutive_count": consecutive_count,
-            "consecutive_regime": regime,
-            "current_price": 12_300_000.0,
-            "atr": 150_000.0,
-            "ema": 12_200_000.0,
-            "ema_slope_pct": 0.05,
-            "rsi": 55.0,
-            "bb_width_pct": 4.0,
-            "range_pct": 0.0,
-            "latest_candle_open_time": "2026-05-03T00:00:00Z",
-            "trending_score": 2,
-            "exit_signal": {"action": "hold"},
-            "candles": [],
-        }
+    def test_bt01_gate_blocks_box_in_trending(self):
+        """BT-01: trending 체제(active=trend_following) → box_mean_reversion 차단."""
+        from core.punisher.execution.regime_gate import RegimeGate
+        gate = RegimeGate("btc_jpy")
+        for _ in range(3):
+            gate.update_regime("trending")
+        assert gate.active_strategy == "trend_following"
 
-    @pytest.mark.asyncio
-    async def test_bt01_trending_consecutive_above_threshold_skips_jit(self):
-        """BT-01: trending 연속 5회 이상 + long_setup → orchestrator 미호출."""
         mgr = make_box_manager()
-        orchestrator = AsyncMock()
-        orchestrator.process = AsyncMock(return_value=MagicMock(action="hold"))
-        mgr._orchestrator = orchestrator
+        mgr.set_regime_gate(gate)
+
+        # 새 사전 체크 조건 검증
+        pos = None
+        signal = "long_setup"
+        should_skip = (
+            pos is None
+            and signal in ("long_setup", "short_setup")
+            and mgr._regime_gate is not None
+            and not mgr._regime_gate.should_allow_entry(mgr._get_strategy_type())
+        )
+        assert should_skip  # trending 체제 → 박스 skip
+
+    def test_bt02_gate_allows_box_in_ranging(self):
+        """BT-02: ranging 체제(active=box_mean_reversion) → box_mean_reversion 허용."""
+        from core.punisher.execution.regime_gate import RegimeGate
+        gate = RegimeGate("btc_jpy")
+        for _ in range(3):
+            gate.update_regime("ranging")
+        assert gate.active_strategy == "box_mean_reversion"
+
+        mgr = make_box_manager()
+        mgr.set_regime_gate(gate)
+
+        pos = None
+        signal = "long_setup"
+        should_skip = (
+            pos is None
+            and signal in ("long_setup", "short_setup")
+            and mgr._regime_gate is not None
+            and not mgr._regime_gate.should_allow_entry(mgr._get_strategy_type())
+        )
+        assert not should_skip  # ranging 체제 → skip 안 함
+
+    def test_bt03_no_gate_never_skipped(self):
+        """BT-03: regime_gate=None → 사전 체크 없음 → skip 안 함."""
+        mgr = make_box_manager()
         mgr._regime_gate = None
-        mgr._position["btc_jpy"] = None
-        mgr._pending_limit_orders = {}
-        mgr._armed_entry_ema = {}
-        mgr._armed_direction = {}
-        mgr._armed_expire_at = {}
-        mgr._ema_slope_last_key = {}
-        mgr._last_signal = {}
-        mgr._last_rsi = {}
-        mgr._last_atr = {}
-        mgr._latest_price = {}
-        mgr._sync_counter = {}
-        mgr._paper_executors = {}
-        mgr._params = {"btc_jpy": {"basis_timeframe": "4h"}}
 
-        signal_data = self._make_signal_data("long_setup", consecutive_count=6)
-
-        with (
-            patch.object(mgr, "_compute_signal", return_value=signal_data),
-            patch.object(mgr, "_on_candle_extra_checks", return_value=True),
-            patch.object(mgr, "_build_signal_snapshot", return_value=MagicMock()),
-            patch.object(mgr, "_on_signal_computed", side_effect=lambda p, s, sd, pos: s),
-            patch.object(mgr, "_check_exit_warning", side_effect=lambda p, s, rp, e, pos, atr=None: s),
-            patch.object(mgr, "_handle_execution_result", return_value=False),
-        ):
-            # 루프를 1회만 실행하기 위해 asyncio.CancelledError 예외 주입
-            async def run_one_cycle():
-                mgr._on_candle_extra_checks = AsyncMock(return_value=True)
-                # simulate one iteration of _candle_monitor
-                from core.punisher.strategy._candle_loop import _BOX_TRENDING_BLOCK_MIN
-                params = mgr._params.get("btc_jpy", {})
-                assert mgr._get_strategy_type() == "box_mean_reversion"
-                assert signal_data.get("regime") == "trending"
-                assert signal_data.get("consecutive_count", 0) >= int(
-                    params.get("box_trending_block_min", _BOX_TRENDING_BLOCK_MIN)
-                )
-
-            await run_one_cycle()
-            # orchestrator는 호출되지 않아야 함
-            orchestrator.process.assert_not_called()
-
-    def test_bt02_trending_below_threshold_allows_jit(self):
-        """BT-02: trending 연속 4회 (threshold 미달) → JIT skip 안 함."""
-        from core.punisher.strategy._candle_loop import _BOX_TRENDING_BLOCK_MIN
-        mgr = make_box_manager()
-        params = {}
+        pos = None
         signal = "long_setup"
-        signal_data = self._make_signal_data(signal, consecutive_count=4)
-
-        # 차단 조건 미충족 확인
         should_skip = (
-            mgr._get_strategy_type() == "box_mean_reversion"
+            pos is None
             and signal in ("long_setup", "short_setup")
-            and signal_data.get("regime") == "trending"
-            and signal_data.get("consecutive_count", 0)
-                >= int(params.get("box_trending_block_min", _BOX_TRENDING_BLOCK_MIN))
+            and mgr._regime_gate is not None  # None → 조건 False
+            and not mgr._regime_gate.should_allow_entry(mgr._get_strategy_type())
         )
-        assert not should_skip  # 4 < 5 → skip 안 함
+        assert not should_skip  # gate 없음 → skip 안 함
 
-    def test_bt03_ranging_regime_never_skipped(self):
-        """BT-03: ranging 체제에서는 consecutive 무관하게 skip 안 함."""
-        from core.punisher.strategy._candle_loop import _BOX_TRENDING_BLOCK_MIN
-        mgr = make_box_manager()
-        params = {}
+    def test_bt04_trend_strategy_blocked_in_ranging(self):
+        """BT-04: ranging 체제 → trend_following도 동일 메커니즘으로 차단."""
+        from core.punisher.execution.regime_gate import RegimeGate
+        from core.punisher.strategy.plugins.gmo_coin_base.manager import GmoCoinBaseManager
+        gate = RegimeGate("btc_jpy")
+        for _ in range(3):
+            gate.update_regime("ranging")
+        assert gate.active_strategy == "box_mean_reversion"
+
+        # trend_following 매니저가 같은 gate 공유 시
+        strategy_type = "trend_following"
+        pos = None
         signal = "long_setup"
-        signal_data = self._make_signal_data(signal, consecutive_count=100, regime="ranging")
-
         should_skip = (
-            mgr._get_strategy_type() == "box_mean_reversion"
+            pos is None
             and signal in ("long_setup", "short_setup")
-            and signal_data.get("regime") == "trending"
-            and signal_data.get("consecutive_count", 0)
-                >= int(params.get("box_trending_block_min", _BOX_TRENDING_BLOCK_MIN))
+            and gate is not None
+            and not gate.should_allow_entry(strategy_type)
         )
-        assert not should_skip  # ranging → skip 안 함
-
-    def test_bt04_custom_threshold_via_param(self):
-        """BT-04: box_trending_block_min 파라미터로 threshold 재정의 가능."""
-        from core.punisher.strategy._candle_loop import _BOX_TRENDING_BLOCK_MIN
-        mgr = make_box_manager()
-        params = {"box_trending_block_min": 10}
-        signal = "long_setup"
-        signal_data = self._make_signal_data(signal, consecutive_count=7)
-
-        should_skip = (
-            mgr._get_strategy_type() == "box_mean_reversion"
-            and signal in ("long_setup", "short_setup")
-            and signal_data.get("regime") == "trending"
-            and signal_data.get("consecutive_count", 0)
-                >= int(params.get("box_trending_block_min", _BOX_TRENDING_BLOCK_MIN))
-        )
-        assert not should_skip  # 7 < 10 (커스텀 threshold) → skip 안 함
+        assert should_skip  # ranging → 추세 전략도 차단
