@@ -197,6 +197,8 @@ class TelegramTransactionHandler(logging.Handler):
             'box_upper': None,   # 박스 상단가
             'box_lower': None,   # 박스 하단가
             'box_detected': False,  # 박스 감지 여부
+            # RegimeGate active_strategy (DB 복원 or 로그 파싱으로 주입)
+            'active_strategy': None,  # 'trend_following' | 'box_mean_reversion' | None
             # 진입/청산 이벤트 (즉시 전송 후 None으로 클리어)
             'entry_event': None,
             'close_event': None,
@@ -431,6 +433,12 @@ class TelegramTransactionHandler(logging.Handler):
             self._state['decision_size_pct'] = float(m.group(1)) / 100
             self._state['decision_action'] = m.group(2)
             self._state['jit_reasoning'] = m.group(3).strip()[:120]
+
+        # RegimeGate active_strategy 파싱 ("현재 활성: X 유지" 포맷)
+        m = re.search(r'현재 활성: ([\w_]+|None) 유지', msg)
+        if m:
+            raw = m.group(1)
+            self._state['active_strategy'] = None if raw == 'None' else raw
 
         # regime (4H 체제 판정)
         m = re.search(r'regime=(\w+).*BB폭 ([\d.]+)%.*가격범위 ([\d.]+)%.*?(\w+) 연속 (\d+)회', msg)
@@ -794,12 +802,11 @@ class TelegramTransactionHandler(logging.Handler):
             if _cur and _ema:
                 regime_kr += " ↑" if _cur > _ema else " ↓"
 
-        # gate_status: RegimeGate + 실제 signal 상태를 모두 반영
+        # gate_status: RegimeGate active_strategy 기반
+        # active_strategy가 None이면 warm-up 또는 체제 전환 대기(unclear) → 양쪽 차단
+        active_strategy = self._state.get('active_strategy')
         _signal_now = self._state.get('signal')
-        regime_gate_ok = (
-            (regime == 'trending' and consecutive >= 3) or
-            (regime == 'ranging' and consecutive >= 3)
-        )
+        regime_gate_ok = active_strategy is not None
         gate_icon = "✅" if regime_gate_ok else "❌"
         if not regime_gate_ok:
             gate_status = "진입 차단 중"
@@ -807,7 +814,7 @@ class TelegramTransactionHandler(logging.Handler):
             gate_status = "신호 발생 (롱)"
         elif _signal_now == 'short_setup':
             gate_status = "신호 발생 (숏)"
-        elif regime == 'ranging':
+        elif active_strategy == 'box_mean_reversion':
             gate_status = "체제OK · 박스 대기"
         else:
             gate_status = "체제OK · 신호 대기"
@@ -885,8 +892,7 @@ class TelegramTransactionHandler(logging.Handler):
         _entry_tf = self._state.get('entry_timeframe')  # '1h' | None
         _tf_label = " (1H)" if _entry_tf and _entry_tf.lower() in ('1h', '1') else ""
 
-        if regime == 'ranging':
-            # ── 박스역추세 조건 ─────────────────────────────────────────
+        if active_strategy == 'box_mean_reversion':
             # 방향: signal 기반 (near_lower→롱, near_upper→숏)
             _sig = self._state.get('signal')
             if _sig == 'long_setup':
@@ -1023,7 +1029,7 @@ class TelegramTransactionHandler(logging.Handler):
         signal = self._state.get('signal')
 
         # 결론
-        if regime == 'ranging':
+        if active_strategy == 'box_mean_reversion':
             _unmet_labels = ['박스감지', '가격위치', 'RSI']
         else:
             _unmet_labels = ['가격/EMA', 'EMA기울기', 'RSI', '추세강도']
@@ -1072,10 +1078,18 @@ class TelegramTransactionHandler(logging.Handler):
         else:
             sig_block = "시그널: 데이터 없음"
 
-        # 체제 지표 상세 (BB폭 / 가격범위)
+        # 체제 지표 상세 (BB폭 / 가격범위 + active_strategy 불일치 표시)
         bb = self._state.get('regime_bb_width')
         rng = self._state.get('regime_range_pct')
         regime_detail = f"\n  BB폭 {bb:.1f}% / 범위 {rng:.1f}%" if bb is not None and rng is not None else ""
+        # active_strategy와 현재 regime이 불일치할 때 전환 대기 표시
+        _REGIME_TO_STRATEGY_MAP = {'trending': 'trend_following', 'ranging': 'box_mean_reversion'}
+        _STRATEGY_KR_MAP = {'trend_following': '추세추종', 'box_mean_reversion': '박스역추세'}
+        _active_strat = self._state.get('active_strategy')
+        _expected_strat = _REGIME_TO_STRATEGY_MAP.get(regime or '')
+        if _active_strat and _expected_strat and _active_strat != _expected_strat:
+            _active_kr = _STRATEGY_KR_MAP.get(_active_strat, _active_strat)
+            regime_detail += f"\n  ⚠️ 활성: {_active_kr} (전환 대기 {consecutive}/3회)"
 
         # 승인 줄 제거: 신호+판단이 같은 사이클에서 연속 실행되므로 "대기" 상태는 실제로 없음
         # 승인 정도 정보는 결론에 이미 포함(단 MANUAL모드에서만 의미 있는 도구)
@@ -1342,7 +1356,7 @@ def seed_telegram_strategy_params(params: dict) -> None:
                     h._state[param_key] = str(val)
 
 
-def seed_telegram_regime_state(regime: str | None, consecutive: int) -> None:
+def seed_telegram_regime_state(regime: str | None, consecutive: int, active_strategy: str | None = None) -> None:
     """서비스 재시작 후 RegimeGate DB 복원 상태를 핸들러 _state에 즉시 반영.
 
     정기 요약 전송 전에 호출하면 '미확정 · 0회' 표시를 방지할 수 있다.
@@ -1351,6 +1365,7 @@ def seed_telegram_regime_state(regime: str | None, consecutive: int) -> None:
     Args:
         regime: 'trending' | 'ranging' | 'unclear' | None
         consecutive: 연속 횟수 (DB의 consecutive_count)
+        active_strategy: 'trend_following' | 'box_mean_reversion' | None
     """
     if not regime:
         return
@@ -1358,6 +1373,8 @@ def seed_telegram_regime_state(regime: str | None, consecutive: int) -> None:
         if isinstance(h, TelegramTransactionHandler):
             h._state['regime_status'] = regime
             h._state['regime_consecutive'] = consecutive
+            if active_strategy is not None:
+                h._state['active_strategy'] = active_strategy
 
 
 class TelegramEvolutionHandler(logging.Handler):

@@ -268,6 +268,7 @@ async def lifespan(app: FastAPI):
         seed_telegram_regime_state(
             _gate_state.get("consecutive_regime"),
             _gate_state.get("consecutive_count", 0),
+            active_strategy=_regime_gate.active_strategy,
         )
     else:
         logger.info("RegimeGate DB 상태 없음 — warm-up 시작")
