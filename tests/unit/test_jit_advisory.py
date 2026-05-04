@@ -701,3 +701,85 @@ async def test_tc25_add_position_triggers_jit():
 
     assert dec.action == "add_position"
     mock_client.request.assert_awaited_once()
+
+
+# ──────────────────────────────────────────────────────────────
+# TC-26: 일별 상한 도달 → v1 폴백
+# ──────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_tc26_daily_limit_fallback():
+    """일별 호출 상한 도달 시 JIT를 호출하지 않고 룰엔진 결정을 그대로 반환한다."""
+    mock_client = AsyncMock(spec=JITAdvisoryClient)
+    mock_client.request = AsyncMock(return_value=_jit_response(decision="GO"))
+
+    mock_session_factory = MagicMock()
+    mock_session = AsyncMock()
+    mock_session_factory.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session_factory.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    gate = JITAdvisoryGate(
+        session_factory=mock_session_factory,
+        jit_client=mock_client,
+        daily_limit=3,
+    )
+    rule_dec = _rule_decision(action="entry_long")
+    gate._rule = MagicMock()
+    gate._rule.decide = AsyncMock(return_value=rule_dec)
+
+    # 상한까지 정상 호출
+    for _ in range(3):
+        dec = await gate.decide(_snapshot())
+        assert dec.action == "entry_long"
+        assert "[JIT daily-limit fallback]" not in dec.reasoning
+
+    # 상한 초과 → v1 폴백
+    dec = await gate.decide(_snapshot())
+    assert dec.action == "entry_long"
+    assert "[JIT daily-limit fallback]" in dec.reasoning
+    # 4번째는 JIT 호출 없어야 함
+    assert mock_client.request.await_count == 3
+
+
+# ──────────────────────────────────────────────────────────────
+# TC-27: 일별 상한 — 날짜 바뀌면 카운터 리셋
+# ──────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_tc27_daily_limit_resets_on_new_day():
+    """자정이 지나 날짜가 바뀌면 카운터가 리셋된다."""
+    from datetime import date
+    from unittest.mock import patch as _patch
+
+    mock_client = AsyncMock(spec=JITAdvisoryClient)
+    mock_client.request = AsyncMock(return_value=_jit_response(decision="GO"))
+
+    mock_session_factory = MagicMock()
+    mock_session = AsyncMock()
+    mock_session_factory.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session_factory.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    gate = JITAdvisoryGate(
+        session_factory=mock_session_factory,
+        jit_client=mock_client,
+        daily_limit=1,
+    )
+    rule_dec = _rule_decision(action="entry_long")
+    gate._rule = MagicMock()
+    gate._rule.decide = AsyncMock(return_value=rule_dec)
+
+    # 오늘 상한 채움
+    await gate.decide(_snapshot())
+    dec = await gate.decide(_snapshot())
+    assert "[JIT daily-limit fallback]" in dec.reasoning
+
+    # 날짜 바뀜 → 카운터 리셋 → 다시 JIT 호출
+    tomorrow = date(gate._counter_date.year, gate._counter_date.month, gate._counter_date.day)
+    from datetime import timedelta
+    tomorrow = tomorrow + timedelta(days=1)
+    with _patch("core.judge.jit_advisory.gate.date") as mock_date:
+        mock_date.today.return_value = tomorrow
+        dec = await gate.decide(_snapshot())
+    assert dec.action == "entry_long"
+    assert "[JIT daily-limit fallback]" not in dec.reasoning
+    assert mock_client.request.await_count == 2
