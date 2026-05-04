@@ -104,7 +104,7 @@ async def test_err578_01_telegram_sent_on_sync_failure():
     mgr._adapter.change_losscut_price = AsyncMock(return_value=False)  # 실패
 
     with patch(
-        "core.punisher.strategy.plugins.gmo_coin_trend.manager.asyncio.ensure_future"
+        "core.punisher.strategy.plugins.gmo_coin_base.manager.asyncio.ensure_future"
     ) as mock_future:
         mock_future.return_value = None
 
@@ -128,7 +128,7 @@ async def test_err578_02_no_telegram_on_sync_success():
     mgr._adapter.change_losscut_price = AsyncMock(return_value=True)  # 성공
 
     with patch(
-        "core.punisher.strategy.plugins.gmo_coin_trend.manager.asyncio.ensure_future"
+        "core.punisher.strategy.plugins.gmo_coin_base.manager.asyncio.ensure_future"
     ) as mock_future:
         await mgr._sync_losscut_price("btc_jpy", 10_500_000.0)
 

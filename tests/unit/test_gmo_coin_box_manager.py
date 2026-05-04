@@ -363,7 +363,7 @@ class TestDetectExistingPositionDbGate:
 
         fake_position = Position(pair="btc_jpy", entry_price=10_000_000, entry_amount=0.004)
         with patch(
-            "core.strategy.plugins.gmo_coin_box.manager.GmoCoinTrendManager._detect_existing_position",
+            "core.punisher.strategy.plugins.gmo_coin_base.manager.GmoCoinBaseManager._detect_existing_position",
             new=AsyncMock(return_value=fake_position),
         ):
             result = await mgr._detect_existing_position("btc_jpy")
@@ -379,7 +379,7 @@ class TestDetectExistingPositionDbGate:
 
         fake_position = Position(pair="btc_jpy", entry_price=10_000_000, entry_amount=0.004)
         with patch(
-            "core.strategy.plugins.gmo_coin_box.manager.GmoCoinTrendManager._detect_existing_position",
+            "core.punisher.strategy.plugins.gmo_coin_base.manager.GmoCoinBaseManager._detect_existing_position",
             new=AsyncMock(return_value=fake_position),
         ):
             result = await mgr._detect_existing_position("btc_jpy")
@@ -393,7 +393,7 @@ class TestDetectExistingPositionDbGate:
         mgr._session_factory = self._make_session_factory(db_row_id=7)
 
         with patch(
-            "core.strategy.plugins.gmo_coin_box.manager.GmoCoinTrendManager._detect_existing_position",
+            "core.punisher.strategy.plugins.gmo_coin_base.manager.GmoCoinBaseManager._detect_existing_position",
             new=AsyncMock(return_value=None),
         ):
             result = await mgr._detect_existing_position("btc_jpy")
