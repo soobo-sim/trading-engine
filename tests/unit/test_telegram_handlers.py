@@ -955,12 +955,13 @@ class TestSendStopTighten:
 class TestGateStatusThreeLevel:
     """GS-01~GS-04: 체제+시그널 상태에 따른 gate_status 3단계 표현 확인."""
 
-    def _make_handler(self, regime: str, consecutive: int, signal: str | None) -> "TelegramTransactionHandler":
+    def _make_handler(self, regime: str, consecutive: int, signal: str | None, active_strategy: str | None = 'trend_following') -> "TelegramTransactionHandler":
         h = TelegramTransactionHandler("tok", "chat", exchange="GMO", domain="judge")
         h._state.update({
             'regime_status': regime,
             'regime_consecutive': consecutive,
             'signal': signal,
+            'active_strategy': active_strategy,
             'current_price': 12_000_000.0,
             'ema_price': 12_100_000.0,
             'ema_slope_pct': -0.01,
@@ -998,8 +999,8 @@ class TestGateStatusThreeLevel:
 
     @pytest.mark.asyncio
     async def test_gs04_insufficient_consecutive_shows_blocked(self):
-        """GS-04: trending ×2 (warm-up 미완료) → '진입 차단 중' 표시."""
-        h = self._make_handler('trending', 2, 'long_setup')
+        """GS-04: active_strategy=None (warm-up 미완료) → '진입 차단 중' 표시."""
+        h = self._make_handler('trending', 2, 'long_setup', active_strategy=None)
         with patch("core.shared.logging.telegram_handlers._send_telegram", new_callable=AsyncMock) as m:
             await h._send_periodic_summary()
             text = m.call_args[0][2]
@@ -1279,6 +1280,7 @@ class TestBoxMgrSignalFilter:
             'regime_status': 'ranging',
             'regime_consecutive': 4,
             'signal': 'long_setup',
+            'active_strategy': 'box_mean_reversion',
             'current_price': 11_900_000.0,
             'box_lower': 11_800_000.0,
             'box_upper': 12_200_000.0,
